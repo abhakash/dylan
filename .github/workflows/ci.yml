@@ -1,0 +1,137 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "30 21 * * *" # nightly ~03:00 IST (21:30 UTC)
+
+permissions:
+  contents: read
+  pull-requests: read
+  checks: write
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── Wrapper validation (SOTA supply-chain) ──────────────────────────────
+  wrapper-validation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: gradle/actions/wrapper-validation@v4
+
+  lint:
+    needs: wrapper-validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+          cache-encryption-key: ${{ secrets.GRADLE_ENCRYPTION_KEY }}
+      - name: ktlint + detekt + Android lint
+        run: ./gradlew ktlintCheck detekt :androidApp:lintDebug --no-configuration-cache --continue
+      - name: Upload lint reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lint-reports
+          path: |
+            **/build/reports/lint-results-debug.html
+            **/build/reports/detekt/detekt.html
+            **/build/reports/ktlint/**
+          if-no-files-found: ignore
+
+  test:
+    needs: wrapper-validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+      - name: JVM tests + probeCi + contract drift (rerun-tasks, no UP-TO-DATE)
+        run: ./gradlew :shared:jvmTest --rerun-tasks :shared:probeCi :shared:contractDrift --no-configuration-cache
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jvmTest-results
+          path: |
+            shared/build/test-results/**
+            shared/build/reports/tests/**
+          if-no-files-found: ignore
+
+  android:
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # for versionCode commit-count
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+      - name: Assemble debug + release (R8) — version from VERSION file + commit count
+        run: ./gradlew :androidApp:assembleDebug :androidApp:assembleRelease --no-configuration-cache
+      - name: Print version
+        run: |
+          cat VERSION
+          echo "versionCode=$(grep -o 'versionCode = .*' androidApp/build.gradle.kts | head -1)"
+          ls -lh androidApp/build/outputs/apk/debug/*.apk androidApp/build/outputs/apk/release/*.apk || true
+          sha256sum androidApp/build/outputs/apk/debug/*.apk androidApp/build/outputs/apk/release/*.apk || shasum -a 256 androidApp/build/outputs/apk/debug/*.apk || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apks
+          path: |
+            androidApp/build/outputs/apk/debug/*.apk
+            androidApp/build/outputs/apk/release/*.apk
+            androidApp/build/outputs/mapping/release/mapping.txt
+          if-no-files-found: ignore
+
+  ios-klib:
+    needs: wrapper-validation
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+      - name: Compile iOS klibs (no Xcode framework link)
+        run: ./gradlew :shared:compileKotlinIosSimulatorArm64 :shared:compileKotlinIosArm64 --no-configuration-cache
+
+  # ── Nightly live probe (only on schedule) ──────────────────────────────
+  nightly-probe-local:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Fast live probe (structural + catalog sanity)
+        run: ./gradlew :shared:probeLocal -PprobeFast --no-configuration-cache

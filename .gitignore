@@ -1,0 +1,67 @@
+# Signing material — NEVER commit
+keystore.properties
+*.keystore
+!debug.keystore
+*.jks
+
+# Gradle / Kotlin / KMP
+.gradle/
+.kotlin/
+build/
+out/
+shared/build/
+androidApp/build/
+.gradle-home/
+.kotlin-home/
+gradle/wrapper/gradle-wrapper.jar
+
+# Local env / secrets
+local.properties
+*.env
+.DS_Store
+*.hprof
+
+# IDE — JetBrains / VS Code
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+*.code-workspace
+
+# Xcode / iOS
+iosApp/build/
+iosApp/DerivedData/
+iosApp/*.xcworkspace/xcuserdata/
+iosApp/*.xcodeproj/xcuserdata/
+iosApp/*.xcodeproj/project.xcworkspace/xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+DerivedData/
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Coverage / reports
+.coverage/
+coverage.xml
+*.lcov
+build/reports/
+build/test-results/
+
+# OS
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Tools / temp
+/tmp/
+*.tmp
+*.log
+/har/*.log
+
+# Dylan specifics — keep HAR fixtures but ignore large scratch
+# (HARs are evidence, keep)  — no ignore for *.har
+
+# Version bump artifacts (generated)
+VERSION.bak

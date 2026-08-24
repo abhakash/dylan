@@ -1,0 +1,19 @@
+[exp] fixture-derived families: [SEARCH_ENVELOPE, FULL_SONG, ALBUM_ENVELOPE, MINI_CARD]
+[net] search.getResults status=200 426ms chars=73722
+[net] content.getTopSearches status=200 102ms chars=3442
+[net] content.getTrending status=200 114ms chars=24040
+[map] search.getResults raw=20 distinct=20 mapped=20 total=5211 page=1
+[map] topSearches decoded=10 mapped=10
+[map] topSearches types={song=6, album=3, artist=1}
+[map] trending decoded=24 mapped=24
+[map] trending types={album=24}
+[net] webapi.get album status=200 106ms chars=24627
+[map] webapi.get album 'Musafir Cafe (Songs from the Netflix Series)' songs=6
+=== DYLAN contract-drift @ 2026-08-22T14:22:32.139383Z ===
+--- drift findings: 2 (field | kind | sample) ---
+FULL_SONG.more_info.lyrics_id | NEW_FIELD | e.g. 
+SEARCH_ENVELOPE.results.more_info.lyrics_id | NEW_FIELD | e.g. 
+summary NEW_FIELD=2
+--- endpoints reachable: 3/3 ---
+
+(invocation: ./gradlew :shared:contractDrift --rerun-tasks --no-configuration-cache · exit=0 · 2026-08-22)

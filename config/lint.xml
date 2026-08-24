@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<lint>
+    <!-- SOTA: fail on NewApi, allow R8 minify warnings -->
+    <issue id="NewApi" severity="error" />
+    <issue id="UnusedResources" severity="warning" />
+    <!-- Compose: allow missing preview -->
+    <issue id="MissingPreview" severity="ignore" />
+</lint>

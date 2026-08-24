@@ -1,0 +1,560 @@
+// !$*UTF8*$!
+{
+    archiveVersion = 1;
+    classes = {
+    };
+    objectVersion = 56;
+    objects = {
+
+/* Begin PBXBuildFile section */
+        D11100000000000000000000 /* DylanApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = C11100000000000000000000 /* DylanApp.swift */; };
+        D11200000000000000000000 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C11200000000000000000000 /* RootView.swift */; };
+        D21100000000000000000000 /* NativeAudioOutputImpl.swift in Sources */ = {isa = PBXBuildFile; fileRef = C21100000000000000000000 /* NativeAudioOutputImpl.swift */; };
+        D21200000000000000000000 /* NowPlayingController.swift in Sources */ = {isa = PBXBuildFile; fileRef = C21200000000000000000000 /* NowPlayingController.swift */; };
+        D31100000000000000000000 /* DylanBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = C31100000000000000000000 /* DylanBridge.swift */; };
+        D41100000000000000000000 /* Thumbnailer.swift in Sources */ = {isa = PBXBuildFile; fileRef = C41100000000000000000000 /* Thumbnailer.swift */; };
+        D51100000000000000000000 /* Stores.swift in Sources */ = {isa = PBXBuildFile; fileRef = C51100000000000000000000 /* Stores.swift */; };
+        D61100000000000000000000 /* Tokens.swift in Sources */ = {isa = PBXBuildFile; fileRef = C61100000000000000000000 /* Tokens.swift */; };
+        D61200000000000000000000 /* Components.swift in Sources */ = {isa = PBXBuildFile; fileRef = C61200000000000000000000 /* Components.swift */; };
+        D61300000000000000000000 /* Screens.swift in Sources */ = {isa = PBXBuildFile; fileRef = C61300000000000000000000 /* Screens.swift */; };
+        D61400000000000000000000 /* NowPlayingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C61400000000000000000000 /* NowPlayingView.swift */; };
+        D71100000000000000000000 /* shared.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = C80100000000000000000000 /* shared.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+/* End PBXBuildFile section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+        E10400000000000000000000 /* Embed Frameworks */ = {
+            isa = PBXCopyFilesBuildPhase;
+            buildActionMask = 2147483647;
+            dstPath = "";
+            dstSubfolderSpec = 10;
+            files = (
+                D71100000000000000000000 /* shared.framework in Embed Frameworks */,
+            );
+            name = "Embed Frameworks";
+            runOnlyForDeploymentPostprocessing = 0;
+        };
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+        A10400000000000000000000 /* iosApp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = iosApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
+        C11100000000000000000000 /* DylanApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DylanApp.swift; sourceTree = "<group>"; };
+        C11200000000000000000000 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
+        C21100000000000000000000 /* NativeAudioOutputImpl.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeAudioOutputImpl.swift; sourceTree = "<group>"; };
+        C21200000000000000000000 /* NowPlayingController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NowPlayingController.swift; sourceTree = "<group>"; };
+        C31100000000000000000000 /* DylanBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DylanBridge.swift; sourceTree = "<group>"; };
+        C41100000000000000000000 /* Thumbnailer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Thumbnailer.swift; sourceTree = "<group>"; };
+        C51100000000000000000000 /* Stores.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Stores.swift; sourceTree = "<group>"; };
+        C61100000000000000000000 /* Tokens.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Tokens.swift; sourceTree = "<group>"; };
+        C61200000000000000000000 /* Components.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Components.swift; sourceTree = "<group>"; };
+        C61300000000000000000000 /* Screens.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Screens.swift; sourceTree = "<group>"; };
+        C61400000000000000000000 /* NowPlayingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NowPlayingView.swift; sourceTree = "<group>"; };
+        C70100000000000000000000 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+        C80100000000000000000000 /* shared.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; lastKnownFileType = wrapper.framework; name = shared.framework; path = shared.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+        E10200000000000000000000 /* Frameworks */ = {
+            isa = PBXFrameworksBuildPhase;
+            buildActionMask = 2147483647;
+            files = (
+            );
+            runOnlyForDeploymentPostprocessing = 0;
+        };
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+        A10200000000000000000000 /* dylan */ = {
+            isa = PBXGroup;
+            children = (
+                B00100000000000000000000 /* iosApp */,
+                A10300000000000000000000 /* Products */,
+            );
+            name = dylan;
+            sourceTree = "<group>";
+        };
+        A10300000000000000000000 /* Products */ = {
+            isa = PBXGroup;
+            children = (
+                A10400000000000000000000 /* iosApp.app */,
+            );
+            name = Products;
+            sourceTree = "<group>";
+        };
+        B00100000000000000000000 /* iosApp */ = {
+            isa = PBXGroup;
+            children = (
+                C70100000000000000000000 /* Info.plist */,
+                B10100000000000000000000 /* App */,
+                B20100000000000000000000 /* Audio */,
+                B30100000000000000000000 /* Bridge */,
+                B40100000000000000000000 /* Imaging */,
+                B50100000000000000000000 /* Stores */,
+                B60100000000000000000000 /* Views */,
+            );
+            path = iosApp;
+            sourceTree = "<group>";
+        };
+        B10100000000000000000000 /* App */ = {
+            isa = PBXGroup;
+            children = (
+                C11100000000000000000000 /* DylanApp.swift */,
+                C11200000000000000000000 /* RootView.swift */,
+            );
+            path = App;
+            sourceTree = "<group>";
+        };
+        B20100000000000000000000 /* Audio */ = {
+            isa = PBXGroup;
+            children = (
+                C21100000000000000000000 /* NativeAudioOutputImpl.swift */,
+                C21200000000000000000000 /* NowPlayingController.swift */,
+            );
+            path = Audio;
+            sourceTree = "<group>";
+        };
+        B30100000000000000000000 /* Bridge */ = {
+            isa = PBXGroup;
+            children = (
+                C31100000000000000000000 /* DylanBridge.swift */,
+            );
+            path = Bridge;
+            sourceTree = "<group>";
+        };
+        B40100000000000000000000 /* Imaging */ = {
+            isa = PBXGroup;
+            children = (
+                C41100000000000000000000 /* Thumbnailer.swift */,
+            );
+            path = Imaging;
+            sourceTree = "<group>";
+        };
+        B50100000000000000000000 /* Stores */ = {
+            isa = PBXGroup;
+            children = (
+                C51100000000000000000000 /* Stores.swift */,
+            );
+            path = Stores;
+            sourceTree = "<group>";
+        };
+        B60100000000000000000000 /* Views */ = {
+            isa = PBXGroup;
+            children = (
+                C61100000000000000000000 /* Tokens.swift */,
+                C61200000000000000000000 /* Components.swift */,
+                C61300000000000000000000 /* Screens.swift */,
+                C61400000000000000000000 /* NowPlayingView.swift */,
+            );
+            path = Views;
+            sourceTree = "<group>";
+        };
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+        F00100000000000000000000 /* iosApp */ = {
+            isa = PBXNativeTarget;
+            buildConfigurationList = G00200000000000000000000 /* Build configuration list for PBXNativeTarget "iosApp" */;
+            buildPhases = (
+                E10300000000000000000000 /* Build Kotlin framework */,
+                E10100000000000000000000 /* Sources */,
+                E10200000000000000000000 /* Frameworks */,
+                E10400000000000000000000 /* Embed Frameworks */,
+            );
+            buildRules = (
+            );
+            dependencies = (
+            );
+            name = iosApp;
+            productName = iosApp;
+            productReference = A10400000000000000000000 /* iosApp.app */;
+            productType = "com.apple.product-type.application";
+        };
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+        A10100000000000000000000 /* Project object */ = {
+            isa = PBXProject;
+            attributes = {
+                BuildIndependentTargetsInParallel = 1;
+                LastSwiftUpdateCheck = 1620;
+                LastUpgradeCheck = 2600;
+            };
+            buildConfigurationList = G00100000000000000000000 /* Build configuration list for PBXProject "iosApp" */;
+            compatibilityVersion = "Xcode 14.0";
+            developmentRegion = en;
+            hasScannedForEncodings = 0;
+            knownRegions = (
+                en,
+                Base,
+            );
+            mainGroup = A10200000000000000000000 /* dylan */;
+            productRefGroup = A10300000000000000000000 /* Products */;
+            projectDirPath = "";
+            projectRoot = "";
+            targets = (
+                F00100000000000000000000 /* iosApp */,
+            );
+        };
+/* End PBXProject section */
+
+/* Begin PBXShellScriptBuildPhase section */
+        E10300000000000000000000 /* Build Kotlin framework */ = {
+            isa = PBXShellScriptBuildPhase;
+            alwaysOutOfDate = 1;
+            buildActionMask = 2147483647;
+            files = (
+            );
+            inputPaths = (
+            );
+            name = "Build Kotlin framework";
+            outputPaths = (
+            );
+            runOnlyForDeploymentPostprocessing = 0;
+            shellPath = /bin/zsh;
+            shellScript = "cd \"$SRCROOT/..\"\nexport JAVA_HOME=\"/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home\"\n./gradlew :shared:embedAndSignAppleFrameworkForXcode --no-configuration-cache || exit 1\n";
+        };
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+        E10100000000000000000000 /* Sources */ = {
+            isa = PBXSourcesBuildPhase;
+            buildActionMask = 2147483647;
+            files = (
+                D11100000000000000000000 /* DylanApp.swift in Sources */,
+                D11200000000000000000000 /* RootView.swift in Sources */,
+                D21100000000000000000000 /* NativeAudioOutputImpl.swift in Sources */,
+                D21200000000000000000000 /* NowPlayingController.swift in Sources */,
+                D31100000000000000000000 /* DylanBridge.swift in Sources */,
+                D41100000000000000000000 /* Thumbnailer.swift in Sources */,
+                D51100000000000000000000 /* Stores.swift in Sources */,
+                D61100000000000000000000 /* Tokens.swift in Sources */,
+                D61200000000000000000000 /* Components.swift in Sources */,
+                D61300000000000000000000 /* Screens.swift in Sources */,
+                D61400000000000000000000 /* NowPlayingView.swift in Sources */,
+            );
+            runOnlyForDeploymentPostprocessing = 0;
+        };
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+        H10100000000000000000000 /* Debug */ = {
+            isa = XCBuildConfiguration;
+            buildSettings = {
+                ALWAYS_SEARCH_USER_PATHS = NO;
+                CLANG_ANALYZER_NONNULL = YES;
+                CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+                CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+                CLANG_ENABLE_MODULES = YES;
+                CLANG_ENABLE_OBJC_ARC = YES;
+                CLANG_ENABLE_OBJC_WEAK = YES;
+                CLANG_WARN_BOOL_CONVERSION = YES;
+                CLANG_WARN_COMMA = YES;
+                CLANG_WARN_CONSTANT_CONVERSION = YES;
+                CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+                CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+                CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+                CLANG_WARN_EMPTY_BODY = YES;
+                CLANG_WARN_ENUM_CONVERSION = YES;
+                CLANG_WARN_INFINITE_RECURSION = YES;
+                CLANG_WARN_INT_CONVERSION = YES;
+                CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+                CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+                CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+                CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+                CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+                CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+                CLANG_WARN_STRICT_PROTOTYPES = YES;
+                CLANG_WARN_SUSPICIOUS_MOVE = YES;
+                CLANG_WARN_UNREACHABLE_CODE = YES;
+                CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+                COPY_PHASE_STRIP = NO;
+                DEBUG_INFORMATION_FORMAT = dwarf;
+                ENABLE_STRICT_OBJC_MSGSEND = YES;
+                ENABLE_TESTABILITY = YES;
+                ENABLE_USER_SCRIPT_SANDBOXING = NO;
+                GCC_C_LANGUAGE_STANDARD = gnu17;
+                GCC_DYNAMIC_NO_PIC = NO;
+                GCC_NO_COMMON_BLOCKS = YES;
+                GCC_OPTIMIZATION_LEVEL = 0;
+                GCC_PREPROCESSOR_DEFINITIONS = (
+                    "DEBUG=1",
+                    "$(inherited)",
+                );
+                GCC_SYMBOLS_PRIVATE_EXTERN = NO;
+                GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+                GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+                GCC_WARN_UNDECLARED_SELECTOR = YES;
+                GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+                GCC_WARN_UNUSED_FUNCTION = YES;
+                GCC_WARN_UNUSED_VARIABLE = YES;
+                IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+                LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+                MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+                MTL_FAST_MATH = YES;
+                ONLY_ACTIVE_ARCH = YES;
+                SDKROOT = iphoneos;
+                SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+                SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+            };
+            name = Debug;
+        };
+        H10200000000000000000000 /* Release */ = {
+            isa = XCBuildConfiguration;
+            buildSettings = {
+                ALWAYS_SEARCH_USER_PATHS = NO;
+                CLANG_ANALYZER_NONNULL = YES;
+                CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+                CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+                CLANG_ENABLE_MODULES = YES;
+                CLANG_ENABLE_OBJC_ARC = YES;
+                CLANG_ENABLE_OBJC_WEAK = YES;
+                CLANG_WARN_BOOL_CONVERSION = YES;
+                CLANG_WARN_COMMA = YES;
+                CLANG_WARN_CONSTANT_CONVERSION = YES;
+                CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+                CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+                CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+                CLANG_WARN_EMPTY_BODY = YES;
+                CLANG_WARN_ENUM_CONVERSION = YES;
+                CLANG_WARN_INFINITE_RECURSION = YES;
+                CLANG_WARN_INT_CONVERSION = YES;
+                CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+                CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+                CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+                CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+                CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+                CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+                CLANG_WARN_STRICT_PROTOTYPES = YES;
+                CLANG_WARN_SUSPICIOUS_MOVE = YES;
+                CLANG_WARN_UNREACHABLE_CODE = YES;
+                CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+                COPY_PHASE_STRIP = NO;
+                DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+                ENABLE_NS_ASSERTIONS = NO;
+                ENABLE_STRICT_OBJC_MSGSEND = YES;
+                ENABLE_USER_SCRIPT_SANDBOXING = NO;
+                GCC_C_LANGUAGE_STANDARD = gnu17;
+                GCC_DYNAMIC_NO_PIC = NO;
+                GCC_NO_COMMON_BLOCKS = YES;
+                GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+                GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+                GCC_WARN_UNDECLARED_SELECTOR = YES;
+                GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+                GCC_WARN_UNUSED_FUNCTION = YES;
+                GCC_WARN_UNUSED_VARIABLE = YES;
+                IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+                LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+                MTL_ENABLE_DEBUG_INFO = NO;
+                MTL_FAST_MATH = YES;
+                ONLY_ACTIVE_ARCH = NO;
+                SDKROOT = iphoneos;
+                SWIFT_COMPILATION_MODE = wholemodule;
+                SWIFT_OPTIMIZATION_LEVEL = "-O";
+                VALIDATE_PRODUCT = YES;
+            };
+            name = Release;
+        };
+        H10300000000000000000000 /* Profile */ = {
+            isa = XCBuildConfiguration;
+            buildSettings = {
+                ALWAYS_SEARCH_USER_PATHS = NO;
+                CLANG_ANALYZER_NONNULL = YES;
+                CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+                CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+                CLANG_ENABLE_MODULES = YES;
+                CLANG_ENABLE_OBJC_ARC = YES;
+                CLANG_ENABLE_OBJC_WEAK = YES;
+                CLANG_WARN_BOOL_CONVERSION = YES;
+                CLANG_WARN_COMMA = YES;
+                CLANG_WARN_CONSTANT_CONVERSION = YES;
+                CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+                CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+                CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+                CLANG_WARN_EMPTY_BODY = YES;
+                CLANG_WARN_ENUM_CONVERSION = YES;
+                CLANG_WARN_INFINITE_RECURSION = YES;
+                CLANG_WARN_INT_CONVERSION = YES;
+                CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+                CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+                CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+                CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+                CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+                CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+                CLANG_WARN_STRICT_PROTOTYPES = YES;
+                CLANG_WARN_SUSPICIOUS_MOVE = YES;
+                CLANG_WARN_UNREACHABLE_CODE = YES;
+                CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+                COPY_PHASE_STRIP = NO;
+                DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+                ENABLE_NS_ASSERTIONS = NO;
+                ENABLE_STRICT_OBJC_MSGSEND = YES;
+                ENABLE_USER_SCRIPT_SANDBOXING = NO;
+                GCC_C_LANGUAGE_STANDARD = gnu17;
+                GCC_DYNAMIC_NO_PIC = NO;
+                GCC_NO_COMMON_BLOCKS = YES;
+                GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+                GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+                GCC_WARN_UNDECLARED_SELECTOR = YES;
+                GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+                GCC_WARN_UNUSED_FUNCTION = YES;
+                GCC_WARN_UNUSED_VARIABLE = YES;
+                IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+                LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+                MTL_ENABLE_DEBUG_INFO = NO;
+                MTL_FAST_MATH = YES;
+                ONLY_ACTIVE_ARCH = NO;
+                SDKROOT = iphoneos;
+                SWIFT_COMPILATION_MODE = wholemodule;
+                SWIFT_OPTIMIZATION_LEVEL = "-O";
+                VALIDATE_PRODUCT = YES;
+            };
+            name = Profile;
+        };
+        I10100000000000000000000 /* Debug */ = {
+            isa = XCBuildConfiguration;
+            buildSettings = {
+                ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+                CODE_SIGN_STYLE = Automatic;
+                CURRENT_PROJECT_VERSION = 0;
+                DEAD_CODE_STRIPPING = YES;
+                DEVELOPMENT_TEAM = "";
+                ENABLE_BITCODE = NO;
+                "FRAMEWORK_SEARCH_PATHS[sdk=iphoneos*]" = (
+                    "$(inherited)",
+                    "$(SRCROOT)/../shared/build/bin/iosArm64/debugFramework",
+                );
+                "FRAMEWORK_SEARCH_PATHS[sdk=iphonesimulator*]" = (
+                    "$(inherited)",
+                    "$(SRCROOT)/../shared/build/bin/iosSimulatorArm64/debugFramework",
+                );
+                GENERATE_INFOPLIST_FILE = NO;
+                INFOPLIST_FILE = iosApp/Info.plist;
+                INFOPLIST_KEY_CFBundleDisplayName = Dylan;
+                IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+                LD_RUNPATH_SEARCH_PATHS = (
+                    "$(inherited)",
+                    "@executable_path/Frameworks",
+                );
+                MARKETING_VERSION = "0.1.0";
+                OTHER_LDFLAGS = (
+                    "$(inherited)",
+                    "-framework",
+                    shared,
+                );
+                PRODUCT_BUNDLE_IDENTIFIER = "app.dylan.player.ios";
+                PRODUCT_NAME = "$(TARGET_NAME)";
+                SUPPORTS_MACCATALYST = NO;
+                SWIFT_STRICT_CONCURRENCY = minimal;
+                SWIFT_VERSION = 5.0;
+                TARGETED_DEVICE_FAMILY = 1;
+            };
+            name = Debug;
+        };
+        I10200000000000000000000 /* Release */ = {
+            isa = XCBuildConfiguration;
+            buildSettings = {
+                ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+                CODE_SIGN_STYLE = Automatic;
+                CURRENT_PROJECT_VERSION = 0;
+                DEAD_CODE_STRIPPING = YES;
+                DEVELOPMENT_TEAM = "";
+                ENABLE_BITCODE = NO;
+                "FRAMEWORK_SEARCH_PATHS[sdk=iphoneos*]" = (
+                    "$(inherited)",
+                    "$(SRCROOT)/../shared/build/bin/iosArm64/releaseFramework",
+                );
+                "FRAMEWORK_SEARCH_PATHS[sdk=iphonesimulator*]" = (
+                    "$(inherited)",
+                    "$(SRCROOT)/../shared/build/bin/iosSimulatorArm64/releaseFramework",
+                );
+                GENERATE_INFOPLIST_FILE = NO;
+                INFOPLIST_FILE = iosApp/Info.plist;
+                INFOPLIST_KEY_CFBundleDisplayName = Dylan;
+                IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+                LD_RUNPATH_SEARCH_PATHS = (
+                    "$(inherited)",
+                    "@executable_path/Frameworks",
+                );
+                MARKETING_VERSION = "0.1.0";
+                OTHER_LDFLAGS = (
+                    "$(inherited)",
+                    "-framework",
+                    shared,
+                );
+                PRODUCT_BUNDLE_IDENTIFIER = "app.dylan.player.ios";
+                PRODUCT_NAME = "$(TARGET_NAME)";
+                SUPPORTS_MACCATALYST = NO;
+                SWIFT_COMPILATION_MODE = wholemodule;
+                SWIFT_STRICT_CONCURRENCY = minimal;
+                SWIFT_VERSION = 5.0;
+                TARGETED_DEVICE_FAMILY = 1;
+            };
+            name = Release;
+        };
+        I10300000000000000000000 /* Profile */ = {
+            isa = XCBuildConfiguration;
+            buildSettings = {
+                ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+                CODE_SIGN_STYLE = Automatic;
+                CURRENT_PROJECT_VERSION = 0;
+                DEAD_CODE_STRIPPING = YES;
+                DEVELOPMENT_TEAM = "";
+                ENABLE_BITCODE = NO;
+                "FRAMEWORK_SEARCH_PATHS[sdk=iphoneos*]" = (
+                    "$(inherited)",
+                    "$(SRCROOT)/../shared/build/bin/iosArm64/releaseFramework",
+                );
+                "FRAMEWORK_SEARCH_PATHS[sdk=iphonesimulator*]" = (
+                    "$(inherited)",
+                    "$(SRCROOT)/../shared/build/bin/iosSimulatorArm64/releaseFramework",
+                );
+                GENERATE_INFOPLIST_FILE = NO;
+                INFOPLIST_FILE = iosApp/Info.plist;
+                INFOPLIST_KEY_CFBundleDisplayName = Dylan;
+                IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+                LD_RUNPATH_SEARCH_PATHS = (
+                    "$(inherited)",
+                    "@executable_path/Frameworks",
+                );
+                MARKETING_VERSION = "0.1.0";
+                OTHER_LDFLAGS = (
+                    "$(inherited)",
+                    "-framework",
+                    shared,
+                );
+                PRODUCT_BUNDLE_IDENTIFIER = "app.dylan.player.ios";
+                PRODUCT_NAME = "$(TARGET_NAME)";
+                SUPPORTS_MACCATALYST = NO;
+                SWIFT_COMPILATION_MODE = wholemodule;
+                SWIFT_STRICT_CONCURRENCY = minimal;
+                SWIFT_VERSION = 5.0;
+                TARGETED_DEVICE_FAMILY = 1;
+            };
+            name = Profile;
+        };
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+        G00100000000000000000000 /* Build configuration list for PBXProject "iosApp" */ = {
+            isa = XCConfigurationList;
+            buildConfigurations = (
+                H10100000000000000000000 /* Debug */,
+                H10200000000000000000000 /* Release */,
+                H10300000000000000000000 /* Profile */,
+            );
+            defaultConfigurationIsVisible = 0;
+            defaultConfigurationName = Release;
+        };
+        G00200000000000000000000 /* Build configuration list for PBXNativeTarget "iosApp" */ = {
+            isa = XCConfigurationList;
+            buildConfigurations = (
+                I10100000000000000000000 /* Debug */,
+                I10200000000000000000000 /* Release */,
+                I10300000000000000000000 /* Profile */,
+            );
+            defaultConfigurationIsVisible = 0;
+            defaultConfigurationName = Release;
+        };
+/* End XCConfigurationList section */
+    };
+    rootObject = A10100000000000000000000 /* Project object */;
+}
