@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -102,21 +103,54 @@ fun NowPlayingSheet(
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Spacer(Modifier.height(12.dp))
-        AsyncImage(
-            model = song.artUrl500,
-            contentDescription = null,
-            modifier =
-                Modifier
-                    .fillMaxWidth()
-                    .height(320.dp)
-                    .pointerInput(state.index) {
-                        detectHorizontalDragGestures { change, amount ->
-                            if (kotlin.math.abs(amount) > 60f) {
-                                container.orchestrator.submit(if (amount < 0) Intent.Next else Intent.Previous)
-                            }
+        // Artwork doubles as the loading surface — status rides ON the art (fixed slot,
+        // nothing below ever shifts) instead of a conditional row that pushed the seekbar.
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(320.dp)
+                .pointerInput(state.index) {
+                    detectHorizontalDragGestures { change, amount ->
+                        if (kotlin.math.abs(amount) > 60f) {
+                            container.orchestrator.submit(if (amount < 0) Intent.Next else Intent.Previous)
                         }
-                    },
-        )
+                    }
+                },
+        ) {
+            AsyncImage(
+                model = song.artUrl500,
+                contentDescription = null,
+                modifier = Modifier.fillMaxSize(),
+            )
+            if (isLoading) {
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        .background(
+                            androidx.compose.ui.graphics.Color.Black
+                                .copy(alpha = 0.55f),
+                        ),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        androidx.compose.material3.CircularProgressIndicator(
+                            modifier = Modifier.size(22.dp),
+                            color = t.primary,
+                            strokeWidth = 2.dp,
+                        )
+                        Text(
+                            when (state.phase) {
+                                is dylan.model.Phase.Downloading -> "DOWNLOADING ${currentDownloadPct ?: 0}%"
+                                else -> "PREPARING"
+                            },
+                            style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 1.2.sp),
+                            color = t.textSecondary,
+                            modifier = Modifier.padding(top = 8.dp),
+                        )
+                    }
+                }
+            }
+        }
         Spacer(Modifier.height(16.dp))
         Text(
             song.title.uppercase(),
@@ -138,96 +172,85 @@ fun NowPlayingSheet(
                 },
         )
 
-        // Prominent download/prepare status — replaces subtle label that was easy to miss
+        // Buffering lives INSIDE fixed-height slots (artwork overlay + slider slot) — a
+        // conditional status row here used to shift the whole layout on every track change.
         if (isLoading) {
-            Row(
+            Box(
                 Modifier
                     .fillMaxWidth()
-                    .background(t.surfaceVariant)
-                    .border(1.dp, t.divider)
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    .height(36.dp)
+                    .padding(top = 8.dp),
+                contentAlignment = Alignment.Center,
             ) {
-                androidx.compose.material3.CircularProgressIndicator(
-                    modifier = Modifier.size(18.dp),
-                    color = t.primary,
-                    strokeWidth = 2.dp,
-                )
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        when (state.phase) {
-                            is dylan.model.Phase.Downloading -> "DOWNLOADING… ${currentDownloadPct ?: 0}%"
-                            else -> "PREPARING…"
-                        },
-                        style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 0.8.sp),
-                        color = t.textPrimary,
+                val pct = currentDownloadPct
+                if (pct != null) {
+                    androidx.compose.material3.LinearProgressIndicator(
+                        progress = { pct / 100f },
+                        modifier = Modifier.fillMaxWidth().height(2.dp),
+                        color = t.primary,
+                        trackColor = t.divider,
                     )
-                    if (currentDownloadPct != null) {
-                        androidx.compose.material3.LinearProgressIndicator(
-                            progress = { (currentDownloadPct ?: 0) / 100f },
-                            modifier = Modifier.fillMaxWidth().height(2.dp).padding(top = 4.dp),
-                            color = t.primary,
-                            trackColor = t.divider,
-                        )
-                    }
+                } else {
+                    androidx.compose.material3.LinearProgressIndicator(
+                        modifier = Modifier.fillMaxWidth().height(2.dp),
+                        color = t.primary,
+                        trackColor = t.divider,
+                    )
                 }
             }
-            Spacer(Modifier.height(8.dp))
-        }
-
-        Slider(
-            value = shown.coerceIn(0f, durMs.toFloat()),
-            onValueChange = {
-                if (isLoading) return@Slider
-                dragging = true
-                dragPos = it
-            },
-            onValueChangeFinished = {
-                container.orchestrator.submit(Intent.Seek(dragPos.toLong()))
-                dragging = false
-            },
-            enabled = !isLoading,
-            valueRange = 0f..durMs.toFloat(),
-            colors =
-                SliderDefaults.colors(
-                    thumbColor = t.primary,
-                    activeTrackColor = t.primary,
-                    inactiveTrackColor = t.divider,
-                    activeTickColor = androidx.compose.ui.graphics.Color.Transparent,
-                    inactiveTickColor = androidx.compose.ui.graphics.Color.Transparent,
-                    disabledThumbColor = t.divider,
-                    disabledActiveTrackColor = t.divider,
-                    disabledInactiveTrackColor = t.divider,
-                ),
-            thumb = {
-                Box(
-                    Modifier
-                        .size(if (dragging) 22.dp else 18.dp)
-                        .background(if (isLoading) t.divider else t.primary)
-                        .padding(3.dp)
-                        .background(androidx.compose.ui.graphics.Color.White),
-                )
-            },
-            track = { sliderState ->
-                val range = sliderState.valueRange
-                val frac =
-                    if (range.endInclusive > range.start) {
-                        ((sliderState.value - range.start) / (range.endInclusive - range.start)).coerceIn(0f, 1f)
-                    } else {
-                        0f
-                    }
-                Box(Modifier.fillMaxWidth().height(if (dragging) 6.dp else 4.dp).background(t.divider)) {
+        } else {
+            Slider(
+                value = shown.coerceIn(0f, durMs.toFloat()),
+                onValueChange = {
+                    dragging = true
+                    dragPos = it
+                },
+                onValueChangeFinished = {
+                    container.orchestrator.submit(Intent.Seek(dragPos.toLong()))
+                    dragging = false
+                },
+                enabled = true,
+                valueRange = 0f..durMs.toFloat(),
+                colors =
+                    SliderDefaults.colors(
+                        thumbColor = t.primary,
+                        activeTrackColor = t.primary,
+                        inactiveTrackColor = t.divider,
+                        activeTickColor = androidx.compose.ui.graphics.Color.Transparent,
+                        inactiveTickColor = androidx.compose.ui.graphics.Color.Transparent,
+                        disabledThumbColor = t.divider,
+                        disabledActiveTrackColor = t.divider,
+                        disabledInactiveTrackColor = t.divider,
+                    ),
+                thumb = {
                     Box(
                         Modifier
-                            .fillMaxWidth(frac)
-                            .fillMaxHeight()
-                            .background(if (isLoading) t.divider else t.primary),
+                            .size(if (dragging) 22.dp else 18.dp)
+                            .background(if (isLoading) t.divider else t.primary)
+                            .padding(3.dp)
+                            .background(androidx.compose.ui.graphics.Color.White),
                     )
-                }
-            },
-            modifier = Modifier.fillMaxWidth().height(36.dp).padding(top = 8.dp),
-        )
+                },
+                track = { sliderState ->
+                    val range = sliderState.valueRange
+                    val frac =
+                        if (range.endInclusive > range.start) {
+                            ((sliderState.value - range.start) / (range.endInclusive - range.start)).coerceIn(0f, 1f)
+                        } else {
+                            0f
+                        }
+                    Box(Modifier.fillMaxWidth().height(if (dragging) 6.dp else 4.dp).background(t.divider)) {
+                        Box(
+                            Modifier
+                                .fillMaxWidth(frac)
+                                .fillMaxHeight()
+                                .background(if (isLoading) t.divider else t.primary),
+                        )
+                    }
+                },
+                modifier = Modifier.fillMaxWidth().height(36.dp).padding(top = 8.dp),
+            )
+        }
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 2.dp),
             horizontalArrangement = Arrangement.SpaceBetween,

@@ -25,6 +25,13 @@ class DylanMediaService : MediaSessionService() {
             Thread(r, "dylan-resume").apply { isDaemon = true }
         }
 
+    companion object {
+        // Custom-layout transport commands — the queue lives in the Orchestrator, not the
+        // Exo timeline, so next/prev must route here regardless of timeline state.
+        private const val CMD_NEXT = "dylan.NEXT"
+        private const val CMD_PREV = "dylan.PREVIOUS"
+    }
+
     override fun onCreate() {
         super.onCreate()
         val appLog = DylanApp.of(this).container.log
@@ -79,8 +86,37 @@ class DylanMediaService : MediaSessionService() {
             MediaSession
                 .Builder(this, e.player)
                 .setSessionActivity(sessionActivity)
-                .setCallback(
+                .setCustomLayout(
+                    ImmutableList.of(
+                        androidx.media3.session.CommandButton
+                            .Builder()
+                            .setDisplayName("Previous")
+                            .setSessionCommand(androidx.media3.session.SessionCommand(CMD_PREV, android.os.Bundle.EMPTY))
+                            .setIconResId(dylan.android.R.drawable.ic_prev)
+                            .build(),
+                        androidx.media3.session.CommandButton
+                            .Builder()
+                            .setDisplayName("Next")
+                            .setSessionCommand(androidx.media3.session.SessionCommand(CMD_NEXT, android.os.Bundle.EMPTY))
+                            .setIconResId(dylan.android.R.drawable.ic_next)
+                            .build(),
+                    ),
+                ).setCallback(
                     object : MediaSession.Callback {
+                        override fun onCustomCommand(
+                            session: MediaSession,
+                            controller: MediaSession.ControllerInfo,
+                            command: androidx.media3.session.SessionCommand,
+                            args: android.os.Bundle,
+                        ): ListenableFuture<androidx.media3.session.SessionResult> {
+                            val container = DylanApp.of(this@DylanMediaService).container
+                            when (command.customAction) {
+                                CMD_NEXT -> container.orchestrator.submit(dylan.playback.Intent.Next)
+                                CMD_PREV -> container.orchestrator.submit(dylan.playback.Intent.Previous)
+                            }
+                            return Futures.immediateFuture(androidx.media3.session.SessionResult(androidx.media3.session.SessionResult.RESULT_SUCCESS))
+                        }
+
                         override fun onPlaybackResumption(
                             mediaSession: MediaSession,
                             controller: MediaSession.ControllerInfo,
@@ -177,6 +213,4 @@ class DylanMediaService : MediaSessionService() {
         }
         super.onDestroy()
     }
-
-    private companion object
 }

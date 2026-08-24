@@ -102,6 +102,18 @@ Pending on reconnect (install `431b4a97…` first): **(1)** stuck-play repro (fo
 
 **Gates:** jvmTest **83/83**, ktlint, detekt, iOS compile, debug+release APKs — green.
 
+### 0l. Ground-up UX wave (2026-08-24 ~22:30 — album fix, back stack, NP sheet rebuild, perf, notification)
+| Item | Change |
+|---|---|
+| Album "Connection error" (recurring) | Root cause via file logs + HAR-2: songs store **numeric** `album_id`; history carousel sent it as a `webapi.get` **token** → 200 empty-shell → blank album → error copy. Fix: `albumRequest(id)` routes digits → `content.getAlbumDetails&albumid=` (live-verified vs token path) — `SaavnProvider.kt` |
+| Back stack (ground-up) | `sealed interface Screen` stack in AppRoot: Tab/Album/Artist/Downloads; back pops (Search → Home → exit); tab tap truncates to that tab's root; replaces the ad-hoc boolean/nullable overlay states |
+| NP sheet (ground-up) | `ModalBottomSheet` (laggy, never tracked finger) → custom overlay on foundation `AnchoredDraggable` (1.12 API): offset follows finger 1:1 on dismiss, velocity/position settle on release, scrim fades with progress, mini-player stays mounted underneath so it's **revealed during the slide** (no post-dismiss pop-in). `animateAnchor()` helper replaces removed `animateTo` |
+| Recently-played lag | `HomeLocalData` session cache → SQLite sections render on first frame after tab revisit; skeleton tiles hold the carousel slot on cold start (zero layout shift) |
+| "PREPARING…" ugliness + seekbar shift | Conditional status row deleted; buffering now rides ON the artwork (dim + spinner + status, fixed 320dp slot) with an indeterminate/determinate 2dp line inside the fixed-height slider slot — nothing below ever shifts |
+| Notification missing NEXT | Queue lives in Orchestrator, not Exo timeline → Media3 `setCustomLayout(prev, next)` CommandButtons + `onCustomCommand` → `Intent.Next/Previous`; buttons always present regardless of timeline state |
+
+**Gates:** jvmTest **83/83**, ktlint, detekt, iOS compile, debug+release APKs — green. **Device verify BLOCKED again** (`adb: no devices/emulators found` at 22:30, second drop today). On reconnect: install → tap album tile from Recently played (must open), back from Search → Home, swipe NP down (finger-tracked, mini revealed), notification shows prev/next, no seekbar shift during PREPARING.
+
 ---
 
 ## 1. Pipeline status (last verified runs — --rerun-tasks --no-configuration-cache)

@@ -1,8 +1,15 @@
 package dylan.android.ui
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.AnchoredDraggableDefaults
+import androidx.compose.foundation.gestures.AnchoredDraggableState
+import androidx.compose.foundation.gestures.DraggableAnchors
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.anchoredDraggable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -21,15 +28,20 @@ import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -44,6 +56,26 @@ import dylan.android.ui.screens.QueueSheet
 import dylan.android.ui.screens.SearchScreen
 import dylan.di.AppContainer
 import dylan.playback.Intent
+import kotlinx.coroutines.flow.firstOrNull
+import kotlinx.coroutines.launch
+
+/** Navigation stack entry. Tab roots live IN the stack so back walks Search → Home → exit. */
+internal sealed interface Screen {
+    data class Tab(
+        val index: Int,
+    ) : Screen
+
+    data class Album(
+        val id: String,
+    ) : Screen
+
+    data class Artist(
+        val name: String,
+        val token: String,
+    ) : Screen
+
+    data object Downloads : Screen
+}
 
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
@@ -53,10 +85,7 @@ fun AppRoot(
     onReportDrawn: () -> Unit,
 ) {
     val state by container.orchestrator.state.collectAsState()
-    var tab by remember { mutableIntStateOf(0) }
-    var albumId by remember { mutableStateOf<String?>(null) }
-    var artistTarget by remember { mutableStateOf<Pair<String, String>?>(null) }
-    var downloadsOpen by remember { mutableStateOf(false) }
+    val backStack = remember { mutableStateListOf<Screen>(Screen.Tab(0)) }
     var npOpen by remember { mutableStateOf(false) }
     var queueOpen by remember { mutableStateOf(false) }
     var settingsOpen by remember { mutableStateOf(false) }
@@ -66,36 +95,41 @@ fun AppRoot(
         container.orchestrator.submit(Intent.PlayNow(songs, idx))
     }
     val openArtist: (dylan.model.MiniEntity) -> Unit = { m ->
-        artistTarget = (m.artistId.orEmpty() to m.title).takeIf { it.first.isNotBlank() }
+        val token = m.artistId.orEmpty()
+        if (token.isNotBlank()) backStack.add(Screen.Artist(m.title, token))
     }
 
-    BackHandler(enabled = artistTarget != null || albumId != null || downloadsOpen) {
-        when {
-            artistTarget != null -> artistTarget = null
-            albumId != null -> albumId = null
-            else -> downloadsOpen = false
+    fun pop() {
+        if (backStack.size > 1) backStack.removeAt(backStack.lastIndex)
+    }
+
+    fun switchTab(i: Int) {
+        // Bottom-nav convention: return to that tab's root wherever it sits in the stack.
+        val root = backStack.indexOfFirst { it is Screen.Tab && it.index == i }
+        if (root >= 0) {
+            while (backStack.size > root + 1) backStack.removeAt(backStack.lastIndex)
+        } else {
+            backStack.add(Screen.Tab(i))
         }
+    }
+
+    BackHandler(enabled = !npOpen && backStack.size > 1) {
+        pop()
     }
 
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         Column(Modifier.fillMaxSize()) {
             Box(Modifier.weight(1f)) {
-                when {
-                    artistTarget != null ->
-                        ArtistScreen(
-                            container,
-                            artistTarget!!.first,
-                            artistTarget!!.second,
-                            onPlaySongs = playNow,
-                        )
-                    albumId != null -> AlbumScreen(container, albumId!!, onBack = { albumId = null }, onPlaySongs = playNow)
-                    downloadsOpen -> DownloadsScreen(container, onPlaySongs = playNow, onBack = { downloadsOpen = false })
-                    else ->
-                        when (tab) {
+                when (val screen = backStack.last()) {
+                    is Screen.Album -> AlbumScreen(container, screen.id, onBack = { pop() }, onPlaySongs = playNow)
+                    is Screen.Artist -> ArtistScreen(container, screen.token, screen.name, onPlaySongs = playNow)
+                    Screen.Downloads -> DownloadsScreen(container, onPlaySongs = playNow, onBack = { pop() })
+                    is Screen.Tab ->
+                        when (screen.index) {
                             0 ->
                                 HomeScreen(
                                     container,
-                                    onOpenAlbum = { albumId = it },
+                                    onOpenAlbum = { backStack.add(Screen.Album(it)) },
                                     onPlaySongs = playNow,
                                     onOpenSettings = { settingsOpen = true },
                                     onOpenArtist = openArtist,
@@ -103,16 +137,18 @@ fun AppRoot(
                             1 ->
                                 SearchScreen(
                                     container,
-                                    onOpenAlbum = { albumId = it },
+                                    onOpenAlbum = { backStack.add(Screen.Album(it)) },
                                     onOpenArtist = openArtist,
                                     onPlaySongs = playNow,
                                 )
-                            else -> LibraryScreen(container, onPlaySongs = playNow, onOpenDownloads = { downloadsOpen = true })
+                            else -> LibraryScreen(container, onPlaySongs = playNow, onOpenDownloads = { backStack.add(Screen.Downloads) })
                         }
                 }
             }
 
-            if (state.current != null && !npOpen) {
+            // Mini player stays MOUNTED whenever a track exists — the NP overlay slides over
+            // it, so dismissing reveals it continuously instead of popping it in afterwards.
+            if (state.current != null) {
                 MiniPlayer(container, onExpand = { npOpen = true }, onLongPressClear = {}, onEnsureService = onFirstPlay)
             }
             Box(
@@ -130,15 +166,10 @@ fun AppRoot(
                     "SEARCH" to Dyl.Search,
                     "LIBRARY" to Dyl.Library,
                 ).forEachIndexed { i, (label, glyph) ->
-                    val selected = tab == i && albumId == null && artistTarget == null && !downloadsOpen
+                    val selected = backStack.last() is Screen.Tab && (backStack.last() as Screen.Tab).index == i
                     NavigationBarItem(
                         selected = selected,
-                        onClick = {
-                            tab = i
-                            albumId = null
-                            artistTarget = null
-                            downloadsOpen = false
-                        },
+                        onClick = { switchTab(i) },
                         icon = {
                             Icon(
                                 glyph,
@@ -167,21 +198,13 @@ fun AppRoot(
         }
 
         if (npOpen && state.current != null) {
-            val npSheetState = androidx.compose.material3.rememberModalBottomSheetState(skipPartiallyExpanded = true)
-            ModalBottomSheet(
-                onDismissRequest = { npOpen = false },
-                containerColor = MaterialTheme.colorScheme.surface,
-                sheetState = npSheetState,
-            ) {
-                Box(Modifier.fillMaxHeight(0.94f)) {
-                    NowPlayingSheet(
-                        container,
-                        onQueue = { queueOpen = true },
-                        onOpenArtist = { name, token -> artistTarget = token to name },
-                        onEnsureService = onFirstPlay,
-                    )
-                }
-            }
+            NpOverlay(
+                container = container,
+                onClosed = { npOpen = false },
+                onQueue = { queueOpen = true },
+                onOpenArtist = { name, token -> if (token.isNotBlank()) backStack.add(Screen.Artist(name, token)) },
+                onEnsureService = onFirstPlay,
+            )
         }
         if (queueOpen) {
             ModalBottomSheet(
@@ -203,6 +226,123 @@ fun AppRoot(
         }
     }
     onReportDrawn()
+}
+
+private enum class NpAnchor { Open, Closed }
+
+/**
+ * Now Playing overlay — ground-up rebuild replacing ModalBottomSheet (whose dismissal lagged
+ * and never tracked the finger). Foundation AnchoredDraggable: offset follows the finger 1:1
+ * on the way down, settle() picks the anchor from velocity/position on release, and the mini
+ * player underneath is revealed continuously during the slide.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun NpOverlay(
+    container: AppContainer,
+    onClosed: () -> Unit,
+    onQueue: () -> Unit,
+    onOpenArtist: (String, String) -> Unit,
+    onEnsureService: () -> Unit,
+) {
+    val t = LocalDylanTokens.current
+    var heightPx by remember { mutableFloatStateOf(0f) }
+    val npState =
+        remember {
+            AnchoredDraggableState(
+                initialValue = NpAnchor.Closed,
+                anchors =
+                    DraggableAnchors {
+                        NpAnchor.Open at 0f
+                        NpAnchor.Closed at 1f
+                    },
+            )
+        }
+    val fling = AnchoredDraggableDefaults.flingBehavior(npState)
+    val backScope = androidx.compose.runtime.rememberCoroutineScope()
+    BackHandler { backScope.launch { npState.animateAnchor(NpAnchor.Closed) } }
+
+    LaunchedEffect(heightPx) {
+        if (heightPx > 0f) {
+            npState.updateAnchors(
+                DraggableAnchors {
+                    NpAnchor.Open at 0f
+                    NpAnchor.Closed at heightPx
+                },
+            )
+        }
+    }
+    // Entrance: slide up once anchors are measurable (tap + pull-up handoff share this path).
+    LaunchedEffect(Unit) {
+        snapshotFlow { heightPx }.firstOrNull { it > 0f }
+        npState.animateAnchor(NpAnchor.Open)
+    }
+    // Fully settled at the bottom anchor ⇒ unmount (mini player is already visible beneath).
+    LaunchedEffect(Unit) {
+        snapshotFlow { npState.currentValue }.collect { if (it == NpAnchor.Closed) onClosed() }
+    }
+
+    val progress =
+        if (heightPx > 0f && npState.offset.isFinite()) {
+            (npState.offset / heightPx).coerceIn(0f, 1f)
+        } else {
+            1f
+        }
+
+    Box(Modifier.fillMaxSize()) {
+        // Scrim — blocks touches to the app behind, fades with sheet position.
+        Box(
+            Modifier
+                .fillMaxSize()
+                .graphicsLayer { alpha = 0.65f * (1f - progress) }
+                .background(androidx.compose.ui.graphics.Color.Black)
+                .pointerInput(Unit) {
+                    detectTapGestures { }
+                },
+        )
+        Box(
+            Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .fillMaxHeight(0.94f)
+                .background(t.surface)
+                .onSizeChanged { heightPx = it.height.toFloat() }
+                .graphicsLayer { translationY = if (npState.offset.isFinite()) npState.offset else heightPx }
+                .anchoredDraggable(npState, flingBehavior = fling, orientation = Orientation.Vertical),
+        ) {
+            NowPlayingSheet(
+                container,
+                onQueue = onQueue,
+                onOpenArtist = onOpenArtist,
+                onEnsureService = onEnsureService,
+            )
+        }
+    }
+}
+
+/**
+ * Programmatic settle to an anchor (animateTo was removed from the 1.8+ state API).
+ * Drives [AnchoredDraggableState.anchoredDrag] with an [androidx.compose.animation.core.animate]
+ * tween so the sheet rides the same offset pipeline as finger drags.
+ */
+private suspend fun <T> AnchoredDraggableState<T>.animateAnchor(
+    target: T,
+    spec: androidx.compose.animation.core.AnimationSpec<Float> =
+        androidx.compose.animation.core
+            .tween(280),
+) {
+    if (!anchors.hasPositionFor(target)) return
+    val targetOffset = anchors.positionOf(target)
+    val start = if (offset.isFinite()) offset else targetOffset
+    anchoredDrag {
+        androidx.compose.animation.core.animate(
+            initialValue = start,
+            targetValue = targetOffset,
+            animationSpec = spec,
+        ) { v, _ ->
+            dragTo(v)
+        }
+    }
 }
 
 @Composable

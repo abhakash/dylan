@@ -54,11 +54,14 @@ fun HomeScreen(
     onOpenArtist: (MiniEntity) -> Unit = {},
 ) {
     val t = LocalDylanTokens.current
+    // Process-wide local snapshot — survives tab switches so re-entering Home renders the
+    // SQLite-backed sections on the FIRST frame (no pop-in, no layout shift).
+    val local = remember(container) { HomeLocalData }
     var trending by remember { mutableStateOf<List<dylan.model.MiniEntity>>(emptyList()) }
     var topSearches by remember { mutableStateOf<List<dylan.model.MiniEntity>>(emptyList()) }
-    var jumpBack by remember { mutableStateOf<List<Song>>(emptyList()) }
-    var albumHistory by remember { mutableStateOf<List<dylan.db.RecentAlbums>>(emptyList()) }
-    var favorites by remember { mutableStateOf<List<Song>>(emptyList()) }
+    var jumpBack by remember { mutableStateOf(local.jumpBack) }
+    var albumHistory by remember { mutableStateOf(local.albums) }
+    var favorites by remember { mutableStateOf(local.favorites) }
     var offline by remember { mutableStateOf(false) }
     val actions = rememberSongActions(container)
     val favKeys = rememberFavoriteKeys(container)
@@ -73,8 +76,11 @@ fun HomeScreen(
                 .distinctRecordings()
                 .take(5)
         favorites = runCatching { container.favorites.all() }.getOrDefault(emptyList()).distinctRecordings()
-        albumHistory =
-            runCatching { container.history.recentAlbums(12) }.getOrDefault(emptyList())
+        albumHistory = runCatching { container.history.recentAlbums(12) }.getOrDefault(emptyList())
+        local.jumpBack = jumpBack
+        local.favorites = favorites
+        local.albums = albumHistory
+        local.loaded = true
         coroutineScope {
             val feedDeferred = async { runCatching { container.provider.home() }.getOrNull() }
             val topSearchesDeferred = async { runCatching { container.provider.topSearches() }.getOrDefault(emptyList()) }
@@ -150,10 +156,16 @@ fun HomeScreen(
             }
         }
         // Personalized from SQLite play history — albums the user has actually listened to.
+        // Skeleton tiles hold the slot on cold start so nothing below shifts when data lands.
         if (albumHistory.isNotEmpty()) {
             item { SectionTitle("Recently played albums") }
             item {
                 AlbumCarousel(albumHistory, onOpenAlbum)
+            }
+        } else if (!local.loaded) {
+            item { SectionTitle("Recently played albums") }
+            item {
+                AlbumSkeleton()
             }
         }
         // Cross-section dedupe: a favorite already visible in Jump back in is hidden here.
@@ -267,4 +279,47 @@ private fun AlbumCarousel(
             AlbumTile(title = a.albumName ?: "", image = a.artUrl, onClick = { a.albumId?.let(onOpen) })
         }
     }
+}
+
+/** Cold-start placeholder — same geometry as [AlbumTile], keeps the first frame stable. */
+@Composable
+private fun AlbumSkeleton() {
+    val t = LocalDylanTokens.current
+    LazyRow(
+        contentPadding = PaddingValues(horizontal = 16.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        items(3, key = { "sk$it" }) {
+            Column(
+                Modifier
+                    .width(118.dp)
+                    .background(t.divider)
+                    .padding(1.dp)
+                    .background(t.surfaceVariant)
+                    .padding(6.dp),
+            ) {
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(118.dp)
+                        .background(t.background),
+                )
+                Box(
+                    Modifier
+                        .padding(top = 6.dp)
+                        .width(72.dp)
+                        .height(10.dp)
+                        .background(t.background),
+                )
+            }
+        }
+    }
+}
+
+/** Session-scoped cache of the SQLite-backed Home sections (instant tab revisits). */
+private object HomeLocalData {
+    var loaded = false
+    var jumpBack: List<Song> = emptyList()
+    var favorites: List<Song> = emptyList()
+    var albums: List<dylan.db.RecentAlbums> = emptyList()
 }

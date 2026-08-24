@@ -58,7 +58,7 @@ class SaavnProvider(
     }
 
     override suspend fun album(id: String): Album? {
-        val text = get("__call" to "webapi.get", "token" to id, "type" to "album", "includeMetaTags" to "0") ?: return null
+        val text = get(*albumRequest(id).toTypedArray()) ?: return null
         return runCatching { mapAlbum(json.decodeFromString(AlbumDto.serializer(), text)) }.getOrNull()
     }
 
@@ -92,3 +92,17 @@ class SaavnProvider(
         return runCatching { mapAuth(json.decodeFromString(AuthDto.serializer(), text)) }.getOrNull()
     }
 }
+
+/**
+ * Album lookup routing [HAR-2 + live 2026-08-24]: webapi.get wants the perma TOKEN
+ * (e9NTAB1tQ9M_); NUMERIC album ids — what songs store in album_id and what the
+ * history carousel navigates with — must go through content.getAlbumDetails.
+ * A numeric token yields a 200 empty-shell payload that parses into a blank album,
+ * which surfaced as "Check your connection" on the album screen.
+ */
+internal fun albumRequest(id: String): List<Pair<String, String>> =
+    if (id.isNotEmpty() && id.all { it.isDigit() }) {
+        listOf("__call" to "content.getAlbumDetails", "albumid" to id)
+    } else {
+        listOf("__call" to "webapi.get", "token" to id, "type" to "album", "includeMetaTags" to "0")
+    }
