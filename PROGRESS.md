@@ -1,9 +1,61 @@
 # DYLAN — Implementation Progress Checkpoint
 
-**Plan reference:** `DYLAN-PLAN.md` v1.3.2 · **Checkpoint:** 2026-08-23 ~18:05 — wave 2 + live-device triage + Nothing reskin: **B1** `Based on your searches` lag + **B2** `Next` seek-bar vs download + **artwork** `MediaMetadata` + **Nothing UI** (black/red/1px) + **Clear cache subtitle** + **seek bar** thumb — all fixed; 71/71 green; new build `5d34caf…` (18:03)
+**Plan reference:** `DYLAN-PLAN.md` v1.3.2 · **Checkpoint:** 2026-08-24 ~13:20 — session wave 3: **Nothing geometry** (global `Shapes` 0px/6px, NP sheet + Album + Artist reskin, `[320]` chip removed) + **notification tap fix** (`setSessionActivity`) + **Home cross-section dedupe** (`recordingKey`) + **stuck-PAUSED-after-process-death fix** (`onEnsureService` on every play/pause entry point) + **LOGGING OVERHAUL** (`LogLevel` DEBUG..CRITICAL, minLevel INFO prod / DEBUG debug-builds, buffer threaded into orchestrator/downloads/cache/reconciler/search + Android lifecycle logs) + **D23 scope fix** (SupervisorJob + exception handler) — all gates green (`jvmTest 71/71 --rerun-tasks`, ktlint, detekt, debug+release APKs); git repo re-inited, commits `718a20c` → `685e5fb`; debug APK `431b4a97…` built — **install+soak BLOCKED: device disconnected mid-install (`adb: no devices/emulators found`)**
 **Env:** macOS 26.5 arm64 · JAVA_HOME=`/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home` · ANDROID_HOME=`/opt/homebrew/share/android-commandlinetools/platform-tools`
-**Device:** vivo V2130 (`1380891582000GP`) — **CONNECTED 18:03** `adb devices` (`device`), **debug `5d34caf…a7faf7b9` (42 MB, 18:03) built** (`jvmTest 71/71`, `ktlintFormat` PASS, `assembleDebug` PASS) with B1+B2+artwork+Nothing+ClearCache+seek-bar — pending `adb install -r` + exhaustive soak; previous `64b98561…` verified 17:35 `foregroundId=1001` `MediaStyle` `actions=2` `vis=PUBLIC`.
+**Device:** vivo V2130 (`1380891582000GP`) — was connected through the Nothing-UI verification pass (screenshots captured: home `[320]`-free, album 6dp buttons, NP square geometry), **DISCONNECTED ~19:05 2026-08-23 during install of `431b4a97…`** — reconnect → `adb install -r` → soak (§11 step 1).
 **iOS build tooling still absent (Xcode ~12 GB not installed) — klib compiles verified, Swift runtime/stores unverified (BUILD-NOTES.md §3).**
+
+---
+
+## 0. SESSION WAVE 3 (2026-08-23 18:05 → 2026-08-24 13:20) — all coded + gates green; device soak pending
+
+### 0a. Nothing UI completion (user: "Current Playing + Album don't follow Nothing at all", "remove [320]")
+| Change | Files | Verified |
+|---|---|---|
+| Global Nothing geometry: `Shapes(extraSmall/small/medium/extraLarge = 0dp, large = 6dp)` in `DylanTheme` — fixes buttons (M3 default is `shapes.full` = pill!), sheets (square top corners), dropdowns, Library cards, pinned-bar art | `Tokens.kt:117-131` | screenshot: album PLAY/SHUFFLE now 6dp rectangles |
+| `[320]` chip removed from every song row | `SongRow.kt` (deleted `has320` chip block) | screenshot: home rows chip-free |
+| NP sheet: square artwork (no clip), square slider thumb (red/white inset) + custom square track (crisp ends, no rounded caps), square red play button (was circle), bordered square "PLAYING ON …" chip, bordered loading row, uppercase title/subtitle/status (`SAVING…`, `320KBPS`) | `NowPlayingSheet.kt` | screenshot 07 |
+| Album + Artist heroes: uppercase title/subtitle, `PLAY`/`SHUFFLE` uppercase `labelSmall` 1.2sp tracking, explicit `shape = MaterialTheme.shapes.large` (6dp) on both buttons, outlined button `contentColor = textPrimary` | `AlbumScreen.kt:110-140`, `ArtistScreen.kt:76-107` | screenshot 06 |
+
+### 0b. Notification tap opens app (user bug report)
+- **Root cause:** `MediaSession.Builder` never set `.setSessionActivity()` — Media3's `DefaultMediaNotificationProvider` uses the session activity as the notification content intent; null ⇒ tap is a no-op.
+- **Fix:** `PendingIntent.getActivity(MainActivity, FLAG_UPDATE_CURRENT|FLAG_IMMUTABLE)` + `.setSessionActivity(...)` — `DylanMediaService.kt:62-70`. MainActivity is `singleTask` + exported ⇒ clean resume. **Not yet verified on device** (needs playback + shade tap; part of soak).
+
+### 0c. Home cross-section dedupe (user: "fix catalog dupes in Home", "across all sections")
+- **Root cause:** JioSaavn serves one recording under multiple song ids (PROGRESS §4, identical-MD5 proof); all dedupe was `SongKey`-scoped ⇒ "WITHOUT ME" ×3 in `Based on your searches`, "Saiyaara" ×2 in history.
+- **New helper** `ui/components/RecordingKey.kt`: `Song.recordingKey()` = normalized(title) | normalized(primary artist ∥ subtitle) | exact `durationS`; `List<Song>.distinctRecordings()`, `containsRecording()`.
+- **Home sections** (`HomeScreen.kt:65-108,199-213`): jumpBack = `history.recent(20).distinctRecordings().take(5)` (fetch 20, survive dedupe shrink); searchPicks `distinctRecordings()` + filtered vs jumpBack/favorites by recording key; favorites `distinctRecordings()` and `favoritesShown = favorites − jumpBack` (precedence: Jump back → Based on searches → Favorites). LazyColumn keys still songId-based (unique post-dedupe). **Visual verify pending** (screenshot 10 captured pre-disconnect but unanalyzed).
+
+### 0d. Stuck-PAUSED after process death (user: "Without Me playback stuck", logs investigated)
+- **Repro:** `adb install -r` kills process → relaunch restores snapshot (mini-player shows track, PAUSED) → tap play on mini-player/NP sheet → **forever paused**.
+- **Root cause chain:** `onFirstPlay()` (which `startForegroundService(DylanMediaService)`) was only wired into the `playNow` closure (song-row/album taps). Mini-player `PlayPauseIcon` and NP-sheet red button submitted `Intent.TogglePlayPause` directly ⇒ service never started ⇒ engine never attached ⇒ `bufferedToggle` sat undrained (`Orchestrator.kt:149-161` drains on `Msg.Attach` only).
+- **Fix:** `onEnsureService` threaded `AppRoot → MiniPlayer → PlayPauseIcon` and `AppRoot → NowPlayingSheet` (both its own red Box and inner `PlayPauseIcon`); onClick = `onEnsureService(); submit(TogglePlayPause)`. `MainActivity.onFirstPlayTapped` is idempotent (`serviceStarted` flag) + re-requesting an FGS is harmless.
+- **Evidence trail (pre-fix logs):** logcat for pid had ZERO app lines (only gralloc4) — no player, no session, no notification in `dumpsys`. This also motivated 0e.
+- **Queue taps left unguarded deliberately** (only reachable while a session exists).
+
+### 0e. LOGGING OVERHAUL (user: "improve logs overall… proper levels… INFO prod / DEBUG debug… staff review")
+**Core (`shared/diag/LogBuffer.kt` rewritten):**
+- `enum LogLevel { DEBUG, INFO, WARN, ERROR, CRITICAL }`; `LogBuffer(capacity=512, minLevel)` — entries below minLevel dropped at entry (ring + sink both gated); helpers `d/i/w/e/c(tag,msg,metaJson)`; `LogBuffer.SILENT` for tests/unwired call sites; `bindSink` platform mirror retained; redaction (URL query strip + `resolve_ref=<redacted>`) preserved and applied to meta too.
+**Level policy:** prod = INFO (release: lifecycle + outcomes + failures only), debug builds = DEBUG (adds per-intent/per-frame detail). CRITICAL always passes both gates. Position ticks and per-byte progress are NEVER logged (hot-path discipline).
+**Threading:** `AppContainer(logMinLevel)` → `LogBuffer(minLevel)`; buffer passed into `Orchestrator`, `DownloadEngine`, `CacheManager`, `Reconciler`, `SaavnSearchChannel` (trailing default `= LogBuffer.SILENT` keeps all 71 tests compiling untouched).
+**Tag taxonomy (logcat `Dylan:<tag>`):** `boot` · `reconciler` · `weeklyGc`/`homeCacheEvict` · `qualityScan` · `play` (orchestrator: intents DEBUG, PlayNow/attach-drain/detach/restore/TrackChanged INFO, ensureReady-fail + engine-error WARN) · `dl` (downloads: enqueue INFO, dedupe-hit/dedupe-skip, resolve-fail WARN, 429/503 WARN+retryAfter, 416 WARN+count, done INFO `bits ext bytes ms`, failed ERROR `code detail`, job-crash CRITICAL) · `cache` (evict N files/bytes INFO + per-victim DEBUG, clear-cache totals, evictOne refused WARN) · `search` (ws timeout/socket strikes WARN n/3, degrade→HTTP-only WARN, per-query DEBUG) · `restore` (unparsable/sanitized-away/empty WARN, success INFO items/idx/pos) · `service` (onCreate/onDestroy/onTaskRemoved stop-decision) · `exo` (prepared INFO `item durMs`, playerError ERROR `code`) · `activity` (first-play service start).
+**Android wiring (`DylanApp.kt`):** sink → `Log.println` with level→priority mapping; min level from `ApplicationInfo.FLAG_DEBUGGABLE` (no BuildConfig/gradle churn); **D23/B5a violation FIXED** — appScope was bare `CoroutineScope(disp.state)`, now `SupervisorJob() + disp.state + CoroutineExceptionHandler { Log.e("Dylan:scope", "UNCAUGHT", t) }` (one crashed prefetch/scan no longer kills the process).
+**Legacy migrated:** 4× `log.log("e", tag, msg)` → `log.e(tag, msg)`; `scanQualityUpgrades()` returns count for INFO.
+**iOS:** sink binding (os_log) deferred to Xcode day; `LogBuffer` API is common so it's a 5-line actual.
+
+### 0f. Gates + artifacts (2026-08-24 13:16)
+| Gate | Result |
+|---|---|
+| `:shared:jvmTest --rerun-tasks` | **71/71 PASS, 0 failures** (XML-verified; ctor defaults kept every test untouched) |
+| `ktlintCheck` + `detekt` | PASS all modules (after `ktlintFormat` chain-style fixes) |
+| `:androidApp:assembleDebug` | PASS — `431b4a9713d1612f…` 42 MB (13:16) |
+| `:androidApp:assembleRelease` | PASS — R8 5.5 MB (13:17) |
+| Git | repo re-inited today: `718a20c` (init+semver+CI) → `0b7889d` (docs) → **`685e5fb` (this wave: logging + service guard + dedupe)** |
+| Known-benign build noise | `kotlin-stdlib 2.4.10 metadata vs 2.2.0 expected` `e:` lines from a stale variant compile — final status BUILD SUCCESSFUL, artifacts verified fresh |
+
+### 0g. Device verification status (BLOCKED — device disconnected)
+Verified on-device BEFORE disconnect (build `1f86b2a8…`, 2026-08-23 ~18:55): home `[320]`-free + Nothing intact · search 6dp box/chips · album 6dp PLAY/SHUFFLE + uppercase · NP sheet square art/thumb/play-button + uppercase + `320KBPS` · type-ahead stable.
+Pending on reconnect (install `431b4a97…` first): **(1)** stuck-play repro (force-stop → relaunch → tap mini-player play → must start service + drain + PLAYING; watch `adb logcat -s Dylan:play Dylan:service Dylan:exo`), **(2)** notification tap → app opens, **(3)** Home dedupe visual (WITHOUT ME once; Saiyaara once in jump-back), **(4)** logcat level proof (DEBUG lines present on debug build; `Dylan:dl` enqueue/done on a fresh download), **(5)** lock-screen art via `MediaMetadata` (B2 follow-up), **(6)** kill/resume `onPlaybackResumption` drill.
 
 ---
 
@@ -210,7 +262,7 @@ shasum -a 256 androidApp/build/outputs/apk/debug/*.apk androidApp/build/outputs/
 
 ## 11. REMAINING WORK (ordered — mirrors todo list, refreshed 2026-08-23 17:45 — device CONNECTED & B1/B2 fixed, new build pending install)
 
-**Device-bound — NEW BUILD WITH B1+B2+ARTWORK+NOTHING RESKIN PENDING INSTALL (adb connected, `64b98561…` installed, new 17:45 build with `async`/`artwork`/`Nothing` not yet on device):**
+**Device-bound — RECONNECT REQUIRED (device dropped mid-install of `431b4a97…`; install + soak = §0g list):**
 1. `adb install -r androidApp/build/outputs/apk/debug/androidApp-debug.apk` (new 17:45, ~42 MB) over `64b98561…` and **bug-bash soak**: re-verify E1 album next-track (incl. uncached→tail-prefetch path — now with **prominent `Downloading…` + disabled seek bar** `NowPlayingSheet.kt:83`), E2 shuffle-anchor, E8 artist view, fuzz taps/rapid nav, kill/resume (`onPlaybackResumption`) drills, offline/airplane toggles; **B1** verify `Based on your searches` now paints after max not sum (was laggy `HomeScreen.kt:61` sequential, now `async`/`awaitAll`); **B2** verify `Next` on uncached shows `0:00` + spinner + `LinearProgressIndicator` until `Done`, and lock-screen art shows via `MediaMetadata` `artworkUri` (`ExoPlayerEngine.kt:132` + `Orchestrator.kt:766`).
 2. Verify hardenings + Nothing reskin on hardware: **N1** `foregroundId=1001` `default_channel_id` `MediaStyle` `actions=2` already verified 17:35; **N2** icon `2,903B`/`31.18`; **N3** tail 95% + `QueueExhausted` fallback; **N4** ⋮ menu; **N5** sticky header; **N6** `evictOne`; **N7** `DYLAN (1)` + red dot `HomeScreen.kt:108`; **N8** `BackHandler`; **Nothing** `Tokens.kt:27` pure black `#000000`/`#111111`/`#2E2E2E` + `Red #FF3030` only, `SectionTitle` uppercase 1.6sp + `1dp` divider, `SongRow` `artwork` `1dp` border + `uppercase` + `red dot`, `AppRoot` `NavigationBar` `1dp` top border + `HOME/SEARCH/LIBRARY` mono) — visual soak.
 3. System-level drills: BT unplug→pause + `Playing on` pill, `POST_NOTIFICATIONS` denied `SettingsScreen.kt:148` card, queue drag, crash buffer, `Clear cache` row now single `Text("Clear cache")` without subtitle (`SettingsScreen.kt:135`) verify, Nothing `Dialog` + `Slider` `thumb 18/22dp` `track 4/6dp`.
