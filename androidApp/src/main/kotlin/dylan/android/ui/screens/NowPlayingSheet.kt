@@ -267,10 +267,13 @@ fun NowPlayingSheet(
                 Modifier
                     .size(64.dp)
                     .background(t.primary)
-                    .clickable { container.orchestrator.submit(Intent.TogglePlayPause) },
+                    .clickable {
+                        onEnsureService()
+                        container.orchestrator.submit(Intent.TogglePlayPause)
+                    },
                 contentAlignment = Alignment.Center,
             ) {
-                PlayPauseIcon(container, size = 48)
+                PlayPauseIcon(container, size = 48, onEnsureService = onEnsureService)
             }
             IconButton(onClick = { container.orchestrator.submit(Intent.Next) }) {
                 Icon(dylan.android.ui.Dyl.Next, "Next", tint = t.textPrimary)

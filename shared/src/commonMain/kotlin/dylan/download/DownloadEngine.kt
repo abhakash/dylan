@@ -105,6 +105,7 @@ class DownloadEngine(
         CoroutineScope(
             supervisor + disp.io +
                 kotlinx.coroutines.CoroutineExceptionHandler { _, t ->
+                    log.c("dl", "engine job crashed: ${t.message ?: t::class.simpleName}")
                     dylan.util.logErr("dylan-engine: ${t.message ?: t::class.simpleName}")
                 },
         )
@@ -239,6 +240,8 @@ class DownloadEngine(
 
     private suspend fun runJob(job: DownloadJob) {
         val key = job.key
+        val t0 = nowMs()
+        log.d("dl", "exec ${key.provider}:${key.songId} prio=${job.reason} bits=${job.bitrate}")
         cacheManager.inFlightJobKeys.update { it + key }
         var resolveCount = 0
         var attempts = 0
@@ -288,6 +291,7 @@ class DownloadEngine(
                                 db.dylanQueries.selectCached(key.provider, key.songId).executeAsOneOrNull()
                             }
                         if (entry != null && (entry.bitrate >= q.bits.toLong() || netClass() == NetClass.METERED)) {
+                            log.i("dl", "dedupe-hit ${key.provider}:${key.songId} cached=${entry.bitrate} wanted=${q.bits}")
                             cacheManager.touch(key, nowMs())
                             states.update { it + (key to JobState.Done(entry.bytes, entry.bitrate.toInt())) }
                             progress.update { it - key }
@@ -317,6 +321,7 @@ class DownloadEngine(
                         }
                         signed = provider.resolveStream(songRow!!.resolve_ref!!, q)
                         if (signed == null) {
+                            log.w("dl", "resolve failed attempt=$attempts/${cfg.resolveCapPerJob} ${key.provider}:${key.songId}")
                             if (++attempts <= cfg.dlRetries) {
                                 delay(cfg.dlBackoffBaseMs * attempts)
                             } else {
@@ -401,6 +406,7 @@ class DownloadEngine(
                             else ->
                                 when (val o = outcome) {
                                     is HttpOutcome.RateLimited -> {
+                                        log.w("dl", "429/503 ${key.provider}:${key.songId} retryAfter=${o.retryAfterMs ?: 5_000}ms")
                                         breaker.pauseUntil(nowMs() + (o.retryAfterMs ?: 5_000))
                                         if (job.reason == Priority.USER_NOW) return fail(key, DylanFailure(ErrorCode.RATE_LIMITED, key))
                                         requeueLater(job, o.retryAfterMs ?: 5_000)
@@ -420,6 +426,7 @@ class DownloadEngine(
                                         }
                                     is HttpOutcome.NotFound -> return fail(key, DylanFailure(ErrorCode.NOT_FOUND, key))
                                     is HttpOutcome.RangeNotSatisfiable -> {
+                                        log.w("dl", "416 restart ${key.provider}:${key.songId} rangeRestarts=$rangeRestarts")
                                         rangeRestarts++
                                         truncate(paths.part(key, q.bits))
                                         partB = 0
@@ -489,6 +496,7 @@ class DownloadEngine(
                         if (prev != null && prev.bitrate == q.bits.toLong() && prev.ext == ext && prev.bytes == finalSize) {
                             dylan.util.fsRename(tmp.toString(), finalPath.toString())
                             dropIntent(key)
+                            log.i("dl", "done(refetch) ${key.provider}:${key.songId} bytes=$finalSize ms=${nowMs() - t0}")
                             states.update { it + (key to JobState.Done(finalSize, q.bits)) }
                             progress.update { it - key }
                             return
@@ -523,6 +531,7 @@ class DownloadEngine(
                         }
                         cacheManager.enforceBudget(netNewBytes = 0, exemptKeys = setOf(key))
                         dropIntent(key)
+                        log.i("dl", "done ${key.provider}:${key.songId} bits=${q.bits} ext=$ext bytes=$finalSize ms=${nowMs() - t0}")
                         states.update { it + (key to JobState.Done(finalSize, q.bits)) }
                         progress.update { it - key }
                         return
@@ -642,6 +651,7 @@ class DownloadEngine(
         key: SongKey,
         err: DylanFailure,
     ) {
+        log.e("dl", "failed ${key.provider}:${key.songId} code=${err.code} detail=${err.detail ?: "-"}")
         states.update { it + (key to JobState.Failed(err, willRetry = false)) }
         progress.update { it - key }
         dropIntent(key)

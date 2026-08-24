@@ -19,10 +19,12 @@ class Reconciler(
     private val disp: AppDispatchers,
     private val engine: DownloadEngine,
     private val cacheManager: CacheManager,
+    private val log: dylan.diag.LogBuffer = dylan.diag.LogBuffer.SILENT,
 ) {
     suspend fun run() =
         withContext(disp.io) {
-            val now = nowMs()
+            val t0 = nowMs()
+            val now = t0
             val rows = withContext(disp.dbLane) { db.dylanQueries.selectAllCached().executeAsList() }
             val knownFinals = rows.map { paths.final(SongKey(it.provider, it.song_id), it.bitrate.toInt(), it.ext) }.toSet()
 
@@ -71,6 +73,7 @@ class Reconciler(
                 if (key in cachedKeys) {
                     engine.dropIntent(key)
                 } else {
+                    log.i("reconciler", "resuming intent ${key.provider}:${key.songId} reason=${intent.reason} bits=${intent.bitrate}")
                     engine.enqueue(
                         DownloadJob(
                             key = key,
@@ -83,5 +86,6 @@ class Reconciler(
             }
 
             cacheManager.enforceBudget(netNewBytes = 0)
+            log.i("reconciler", "sweep: files=${survivingFinals.size} parts=${parts.size} intents=${intents.size} resumed=${intents.count { SongKey(it.provider, it.song_id) !in cachedKeys }} ms=${nowMs() - t0}")
         }
 }

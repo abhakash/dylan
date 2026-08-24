@@ -43,6 +43,7 @@ class SaavnSearchChannel(
     private val wsClient: HttpClient,
     private val cfg: AppConfig,
     private val scope: CoroutineScope,
+    private val log: dylan.diag.LogBuffer = dylan.diag.LogBuffer.SILENT,
 ) : SearchChannel {
     var correlationMode = CorrelationMode.ORDERED
 
@@ -166,8 +167,11 @@ class SaavnSearchChannel(
                 }
             if (text == null) {
                 timeoutStrikes++
+                log.w("search", "ws timeout strike=$timeoutStrikes/3 q='$query'")
                 degrade()
                 closeQuietly()
+            } else {
+                log.d("search", "ws ok q='$query' mode=$correlationMode")
             }
             text
         } catch (e: kotlinx.coroutines.CancellationException) {
@@ -175,6 +179,7 @@ class SaavnSearchChannel(
             throw e
         } catch (e: Exception) {
             socketStrikes++
+            log.w("search", "ws socket strike=$socketStrikes/3 err=${e.message ?: e::class.simpleName}")
             degrade()
             closeQuietly()
             null
@@ -182,7 +187,10 @@ class SaavnSearchChannel(
     }
 
     private fun degrade() {
-        if (timeoutStrikes >= 3 || socketStrikes >= 3) httpOnly = true
+        if ((timeoutStrikes >= 3 || socketStrikes >= 3) && !httpOnly) {
+            httpOnly = true
+            log.w("search", "ws degraded → HTTP-only for session")
+        }
     }
 
     internal fun timeoutStrikesForTest() = timeoutStrikes

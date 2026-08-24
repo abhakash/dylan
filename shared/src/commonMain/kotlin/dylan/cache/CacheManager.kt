@@ -17,6 +17,7 @@ class CacheManager(
     val protectedKeys: StateFlow<Set<SongKey>>,
     private val cfg: AppConfig,
     private val disp: AppDispatchers,
+    private val log: dylan.diag.LogBuffer = dylan.diag.LogBuffer.SILENT,
 ) {
     val inFlightJobKeys = MutableStateFlow<Set<SongKey>>(emptySet())
     val upgradeSourceKeys = MutableStateFlow<Set<SongKey>>(emptySet())
@@ -87,6 +88,13 @@ class CacheManager(
 
         if (victims.isEmpty()) return@withContext
 
+        val deletes = victims.filterIsInstance<Victim.Delete>()
+        val demotes = victims.filterIsInstance<Victim.Demote>()
+        if (deletes.isNotEmpty()) {
+            log.i("cache", "evicting ${deletes.size} file(s) ${deletes.sumOf { it.row.bytes }}B (demoted ${demotes.size} pins)")
+            deletes.forEach { log.d("cache", "victim ${it.row.provider}:${it.row.song_id} bytes=${it.row.bytes} lastUsed=${it.row.last_used_ms}") }
+        }
+
         withContext(disp.dbLane) {
             db.transaction {
                 victims.forEach { v ->
@@ -151,19 +159,24 @@ class CacheManager(
                 }
             }
             doomed.forEach { runCatching { fs.delete(paths.final(SongKey(it.provider, it.song_id), it.bitrate.toInt(), it.ext)) } }
+            if (doomed.isNotEmpty()) log.i("cache", "clear-cache removed ${doomed.size} file(s) ${doomed.sumOf { it.bytes }}B kept=${keep.size - 1}")
             doomed.sumOf { it.bytes }
         }
 
     // Centralized per-key eviction — replaces app-side deleteCached+fs.delete workarounds
     suspend fun evictOne(key: SongKey): Boolean =
         withContext(disp.io) {
-            if (key in protectedKeys.value || key in inFlightJobKeys.value || key in upgradeSourceKeys.value) return@withContext false
+            if (key in protectedKeys.value || key in inFlightJobKeys.value || key in upgradeSourceKeys.value) {
+                log.w("cache", "evictOne refused (protected) ${key.provider}:${key.songId}")
+                return@withContext false
+            }
             val row =
                 withContext(disp.dbLane) {
                     db.dylanQueries.selectCached(key.provider, key.songId).executeAsOneOrNull()
                 } ?: return@withContext false
             withContext(disp.dbLane) { db.dylanQueries.deleteCached(key.provider, key.songId) }
             runCatching { fs.delete(paths.final(key, row.bitrate.toInt(), row.ext)) }
+            log.i("cache", "evictOne ${key.provider}:${key.songId} freed=${row.bytes}B")
             true
         }
 }

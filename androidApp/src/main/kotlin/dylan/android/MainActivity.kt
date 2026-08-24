@@ -24,6 +24,10 @@ class MainActivity : ComponentActivity() {
         ensureNotificationPermission()
         if (!serviceStarted) {
             serviceStarted = true
+            DylanApp
+                .of(this)
+                .container.log
+                .i("activity", "first play → starting DylanMediaService")
             startForegroundService(Intent(this, dylan.android.media.DylanMediaService::class.java))
         }
     }

@@ -34,6 +34,8 @@ import dylan.android.ui.LocalDylanTokens
 import dylan.android.ui.components.OfflineBanner
 import dylan.android.ui.components.SectionTitle
 import dylan.android.ui.components.SongRow
+import dylan.android.ui.components.containsRecording
+import dylan.android.ui.components.distinctRecordings
 import dylan.android.ui.components.rememberFavoriteKeys
 import dylan.android.ui.components.rememberSongActions
 import dylan.android.ui.components.toArtistEntry
@@ -64,8 +66,14 @@ fun HomeScreen(
 
     LaunchedEffect(Unit) {
         // Load fast local data first — no network
-        jumpBack = runCatching { container.history.recent(5) }.getOrDefault(emptyList())
-        favorites = runCatching { container.favorites.all() }.getOrDefault(emptyList())
+        // Catalog-level dedupe: JioSaavn serves one recording under multiple song ids —
+        // dedupe every section by recordingKey and across sections by section precedence.
+        jumpBack =
+            runCatching { container.history.recent(20) }
+                .getOrDefault(emptyList())
+                .distinctRecordings()
+                .take(5)
+        favorites = runCatching { container.favorites.all() }.getOrDefault(emptyList()).distinctRecordings()
         coroutineScope {
             val feedDeferred = async { runCatching { container.provider.home() }.getOrNull() }
             val topSearchesDeferred = async { runCatching { container.provider.topSearches() }.getOrDefault(emptyList()) }
@@ -90,8 +98,8 @@ fun HomeScreen(
                             }
                         }.awaitAll()
                         .flatten()
-                        .distinctBy { it.key }
-                        .filter { s -> jumpBack.none { it.key == s.key } && favorites.none { it.key == s.key } }
+                        .distinctRecordings()
+                        .filter { s -> !jumpBack.containsRecording(s) && !favorites.containsRecording(s) }
                         .take(8)
                 }
             val feed = feedDeferred.await()
@@ -196,10 +204,13 @@ fun HomeScreen(
                 )
             }
         }
-        if (favorites.isNotEmpty()) {
+        // Cross-section dedupe: a favorite already visible in Jump back in is hidden here
+        // (searchPicks already exclude favorites, so favorites only need the jumpBack filter).
+        val favoritesShown = favorites.filter { f -> !jumpBack.containsRecording(f) }
+        if (favoritesShown.isNotEmpty()) {
             item { SectionTitle("Your favorites") }
-            items(favorites.take(5), key = { "fv" + it.key.songId }) { song ->
-                val topFive = favorites.take(5)
+            val topFive = favoritesShown.take(5)
+            items(topFive, key = { "fv" + it.key.songId }) { song ->
                 SongRow(
                     song = song,
                     isFavorite = true,

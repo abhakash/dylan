@@ -23,6 +23,7 @@ import kotlinx.coroutines.flow.StateFlow
 class ExoPlayerEngine(
     context: Context,
 ) : PlayerEngine {
+    private val log = (context.applicationContext as dylan.android.DylanApp).container.log
     private val thread = HandlerThread("dylan-media").apply { start() }
     private val handler = Handler(thread.looper)
 
@@ -68,6 +69,7 @@ class ExoPlayerEngine(
                 object : Player.Listener {
                     override fun onPlaybackStateChanged(state: Int) {
                         if (state == Player.STATE_READY) {
+                            log.i("exo", "prepared item=${player.currentMediaItem?.mediaId} durMs=${player.duration}")
                             player.currentMediaItem?.mediaId?.let { emit(EngineEvent.Prepared(it)) }
                         }
                         if (state == Player.STATE_ENDED) emit(EngineEvent.QueueExhausted)
@@ -97,6 +99,7 @@ class ExoPlayerEngine(
                     }
 
                     override fun onPlayerError(error: PlaybackException) {
+                        log.e("exo", "playerError item=${player.currentMediaItem?.mediaId} code=${error.errorCode} ${error.message ?: ""}")
                         val kind = if (error.errorCode in 2000..2999) dylan.playback.EngineErr.SOURCE else dylan.playback.EngineErr.DECODE
                         emit(EngineEvent.Error(player.currentMediaItem?.mediaId, kind))
                     }

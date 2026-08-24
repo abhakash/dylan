@@ -42,8 +42,9 @@ class AppContainer(
     val netMonitor: NetMonitor,
     httpEngine: HttpClientEngine,
     private val engineFactory: () -> dylan.playback.PlayerEngine,
+    logMinLevel: dylan.diag.LogLevel = dylan.diag.LogLevel.INFO,
 ) {
-    val log = LogBuffer()
+    val log = LogBuffer(minLevel = logMinLevel)
     val protectedKeys = MutableStateFlow<Set<SongKey>>(emptySet())
     val fs: FileSystem = FileSystem.SYSTEM
     val paths = Paths((baseDir.toPath() / "audio"), fs)
@@ -59,9 +60,9 @@ class AppContainer(
         }
 
     val provider = SaavnProvider(api, cfg)
-    val searchChannel = SaavnSearchChannel(api, ws, cfg, scope)
+    val searchChannel = SaavnSearchChannel(api, ws, cfg, scope, log)
 
-    val cacheManager = CacheManager(db, fs, paths, protectedKeys, cfg, disp)
+    val cacheManager = CacheManager(db, fs, paths, protectedKeys, cfg, disp, log)
     val downloads =
         DownloadEngine(
             db = db,
@@ -75,6 +76,7 @@ class AppContainer(
             cacheManager = cacheManager,
             netClass = { netMonitor.current() },
             qualityPref = { settings.qualityPref() },
+            log = log,
         )
     val orchestrator =
         Orchestrator(
@@ -89,19 +91,24 @@ class AppContainer(
             settings = settings,
             net = netMonitor,
             protectedKeys = protectedKeys,
+            log = log,
         )
     val favorites = Favorites(db, disp, cacheManager)
     val history = History(db, disp)
     val searchHistory = SearchHistoryRepo(db, disp, cfg)
     val homeCache = HomeCacheRepo(db, disp, cfg)
-    val reconciler = Reconciler(db, fs, paths, cfg, disp, downloads, cacheManager)
+    val reconciler = Reconciler(db, fs, paths, cfg, disp, downloads, cacheManager, log)
 
     fun createEngine(): dylan.playback.PlayerEngine = engineFactory()
 
     init {
+        log.i("boot", "container up dir=$baseDir")
         downloads.start()
         scope.launch(disp.io) {
-            runCatching { reconciler.run() }.onFailure { log.e("reconciler", it.message ?: "failed") }
+            val t0 = dylan.util.nowMs()
+            runCatching { reconciler.run() }
+                .onSuccess { log.i("reconciler", "boot sweep done in ${dylan.util.nowMs() - t0}ms") }
+                .onFailure { log.e("reconciler", it.message ?: "failed") }
             orchestrator.restoreFromSnapshot()
         }
         scope.launch(disp.io) {
@@ -110,9 +117,12 @@ class AppContainer(
                 val last = runCatching { settings.get("gc_last_ms")?.toLongOrNull() ?: 0L }.getOrDefault(0L)
                 val weekMs = 7L * 24 * 60 * 60 * 1000
                 if (now - last >= weekMs) {
+                    log.i("weeklyGc", "running (last=$last)")
                     runCatching { db.weeklyGc(disp, cfg) }
+                        .onSuccess { log.i("weeklyGc", "done") }
                         .onFailure { log.e("weeklyGc", it.message ?: "failed") }
                     runCatching { homeCache.evictWeekly() }
+                        .onSuccess { log.i("homeCacheEvict", "done") }
                         .onFailure { log.e("homeCacheEvict", it.message ?: "failed") }
                     runCatching { settings.put("gc_last_ms", now.toString()) }
                 }
@@ -128,12 +138,13 @@ class AppContainer(
                 if (netMonitor.current() == dylan.util.NetClass.METERED) continue
                 if (cacheManager.inFlightJobKeys.value.isNotEmpty()) continue
                 runCatching { scanQualityUpgrades() }
+                    .onSuccess { n -> if (n > 0) log.i("qualityScan", "enqueued $n upgrades") }
                     .onFailure { log.e("qualityScan", it.message ?: "failed") }
             }
         }
     }
 
-    private suspend fun scanQualityUpgrades() {
+    private suspend fun scanQualityUpgrades(): Int {
         val candidates =
             withContext(disp.dbLane) {
                 val rows = db.dylanQueries.selectAllCached().executeAsList()
@@ -149,6 +160,7 @@ class AppContainer(
             // Dedupe: if already at 320 or upgrade intent pending, DownloadEngine will no-op.
             downloads.enqueue(dylan.download.DownloadJob(key, dylan.download.Priority.QUALITY_UPGRADE, 320, dylan.util.nowMs()))
         }
+        return candidates.size
     }
 
     fun onBackground() {

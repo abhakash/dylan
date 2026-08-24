@@ -23,6 +23,8 @@ class DylanMediaService : MediaSessionService() {
 
     override fun onCreate() {
         super.onCreate()
+        val appLog = DylanApp.of(this).container.log
+        appLog.i("service", "onCreate")
         // FGS contract: startForegroundService() must see startForeground within seconds.
         // Media3 promotes only when playback starts — an uncached download exceeds the window
         // and kills the process (ForegroundServiceDidNotStartInTimeException).
@@ -132,12 +134,21 @@ class DylanMediaService : MediaSessionService() {
         val e = engine ?: return super.onTaskRemoved(rootIntent)
         e.postToMedia {
             val p = session?.player
-            if (p == null || !p.playWhenReady || p.mediaItemCount == 0) stopSelf()
+            val stop = p == null || !p.playWhenReady || p.mediaItemCount == 0
+            DylanApp
+                .of(this@DylanMediaService)
+                .container.log
+                .i("service", "onTaskRemoved stop=$stop")
+            if (stop) stopSelf()
         }
         super.onTaskRemoved(rootIntent)
     }
 
     override fun onDestroy() {
+        DylanApp
+            .of(this)
+            .container.log
+            .i("service", "onDestroy")
         val c = DylanApp.of(this).container
         routeJob?.cancel()
         routeJob = null

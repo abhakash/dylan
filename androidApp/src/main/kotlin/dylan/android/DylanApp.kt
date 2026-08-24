@@ -31,25 +31,40 @@ class DylanApp : Application() {
                 Dispatchers.IO.limitedParallelism(1),
                 Dispatchers.Default.limitedParallelism(1),
             )
+        // D23/B5a: appScope = SupervisorJob + state lane + logging exception handler — a crashed
+        // prefetch/scan coroutine must never cancel siblings or kill the process.
+        val appScope =
+            CoroutineScope(
+                kotlinx.coroutines.SupervisorJob() + disp.state +
+                    kotlinx.coroutines.CoroutineExceptionHandler { _, t ->
+                        android.util.Log.e("Dylan:scope", "UNCAUGHT in appScope", t)
+                    },
+            )
         container =
             AppContainer(
                 cfg = AppConfig(),
                 disp = disp,
-                scope = CoroutineScope(disp.state),
+                scope = appScope,
                 baseDir = filesDir.absolutePath,
                 driverFactory = DriverFactory(this),
                 netMonitor = NetMonitor(this),
                 httpEngine = OkHttp.create(),
                 engineFactory = { ExoPlayerEngine(this) },
+                logMinLevel =
+                    if (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0) {
+                        dylan.diag.LogLevel.DEBUG
+                    } else {
+                        dylan.diag.LogLevel.INFO
+                    },
             )
         // Mirror the shared ring buffer into logcat (tag: Dylan:<tag>) so device triage sees app state.
         container.log.bindSink { e ->
             val prio =
                 when (e.level) {
-                    dylan.diag.LogLevel.ERROR, dylan.diag.LogLevel.CRITICAL -> android.util.Log.ERROR
-                    dylan.diag.LogLevel.WARN -> android.util.Log.WARN
                     dylan.diag.LogLevel.DEBUG -> android.util.Log.DEBUG
-                    else -> android.util.Log.INFO
+                    dylan.diag.LogLevel.INFO -> android.util.Log.INFO
+                    dylan.diag.LogLevel.WARN -> android.util.Log.WARN
+                    dylan.diag.LogLevel.ERROR, dylan.diag.LogLevel.CRITICAL -> android.util.Log.ERROR
                 }
             android.util.Log.println(prio, "Dylan:${e.tag}", e.msg + (e.metaJson?.let { " $it" } ?: ""))
         }
