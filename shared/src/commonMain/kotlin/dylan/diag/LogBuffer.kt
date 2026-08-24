@@ -29,11 +29,20 @@ class LogBuffer(
     // Copy-on-write ring: lock-free on every platform (no `synchronized` — JVM-only).
     private val ring = AtomicReference<PersistentList<Entry>>(emptyList<Entry>().toPersistentList())
 
-    // Optional platform mirror (Android logcat, iOS os_log) — bound once at app init.
-    private var sink: ((Entry) -> Unit)? = null
+    // Sinks (platform mirrors: file appender, Android logcat, iOS os_log) — additive, so
+    // core can own the persistent file sink while each platform adds its console mirror.
+    private val sinks = AtomicReference<List<(Entry) -> Unit>>(emptyList())
 
     fun bindSink(f: (Entry) -> Unit) {
-        sink = f
+        while (true) {
+            val cur = sinks.load()
+            if (f in cur) return
+            if (sinks.compareAndSet(cur, cur + f)) return
+        }
+    }
+
+    private fun emit(e: Entry) {
+        sinks.load().forEach { s -> runCatching { s(e) } }
     }
 
     fun log(
@@ -50,7 +59,7 @@ class LogBuffer(
             if (next.size > capacity) next = next.removeAt(0)
             if (ring.compareAndSet(cur, next)) break
         }
-        sink?.invoke(e)
+        emit(e)
     }
 
     fun dump(): List<Entry> = ring.load().toList()

@@ -48,6 +48,20 @@ class AppContainer(
     val protectedKeys = MutableStateFlow<Set<SongKey>>(emptySet())
     val fs: FileSystem = FileSystem.SYSTEM
     val paths = Paths((baseDir.toPath() / "audio"), fs)
+
+    // Persistent diagnostic trail (<baseDir>/logs/dylan.log.*) — survives restarts so a bug
+    // reported days later is still diagnosable. Bound before any component logs.
+    val fileLog =
+        dylan.diag.FileLogSink(
+            fs = fs,
+            dir = baseDir.toPath() / "logs",
+            scope = kotlinx.coroutines.CoroutineScope(scope.coroutineContext + disp.io),
+        )
+
+    init {
+        log.bindSink(fileLog::accept)
+    }
+
     val db = Dylan(driverFactory.createDriver())
     val settings = SettingsStore(db, disp, cfg)
     val breakers = Breakers()

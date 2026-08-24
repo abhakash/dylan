@@ -89,6 +89,19 @@ Pending on reconnect (install `431b4a97…` first): **(1)** stuck-play repro (fo
 
 **New tests** (`HistoryRepoTest.kt`, 2): album grouping by MAX(play time) + ordering; NULL-album exclusion + LIMIT. Gates: **jvmTest 81/81**, ktlint, detekt, iOS compile, debug+release APKs — all green.
 
+### 0k. Persistent log files — the "diagnose it a week later" trail (2026-08-24 ~17:00)
+| Aspect | Decision |
+|---|---|
+| Why | In-memory ring + logcat die with process/OS buffers — nothing to scrape later; user explicitly wants week-later bug reports |
+| Core | `diag/FileLogSink.kt` (commonMain): DROP_OLDEST channel → single writer coroutine (batch drain, flush per batch ⇒ ≤50 ms crash tail); entries redacted upstream by `LogBuffer` |
+| Rotation | Size-based: `logs/dylan.log.0` rolls → `.1`, `.2`; oldest deleted. Default 512 KB × 2 archives ≈ 1.5 MB hard cap |
+| Wiring | `AppContainer` binds file sink in common init; `LogBuffer.bindSink` is now **additive** (list) so Android keeps logcat mirror too; iOS gains persistent logs for free |
+| Format | `2026-08-24T13:45:12.345Z I/dl: message {meta}` — ISO-UTC via dependency-free civil-from-days (`isoUtc`) |
+| Scrape | Android debug: `adb shell run-as app.dylan.player cat files/logs/dylan.log.0` (or pull). iOS: sandbox `baseDir/logs/` |
+| Tests | `FileLogSinkTest` (2): parseable line + known-instant UTC check; flood → rotation, per-file cap, retention deletes oldest |
+
+**Gates:** jvmTest **83/83**, ktlint, detekt, iOS compile, debug+release APKs — green.
+
 ---
 
 ## 1. Pipeline status (last verified runs — --rerun-tasks --no-configuration-cache)
