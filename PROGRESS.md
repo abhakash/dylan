@@ -78,6 +78,17 @@ Pending on reconnect (install `431b4a97…` first): **(1)** stuck-play repro (fo
 | `:shared:compileKotlinIosSimulatorArm64` | PASS (incl. `failureMessage` delegation) |
 | `:androidApp:assembleDebug` / `assembleRelease` | PASS (fresh APKs, this wave) |
 
+### 0j. Home UX round 2 (2026-08-24 ~16:10 — user feedback: "(1)" badge, scroll jank, searches section, album carousel, mini-player pull-up)
+| Request | Change |
+|---|---|
+| Remove "( 1 )" next to DYLAN logo | Was a hardcoded placeholder `Text("( 1 )")` — deleted (logo row now DYLAN + SETTINGS only) |
+| Scroll lags/jumps at Trending Albums | Root cause: `Row(horizontalScroll)` composed **every** cover tile eagerly on entering viewport + full-res decodes. Both carousels → `LazyRow` (tiles compose as they approach) with stable keys; shared `AlbumTile` extracted |
+| Remove "Based on your searches" | Section, its `searchPicks` loader (3×`provider.search` fan-out) and state deleted from `HomeScreen`; `SearchHistoryRepo` untouched (search screen still uses it) |
+| Album carousel of what user listened to | New SQL `recentAlbums` (`play_history ⋈ songs`, `GROUP BY provider+album_id`, `MAX(played_at_ms)` desc, `LIMIT ?`) → `History.recentAlbums(limit)` → "Recently played albums" `AlbumCarousel` above favorites; pure SQLite personalization, no network |
+| Pull-up gesture on bottom NP bar | `MiniPlayer` gained `detectVerticalDragGestures`: sustained upward drag > 64dp expands the sheet mid-gesture (consumed so it never fights the tap-to-expand) |
+
+**New tests** (`HistoryRepoTest.kt`, 2): album grouping by MAX(play time) + ordering; NULL-album exclusion + LIMIT. Gates: **jvmTest 81/81**, ktlint, detekt, iOS compile, debug+release APKs — all green.
+
 ---
 
 ## 1. Pipeline status (last verified runs — --rerun-tasks --no-configuration-cache)

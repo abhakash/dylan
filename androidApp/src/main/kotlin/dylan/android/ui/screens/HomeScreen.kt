@@ -2,10 +2,10 @@ package dylan.android.ui.screens
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
@@ -13,12 +13,11 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -27,6 +26,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -43,7 +43,6 @@ import dylan.di.AppContainer
 import dylan.model.MiniEntity
 import dylan.model.Song
 import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 
 @Composable
@@ -58,50 +57,27 @@ fun HomeScreen(
     var trending by remember { mutableStateOf<List<dylan.model.MiniEntity>>(emptyList()) }
     var topSearches by remember { mutableStateOf<List<dylan.model.MiniEntity>>(emptyList()) }
     var jumpBack by remember { mutableStateOf<List<Song>>(emptyList()) }
-    var searchPicks by remember { mutableStateOf<List<Song>>(emptyList()) }
+    var albumHistory by remember { mutableStateOf<List<dylan.db.RecentAlbums>>(emptyList()) }
     var favorites by remember { mutableStateOf<List<Song>>(emptyList()) }
     var offline by remember { mutableStateOf(false) }
     val actions = rememberSongActions(container)
     val favKeys = rememberFavoriteKeys(container)
 
     LaunchedEffect(Unit) {
-        // Load fast local data first — no network
+        // Fast local data first — pure SQLite, no network.
         // Catalog-level dedupe: JioSaavn serves one recording under multiple song ids —
-        // dedupe every section by recordingKey and across sections by section precedence.
+        // dedupe by recordingKey and across sections by section precedence.
         jumpBack =
             runCatching { container.history.recent(20) }
                 .getOrDefault(emptyList())
                 .distinctRecordings()
                 .take(5)
         favorites = runCatching { container.favorites.all() }.getOrDefault(emptyList()).distinctRecordings()
+        albumHistory =
+            runCatching { container.history.recentAlbums(12) }.getOrDefault(emptyList())
         coroutineScope {
             val feedDeferred = async { runCatching { container.provider.home() }.getOrNull() }
             val topSearchesDeferred = async { runCatching { container.provider.topSearches() }.getOrDefault(emptyList()) }
-            // Based on searches: 3 queries × 4 songs — run concurrently, not sequentially (was 600-1200ms lag)
-            val queries =
-                runCatching { container.searchHistory.recent() }
-                    .getOrDefault(emptyList())
-                    .take(3)
-            searchPicks =
-                if (queries.isEmpty()) {
-                    emptyList()
-                } else {
-                    queries
-                        .map { q ->
-                            async {
-                                runCatching {
-                                    container.provider
-                                        .search(q, 1)
-                                        .items
-                                        .take(4)
-                                }.getOrDefault(emptyList())
-                            }
-                        }.awaitAll()
-                        .flatten()
-                        .distinctRecordings()
-                        .filter { s -> !jumpBack.containsRecording(s) && !favorites.containsRecording(s) }
-                        .take(8)
-                }
             val feed = feedDeferred.await()
             trending =
                 feed
@@ -116,7 +92,7 @@ fun HomeScreen(
     LazyColumn(
         Modifier.fillMaxSize(),
         contentPadding =
-            androidx.compose.foundation.layout.PaddingValues(
+            PaddingValues(
                 top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + 8.dp,
                 bottom = 16.dp,
             ),
@@ -128,25 +104,13 @@ fun HomeScreen(
                     .background(t.background)
                     .padding(horizontal = 16.dp, vertical = 14.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(
-                        "DYLAN",
-                        style = MaterialTheme.typography.displayLarge.copy(letterSpacing = 1.2.sp),
-                        color = t.textPrimary,
-                    )
-                    Box(
-                        Modifier
-                            .size(6.dp)
-                            .background(t.primary, androidx.compose.foundation.shape.CircleShape),
-                    )
-                    Text(
-                        "( 1 )",
-                        style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 1.4.sp),
-                        color = t.textSecondary,
-                    )
-                }
+                Text(
+                    "DYLAN",
+                    style = MaterialTheme.typography.displayLarge.copy(letterSpacing = 1.2.sp),
+                    color = t.textPrimary,
+                )
                 Box(
                     Modifier
                         .background(t.surfaceVariant)
@@ -185,27 +149,14 @@ fun HomeScreen(
                 )
             }
         }
-        if (searchPicks.isNotEmpty()) {
-            item { SectionTitle("Based on your searches") }
-            items(searchPicks, key = { "sp" + it.key.songId }) { song ->
-                SongRow(
-                    song = song,
-                    isFavorite = song.key in favKeys,
-                    onTap = { onPlaySongs(listOf(song), 0) },
-                    onPlayNext = { actions.playNext(song) },
-                    onAddLast = { actions.addToQueue(song) },
-                    onFavorite = { actions.toggleFavorite(song) },
-                    onGoToArtist =
-                        if (song.artistToken != null) {
-                            { onOpenArtist(song.toArtistEntry()) }
-                        } else {
-                            null
-                        },
-                )
+        // Personalized from SQLite play history — albums the user has actually listened to.
+        if (albumHistory.isNotEmpty()) {
+            item { SectionTitle("Recently played albums") }
+            item {
+                AlbumCarousel(albumHistory, onOpenAlbum)
             }
         }
-        // Cross-section dedupe: a favorite already visible in Jump back in is hidden here
-        // (searchPicks already exclude favorites, so favorites only need the jumpBack filter).
+        // Cross-section dedupe: a favorite already visible in Jump back in is hidden here.
         val favoritesShown = favorites.filter { f -> !jumpBack.containsRecording(f) }
         if (favoritesShown.isNotEmpty()) {
             item { SectionTitle("Your favorites") }
@@ -224,37 +175,14 @@ fun HomeScreen(
         if (trending.isNotEmpty()) {
             item { SectionTitle("Trending albums") }
             item {
-                Row(
-                    Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
+                // LazyRow, not Row+horizontalScroll: tiles compose as they scroll into view —
+                // an eager Row composed every cover at once and janked the scroll.
+                LazyRow(
+                    contentPadding = PaddingValues(horizontal = 16.dp),
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    trending.forEach { m ->
-                        Column(
-                            Modifier
-                                .width(118.dp)
-                                .background(t.divider)
-                                .padding(1.dp)
-                                .background(t.surfaceVariant)
-                                .clickable(enabled = m.albumId != null) { m.albumId?.let(onOpenAlbum) }
-                                .padding(6.dp),
-                        ) {
-                            coil3.compose.AsyncImage(
-                                model = m.image,
-                                contentDescription = m.title,
-                                modifier =
-                                    Modifier
-                                        .fillMaxWidth()
-                                        .height(118.dp)
-                                        .background(t.background),
-                            )
-                            Text(
-                                m.title.uppercase(),
-                                style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 0.8.sp),
-                                color = t.textPrimary,
-                                maxLines = 1,
-                                modifier = Modifier.padding(top = 6.dp),
-                            )
-                        }
+                    items(trending, key = { it.songKey?.toString() ?: ("t" + (it.albumId ?: it.title)) }) { m ->
+                        AlbumTile(title = m.title, image = m.image, onClick = { m.albumId?.let(onOpenAlbum) })
                     }
                 }
             }
@@ -262,32 +190,81 @@ fun HomeScreen(
         if (topSearches.isNotEmpty()) {
             item { SectionTitle("Top searches") }
             item {
-                Row(
-                    Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
+                LazyRow(
+                    contentPadding = PaddingValues(horizontal = 16.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    topSearches
-                        .filter { it.albumId != null }
-                        .take(12)
-                        .forEach { m ->
-                            Box(
-                                Modifier
-                                    .background(t.divider)
-                                    .padding(1.dp)
-                                    .background(t.background)
-                                    .clickable { m.albumId?.let(onOpenAlbum) }
-                                    .padding(horizontal = 12.dp, vertical = 8.dp),
-                            ) {
-                                Text(
-                                    m.title.uppercase(),
-                                    style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 0.8.sp),
-                                    color = t.textPrimary,
-                                    maxLines = 1,
-                                )
-                            }
+                    val chips = topSearches.filter { it.albumId != null }.take(12)
+                    items(chips, key = { "ts" + (it.albumId ?: it.title) }) { m ->
+                        Box(
+                            Modifier
+                                .background(t.divider)
+                                .padding(1.dp)
+                                .background(t.background)
+                                .clickable { m.albumId?.let(onOpenAlbum) }
+                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                        ) {
+                            Text(
+                                m.title.uppercase(),
+                                style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 0.8.sp),
+                                color = t.textPrimary,
+                                maxLines = 1,
+                            )
                         }
+                    }
                 }
             }
+        }
+    }
+}
+
+/** One square album tile shared by both carousels. */
+@Composable
+private fun AlbumTile(
+    title: String,
+    image: String?,
+    onClick: (() -> Unit)?,
+) {
+    val t = LocalDylanTokens.current
+    Column(
+        Modifier
+            .width(118.dp)
+            .background(t.divider)
+            .padding(1.dp)
+            .background(t.surfaceVariant)
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+            .padding(6.dp),
+    ) {
+        coil3.compose.AsyncImage(
+            model = image,
+            contentDescription = title,
+            modifier =
+                Modifier
+                    .fillMaxWidth()
+                    .height(118.dp)
+                    .background(t.background),
+        )
+        Text(
+            title.uppercase(),
+            style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 0.8.sp),
+            color = t.textPrimary,
+            maxLines = 1,
+            modifier = Modifier.padding(top = 6.dp),
+        )
+    }
+}
+
+@Composable
+private fun AlbumCarousel(
+    albums: List<dylan.db.RecentAlbums>,
+    onOpen: (String) -> Unit,
+) {
+    LazyRow(
+        contentPadding = PaddingValues(horizontal = 16.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        items(albums, key = { it.albumId.orEmpty() }) { a ->
+            AlbumTile(title = a.albumName ?: "", image = a.artUrl, onClick = { a.albumId?.let(onOpen) })
         }
     }
 }

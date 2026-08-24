@@ -3,6 +3,7 @@ package dylan.android.ui
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -28,6 +29,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -221,7 +223,22 @@ fun MiniPlayer(
                 .background(t.divider)
                 .padding(top = 1.dp)
                 .background(t.surface)
-                .clickable(onClick = onExpand)
+                // Pull up anywhere on the bar expands the Now Playing sheet — tap still works
+                // (drag detector only claims events once a vertical drag is detected).
+                .pointerInput(Unit) {
+                    var accum = 0f
+                    detectVerticalDragGestures(
+                        onDragStart = { accum = 0f },
+                        onVerticalDrag = { change, dragAmount ->
+                            change.consume()
+                            accum += dragAmount
+                            if (accum < -64.dp.toPx()) {
+                                accum = 0f
+                                onExpand()
+                            }
+                        },
+                    )
+                }.clickable(onClick = onExpand)
                 .padding(horizontal = 12.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),

@@ -167,6 +167,18 @@ DELETE FROM play_history WHERE id NOT IN (SELECT id FROM play_history ORDER BY p
 recentHistory:
 SELECT s.* FROM play_history h JOIN songs s ON s.provider = h.provider AND s.song_id = h.song_id GROUP BY h.provider, h.song_id ORDER BY MAX(h.played_at_ms) DESC LIMIT ?;
 
+recentAlbums:
+SELECT s.album_id AS albumId,
+       s.album_name AS albumName,
+       s.art_url_500 AS artUrl,
+       MAX(h.played_at_ms) AS lastPlayedMs
+FROM play_history h
+JOIN songs s ON s.provider = h.provider AND s.song_id = h.song_id
+WHERE s.album_id IS NOT NULL AND s.album_id != ''
+GROUP BY s.provider, s.album_id
+ORDER BY lastPlayedMs DESC
+LIMIT ?;
+
 upsertSearchHistory:
 INSERT OR REPLACE INTO search_history VALUES (?, ?, ?);
 

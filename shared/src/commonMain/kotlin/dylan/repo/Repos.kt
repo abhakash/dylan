@@ -3,6 +3,7 @@ package dylan.repo
 import dylan.cache.CacheManager
 import dylan.config.AppConfig
 import dylan.db.Dylan
+import dylan.db.RecentAlbums
 import dylan.db.Songs
 import dylan.model.Song
 import dylan.model.SongKey
@@ -100,6 +101,14 @@ class History(
                 .recentHistory(limit.toLong())
                 .executeAsList()
                 .map { it.toSong() }
+        }
+
+    /** Album carousel personalization — pure SQLite: last-played album per (provider, album_id). */
+    suspend fun recentAlbums(limit: Int): List<RecentAlbums> =
+        withContext(disp.dbLane) {
+            db.dylanQueries
+                .recentAlbums(limit.toLong())
+                .executeAsList()
         }
 }
 
