@@ -117,6 +117,22 @@ data class DylanFailure(
     val detail: String? = null,
 )
 
+/** Single user-facing copy source — Android toasts, NP sheet, and iOS failureMessage all route here. */
+fun DylanFailure.message(): String =
+    when (code) {
+        ErrorCode.OFFLINE -> "You're offline — saved music still plays."
+        ErrorCode.NOT_FOUND -> "This track seems unavailable."
+        ErrorCode.NO_SOURCE -> "No playable source for this track."
+        ErrorCode.NOT_CACHEABLE, ErrorCode.UNSUPPORTED -> "This track can't be saved for offline play."
+        ErrorCode.EXPIRED, ErrorCode.RESOLVE_LIMIT -> "Couldn't refresh this track. Try again."
+        ErrorCode.FORBIDDEN_REGION -> "Not available in your region."
+        ErrorCode.NETWORK, ErrorCode.NETWORK_TIMEOUT, ErrorCode.DRIFT -> "Check your connection and try again."
+        ErrorCode.STORAGE -> "Not enough space. Free up storage or clear cache."
+        ErrorCode.CORRUPT_SIZE, ErrorCode.CORRUPT_CONTAINER -> "That file didn't download cleanly. Retrying…"
+        ErrorCode.RATE_LIMITED -> "Slow down a moment…"
+        ErrorCode.TOO_MANY_FAILURES -> "Several tracks failed to load. Check your connection."
+    }
+
 sealed interface Phase {
     data object Idle : Phase
 

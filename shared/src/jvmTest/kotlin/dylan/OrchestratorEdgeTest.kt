@@ -125,9 +125,17 @@ class OrchestratorEdgeTest {
     private lateinit var provider: GatedProvider
     private lateinit var scope: CoroutineScope
     private lateinit var paths: Paths
+    private lateinit var disp: AppDispatchers
+    private lateinit var bulk: HttpClient
+    private lateinit var settings: SettingsStore
     private val protectedKeys = MutableStateFlow<Set<SongKey>>(emptySet())
     private var mockBody: ByteArray = ByteArray(0)
     private var mockStatus: HttpStatusCode = HttpStatusCode.OK
+    private var cfg = AppConfig()
+    private val testLog =
+        dylan.diag.LogBuffer(minLevel = dylan.diag.LogLevel.DEBUG).also { buf ->
+            buf.bindSink { e -> println("[${e.level}] Dylan:${e.tag} ${e.msg}") }
+        }
 
     @BeforeTest
     fun setup() {
@@ -135,8 +143,7 @@ class OrchestratorEdgeTest {
         val fs = FileSystem.SYSTEM
         fs.createDirectories(tmp.toPath())
         db = Dylan(DriverFactory("$tmp/dylan.db").createDriver())
-        val disp = AppDispatchers(Dispatchers.Main, Dispatchers.Default, Dispatchers.Default, Dispatchers.Default)
-        val cfg = AppConfig()
+        disp = AppDispatchers(Dispatchers.Main, Dispatchers.Default, Dispatchers.Default, Dispatchers.Default)
         scope =
             CoroutineScope(
                 SupervisorJob() + Dispatchers.Default +
@@ -144,7 +151,7 @@ class OrchestratorEdgeTest {
             )
         provider = GatedProvider()
         provider.gate.complete(Unit)
-        val bulk =
+        bulk =
             HttpClient(
                 MockEngine {
                     respond(
@@ -154,6 +161,16 @@ class OrchestratorEdgeTest {
                     )
                 },
             )
+        buildGraph(AppConfig())
+        fakePlayer = FakeEngine()
+        orchestrator.attachEngine(fakePlayer)
+        downloadEngine.start()
+        mockBody = ftypBody(1000)
+    }
+
+    private fun buildGraph(newCfg: AppConfig) {
+        cfg = newCfg
+        val fs = FileSystem.SYSTEM
         val paths = Paths(tmp.toPath() / "audio", fs)
         this.paths = paths
         val cacheManager = CacheManager(db, fs, paths, protectedKeys, cfg, disp)
@@ -170,7 +187,9 @@ class OrchestratorEdgeTest {
                 cacheManager = cacheManager,
                 netClass = { NetClass.UNMETERED },
                 qualityPref = { Quality.BITRATE_128 },
+                log = testLog,
             )
+        settings = SettingsStore(db, disp, cfg)
         orchestrator =
             Orchestrator(
                 scope = scope,
@@ -181,14 +200,19 @@ class OrchestratorEdgeTest {
                 cfg = cfg,
                 downloads = downloadEngine,
                 cacheManager = cacheManager,
-                settings = SettingsStore(db, disp, cfg),
+                settings = settings,
                 net = NetMonitor(),
                 protectedKeys = protectedKeys,
             )
+    }
+
+    private fun rebuildGraph(newCfg: AppConfig) {
+        runCatching { orchestrator.detachEngine() }
+        runCatching { downloadEngine.stop() }
+        buildGraph(newCfg)
         fakePlayer = FakeEngine()
         orchestrator.attachEngine(fakePlayer)
         downloadEngine.start()
-        mockBody = ftypBody(1000)
     }
 
     @AfterTest
@@ -300,11 +324,37 @@ class OrchestratorEdgeTest {
             withTimeout(20_000) { downloadEngine.states.first { it[key] is JobState.Failed } }
             mockStatus = HttpStatusCode.OK
             downloadEngine.enqueue(DownloadJob(key, Priority.USER_NOW, 128, 0L))
+            // StateFlow replays the previous terminal value to a late subscriber — wait out the
+            // re-enqueue's eviction (or the fresh Queued) before demanding a terminal state,
+            // otherwise this test can pass/fail on job #1's stale Failed.
+            withTimeout(20_000) {
+                downloadEngine.states.first {
+                    val st = it[key]
+                    st == null || st is JobState.Queued
+                }
+            }
             val done =
-                withTimeout(20_000) {
-                    downloadEngine.states.first { it[key] is JobState.Done || it[key] is JobState.Failed }
+                withDumpOnTimeout(20_000) {
+                    downloadEngine.states.first { s -> s[key] is JobState.Done || s[key] is JobState.Failed }
                 }
             assertTrue(done[key] is JobState.Done, "retry after transient failure must reach Done, got ${done[key]}")
+        }
+
+    private suspend fun <T> withDumpOnTimeout(
+        ms: Long,
+        block: suspend () -> T,
+    ): T =
+        try {
+            withTimeout(ms) { block() }
+        } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
+            println("=== THREAD DUMP (timeout after ${ms}ms) ===")
+            Thread
+                .getAllStackTraces()
+                .forEach { (t, st) ->
+                    println("--- ${t.name} state=${t.state}")
+                    st.take(15).forEach { println("    at $it") }
+                }
+            throw e
         }
 
     @Test
@@ -393,6 +443,28 @@ class OrchestratorEdgeTest {
                 advanced.phase is dylan.model.Phase.Playing || advanced.phase is dylan.model.Phase.Downloading || advanced.phase is dylan.model.Phase.Resolving,
                 "natural end with uncached next must pull it down and continue",
             )
+        }
+
+    @Test
+    fun readyTimeoutLandsInPhaseErrorWithUserCopy() =
+        runBlocking {
+            rebuildGraph(AppConfig(readyTimeoutMs = 400))
+            provider.gate = CompletableDeferred() // resolve never returns ⇒ job never Done/Failed
+            var toast: String? = null
+            orchestrator.toast = { toast = it }
+            orchestrator.submit(PlayNow(listOf(song("z")), 0))
+            val errored = awaitPhase { it.phase is dylan.model.Phase.Error }
+            assertEquals(
+                dylan.model.ErrorCode.NETWORK_TIMEOUT,
+                (errored.phase as dylan.model.Phase.Error).failure.code,
+                "ready timeout must surface NETWORK_TIMEOUT, not sit in Resolving",
+            )
+            // Toast fires on the line after the state lands — poll briefly instead of
+            // asserting in the same instant the phase flip becomes visible.
+            kotlinx.coroutines.withTimeoutOrNull(2_000L) {
+                while (toast == null) delay(20)
+            }
+            assertEquals("Check your connection and try again.", toast, "toast must carry user copy, not the enum name")
         }
 
     @Test

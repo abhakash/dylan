@@ -10,6 +10,9 @@ import dylan.download.DownloadEngine
 import dylan.download.DownloadJob
 import dylan.download.JobState
 import dylan.download.Priority
+import dylan.download.stallTripped
+import dylan.download.stallWallCapMs
+import dylan.model.ErrorCode
 import dylan.model.Quality
 import dylan.model.SongKey
 import dylan.provider.MusicProvider
@@ -20,11 +23,24 @@ import io.ktor.client.engine.mock.MockEngine
 import io.ktor.client.engine.mock.respond
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
+import io.ktor.utils.io.ByteReadChannel
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.channels.ClosedReceiveChannelException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.io.Buffer
+import kotlinx.io.RawSource
+import kotlinx.io.buffered
+import kotlinx.io.write
 import okio.FileSystem
 import okio.Path.Companion.toPath
 import kotlin.test.AfterTest
@@ -40,6 +56,7 @@ private class FakeProvider(
     var resolveCalls = 0
     val resolvedKeys = mutableListOf<String>()
     var gate: CompletableDeferred<Unit>? = null
+    var streamType: String = "mp4"
 
     override suspend fun search(
         query: String,
@@ -62,18 +79,84 @@ private class FakeProvider(
         resolvedKeys += resolveRef
         gate?.await()
         val code = statuses.removeFirstOrNull() ?: 200
-        return if (code == 200) SignedStream("http://mock/audio", "mp4") else null
+        return if (code == 200) SignedStream("http://mock/audio", streamType) else null
     }
 }
 
 class DownloadEngineTest {
+    private val testLog =
+        dylan.diag.LogBuffer(minLevel = dylan.diag.LogLevel.DEBUG).also { buf ->
+            buf.bindSink { e -> println("[${e.level}] Dylan:${e.tag} ${e.msg}") }
+        }
+
     private lateinit var tmp: String
     private lateinit var db: Dylan
     private lateinit var engine: DownloadEngine
     private lateinit var provider: FakeProvider
     private lateinit var audioDir: okio.Path
     private val disp = AppDispatchers(Dispatchers.Main, Dispatchers.Default, Dispatchers.Default, Dispatchers.Default)
-    private val cfg = AppConfig()
+    private var cfg = AppConfig()
+    private lateinit var bulk: HttpClient
+    private var slowChunkBytes = 0
+    private var slowChunkDelayMs = 0L
+    private var bodyFeeder: Job? = null
+    private val testScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+    /**
+     * RawSource fed chunk-by-chunk from a coroutine channel; EOF on channel close. Polls in
+     * short windows so job cancellation (stall watchdog) unwinds within ~200 ms instead of
+     * parking a lane uninterruptibly.
+     */
+    private class ScriptedSource(
+        private val chunks: Channel<ByteArray>,
+    ) : RawSource {
+        override fun readAtMostTo(
+            sink: Buffer,
+            byteCount: Long,
+        ): Long {
+            val deadline = System.currentTimeMillis() + 60_000L
+            while (System.currentTimeMillis() < deadline) {
+                val chunk =
+                    runBlocking {
+                        withTimeoutOrNull(200L) {
+                            try {
+                                chunks.receive()
+                            } catch (_: ClosedReceiveChannelException) {
+                                null
+                            }
+                        }
+                    }
+                when {
+                    chunk != null -> {
+                        sink.write(chunk)
+                        return chunk.size.toLong()
+                    }
+                    chunks.isClosedForReceive -> return -1L
+                }
+            }
+            return -1L // safety net: 60 s of silence reads as EOF
+        }
+
+        override fun close() {}
+    }
+
+    /** Body delivered slowChunkBytes every slowChunkDelayMs, then clean EOF. */
+    private fun slowBodyChannel(): ByteReadChannel {
+        val chunks = Channel<ByteArray>()
+        bodyFeeder =
+            testScope.launch {
+                var off = 0
+                while (off < mockBody.size) {
+                    val n = minOf(slowChunkBytes, mockBody.size - off)
+                    chunks.send(mockBody.copyOfRange(off, off + n))
+                    off += n
+                    delay(slowChunkDelayMs)
+                }
+                chunks.close()
+            }
+        return ByteReadChannel(ScriptedSource(chunks).buffered())
+    }
+
     private val protectedKeys = MutableStateFlow<Set<SongKey>>(emptySet())
     private var mockStatus: HttpStatusCode = HttpStatusCode.OK
     private var mockBody: ByteArray = ByteArray(0)
@@ -98,8 +181,13 @@ class DownloadEngineTest {
         provider = FakeProvider(ArrayDeque(listOf(200)))
         val mock =
             MockEngine { request ->
+                val body: ByteReadChannel =
+                    when {
+                        slowChunkBytes > 0 -> slowBodyChannel()
+                        else -> ByteReadChannel(mockBody)
+                    }
                 respond(
-                    content = mockBody,
+                    content = body,
                     status = mockStatus,
                     headers =
                         headersOf(
@@ -110,8 +198,13 @@ class DownloadEngineTest {
                         ),
                 )
             }
-        val bulk = HttpClient(mock)
+        bulk = HttpClient(mock)
         audioDir = tmp.toPath() / "audio"
+        buildEngine()
+    }
+
+    private fun buildEngine() {
+        val fs = FileSystem.SYSTEM
         val cacheManager = CacheManager(db, fs, Paths(audioDir, fs), protectedKeys, cfg, disp)
         engine =
             DownloadEngine(
@@ -126,22 +219,37 @@ class DownloadEngineTest {
                 cacheManager = cacheManager,
                 netClass = { netNow },
                 qualityPref = { prefNow },
+                log = testLog,
             )
+    }
+
+    private fun rebuildEngine(newCfg: AppConfig) {
+        runCatching { engine.stop() }
+        cfg = newCfg
+        buildEngine()
     }
 
     @AfterTest
     fun teardown() {
+        bodyFeeder?.cancel()
+        runCatching { engine.stop() }
         runCatching { FileSystem.SYSTEM.deleteRecursively(tmp.toPath()) }
     }
 
-    private suspend fun runJob(): JobState {
-        val key = SongKey("saavn", "s1")
+    private suspend fun runJob(id: String = "s1"): JobState {
+        val key = SongKey("saavn", id)
         engine.start()
         engine.enqueue(DownloadJob(key, Priority.USER_NOW, 128, 0L))
-        kotlinx.coroutines.withTimeout(10_000) {
+        kotlinx.coroutines.withTimeout(15_000) {
             engine.states.first { s -> s[key] is JobState.Done || s[key] is JobState.Failed }
         }
         return engine.states.value[key]!!
+    }
+
+    private fun seedPart(id: String): okio.Path {
+        val p = (tmp + "/audio").toPath() / "saavn_${id}_128.part"
+        FileSystem.SYSTEM.write(p) { write(ByteArray(64)) }
+        return p
     }
 
     @Test
@@ -332,5 +440,97 @@ class DownloadEngineTest {
             assertTrue(fs.exists(part("p2")))
             assertTrue(fs.exists(part("p3")))
             assertTrue(fs.exists(part("u1")), "just-preempted USER_NOW part must survive the cap pass")
+        }
+
+    @Test
+    fun wallCapIsRateBasedNotFixed() {
+        // 1 s track ⇒ expectedB = 20 400 B ⇒ cap = 20 400/8 = 2 550 ms (floor 300 ms).
+        // The old `expectedB/20` formula gave 1 020 ms — killed flowing 1.5 s transfers.
+        assertEquals(2_550L, stallWallCapMs(300, 20_400))
+        assertEquals(120_000L, stallWallCapMs(120_000, 20_400))
+        assertEquals(300L, stallWallCapMs(300, 400))
+    }
+
+    @Test
+    fun stallWatchdogTripMatrix() {
+        // Silent gap (no fresh bytes) trips regardless of wall budget.
+        assertTrue(stallTripped(sinceChunkMs = 500, totalElapsedMs = 500, wallCapMs = 2_550, stallTimeoutMs = 400))
+        // Flowing-but-slow: fresh bytes keep arriving, elapsed under cap ⇒ no trip.
+        assertFalse(stallTripped(sinceChunkMs = 150, totalElapsedMs = 1_800, wallCapMs = 2_550, stallTimeoutMs = 1_000))
+        // Trickle below the rate floor: bytes flow but the transfer outlives the cap ⇒ trip.
+        assertTrue(stallTripped(sinceChunkMs = 100, totalElapsedMs = 2_600, wallCapMs = 2_550, stallTimeoutMs = 1_000))
+        // Exactly-at boundaries are healthy (strict inequality guards against tick jitter).
+        assertFalse(stallTripped(sinceChunkMs = 400, totalElapsedMs = 2_550, wallCapMs = 2_550, stallTimeoutMs = 400))
+    }
+
+    @Test
+    fun slowFlowingStreamSurvivesWallCap() =
+        runBlocking {
+            // 1 s song ⇒ wall cap 2 550 ms; chunks flow every 150 ms (< stall timeout);
+            // transfer takes ~1.8 s — survives the new cap, died under the old /20 formula.
+            rebuildEngine(AppConfig(stallTimeoutMs = 1_000, stallWatchdogTickMs = 100, stallWallFloorMs = 300, dlRetries = 0))
+            db.dylanQueries.insertSong("saavn", "slow", "slow", "", null, null, "", "", 1L, 1L, 1L, "enc-slow", null, 0L)
+            provider.statuses = ArrayDeque(listOf(200, 200, 200, 200))
+            slowChunkBytes = 100
+            slowChunkDelayMs = 150
+            mockBody = ftypBody(1200)
+            mockHeaders = mapOf("Content-Length" to "1200", "Content-Type" to "audio/mp4")
+            val st = runJob("slow")
+            assertTrue(st is JobState.Done, "flowing transfer must not be wall-killed, got $st")
+        }
+
+    @Test
+    fun missingContentTypeSniffsM4aFromMagic() =
+        runBlocking {
+            provider.streamType = "weird"
+            mockBody = ftypBody(1000)
+            mockHeaders = mapOf("Content-Length" to "1000")
+            val st = runJob()
+            assertTrue(st is JobState.Done, "ftyp body must survive unusable content-type, got $st")
+            assertEquals(
+                "m4a",
+                db.dylanQueries
+                    .selectCached("saavn", "s1")
+                    .executeAsOne()
+                    .ext,
+            )
+        }
+
+    @Test
+    fun missingContentTypeSniffsMp3FromId3() =
+        runBlocking {
+            provider.streamType = "weird"
+            mockBody = ByteArray(800) { 'M'.code.toByte() }
+            "ID3".encodeToByteArray().copyInto(mockBody)
+            mockHeaders = mapOf("Content-Length" to "800")
+            val st = runJob()
+            assertTrue(st is JobState.Done, "ID3 body must survive unusable content-type, got $st")
+            assertEquals(
+                "mp3",
+                db.dylanQueries
+                    .selectCached("saavn", "s1")
+                    .executeAsOne()
+                    .ext,
+            )
+        }
+
+    @Test
+    fun nonResumableFailureDeletesItsPart() =
+        runBlocking {
+            val p = seedPart("s1")
+            db.dylanQueries.insertSong("saavn", "s1", "s1", "", null, null, "", "", 100L, 1L, 0L, "enc-ref", null, 0L)
+            val st = runJob()
+            assertTrue(st is JobState.Failed && st.err.code == ErrorCode.NOT_CACHEABLE, "got $st")
+            assertFalse(FileSystem.SYSTEM.exists(p), "NOT_CACHEABLE must not leak its .part")
+        }
+
+    @Test
+    fun resumableFailureKeepsItsPartForReconciler() =
+        runBlocking {
+            val p = seedPart("s1")
+            mockStatus = HttpStatusCode.InternalServerError
+            val st = runJob()
+            assertTrue(st is JobState.Failed && st.err.code == ErrorCode.NETWORK, "got $st")
+            assertTrue(FileSystem.SYSTEM.exists(p), "NETWORK failure keeps the .part for resume")
         }
 }

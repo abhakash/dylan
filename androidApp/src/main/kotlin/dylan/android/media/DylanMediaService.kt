@@ -20,6 +20,10 @@ class DylanMediaService : MediaSessionService() {
     private var session: MediaSession? = null
     private var engine: ExoPlayerEngine? = null
     private var routeJob: kotlinx.coroutines.Job? = null
+    private val resumptionExecutor =
+        java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+            Thread(r, "dylan-resume").apply { isDaemon = true }
+        }
 
     override fun onCreate() {
         super.onCreate()
@@ -80,7 +84,14 @@ class DylanMediaService : MediaSessionService() {
                         override fun onPlaybackResumption(
                             mediaSession: MediaSession,
                             controller: MediaSession.ControllerInfo,
-                        ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> = Futures.immediateFuture(resumptionItems())
+                        ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> =
+                            // DB reads must never block the session looper — resolve on a worker.
+                            // Explicit Callable SAM: the Runnable overload would infer Void and
+                            // discard the MediaItemsWithStartPosition.
+                            Futures.submit(
+                                java.util.concurrent.Callable<MediaSession.MediaItemsWithStartPosition> { resumptionItems() },
+                                resumptionExecutor,
+                            )
                     },
                 ).build()
         addSession(session!!)
@@ -149,6 +160,7 @@ class DylanMediaService : MediaSessionService() {
             .of(this)
             .container.log
             .i("service", "onDestroy")
+        resumptionExecutor.shutdownNow()
         val c = DylanApp.of(this).container
         routeJob?.cancel()
         routeJob = null

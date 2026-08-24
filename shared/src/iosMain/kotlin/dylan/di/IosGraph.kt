@@ -9,7 +9,6 @@ import dylan.db.DriverFactory
 import dylan.download.DownloadJob
 import dylan.download.Priority
 import dylan.model.DylanFailure
-import dylan.model.ErrorCode
 import dylan.model.MiniEntity
 import dylan.model.Phase
 import dylan.model.PlayerState
@@ -17,6 +16,7 @@ import dylan.model.Quality
 import dylan.model.Repeat
 import dylan.model.Song
 import dylan.model.SongKey
+import dylan.model.message
 import dylan.playback.IosPlayerEngine
 import dylan.playback.NativeAudioOutput
 import dylan.search.SaavnSearchChannel
@@ -177,23 +177,7 @@ class IosGraph private constructor(
     /** Audible-or-about-to-be: matches Android's PlayPauseIcon condition exactly. */
     fun playPauseShowsPause(state: PlayerState?): Boolean = state?.phase is Phase.Playing || state?.phase is Phase.Ready
 
-    fun failureMessage(failure: DylanFailure): String =
-        when (failure.code) {
-            ErrorCode.OFFLINE -> "You're offline - saved music still plays."
-            ErrorCode.NOT_FOUND -> "This track seems unavailable."
-            ErrorCode.NO_SOURCE -> "No playable source for this track."
-            ErrorCode.NOT_CACHEABLE -> "This track can't be saved for offline play."
-            ErrorCode.EXPIRED -> "Couldn't refresh this track. Try again."
-            ErrorCode.FORBIDDEN_REGION -> "Not available in your region."
-            ErrorCode.NETWORK, ErrorCode.NETWORK_TIMEOUT -> "Check your connection and try again."
-            ErrorCode.STORAGE -> "Not enough space. Free up storage or clear cache."
-            ErrorCode.CORRUPT_SIZE, ErrorCode.CORRUPT_CONTAINER -> "That file didn't download cleanly. Retrying…"
-            ErrorCode.UNSUPPORTED -> "That format isn't supported."
-            ErrorCode.RATE_LIMITED -> "Slow down a moment…"
-            ErrorCode.RESOLVE_LIMIT -> "Couldn't refresh this track. Try again later."
-            ErrorCode.TOO_MANY_FAILURES -> "Several tracks failed to load. Check your connection."
-            ErrorCode.DRIFT -> "Something desynced - restarting playback."
-        }
+    fun failureMessage(failure: DylanFailure): String = failure.message()
 
     // ---- settings / storage / library helpers (all suspend → Swift completion handlers) ------
 
@@ -325,7 +309,7 @@ class IosGraph private constructor(
                 )
             graph.container.orchestrator.toast =
                 { msg ->
-                    graph.container.log.log("i", "toast", msg)
+                    graph.container.log.i("toast", msg)
                     graph.onToast?.invoke(msg)
                 }
             return graph

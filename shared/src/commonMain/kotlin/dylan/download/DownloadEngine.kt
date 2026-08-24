@@ -52,6 +52,23 @@ import kotlin.time.TimeSource
 
 private class StallSignal : Exception()
 
+// Wall cap = time-to-download at a conservative 8 KB/s (expectedB/8 ms), floored.
+// Rate-based — a flowing-but-slow link is never killed; only a trickle below that
+// average rate is. Replaces the old `expectedB/20` bytes-as-ms accident.
+internal fun stallWallCapMs(
+    floorMs: Long,
+    expectedBytes: Long,
+): Long = max(floorMs, expectedBytes / 8)
+
+// Watchdog fires when EITHER the stream shows no fresh bytes for stallTimeoutMs
+// (true stall) OR the whole transfer outlives its rate-based wall cap (trickle).
+internal fun stallTripped(
+    sinceChunkMs: Long,
+    totalElapsedMs: Long,
+    wallCapMs: Long,
+    stallTimeoutMs: Long,
+): Boolean = sinceChunkMs > stallTimeoutMs || totalElapsedMs > wallCapMs
+
 private sealed interface HttpOutcome {
     data class RateLimited(
         val retryAfterMs: Long?,
@@ -220,14 +237,25 @@ class DownloadEngine(
 
     private suspend fun loop() {
         while (true) {
+            // Peek, not pop: if the head duplicates the key an active job owns, leave it queued
+            // and sleep — popping here would race the owner's join window and the silent-drop
+            // below would swallow a fresh user retry forever.
             val job =
-                mutex.withLock { queue.removeFirstOrNull() } ?: run {
+                mutex.withLock {
+                    val head = queue.firstOrNull()
+                    if (head != null && head.key == executingKey) null else queue.removeFirstOrNull()
+                } ?: run {
                     wake.receive()
                     continue
                 }
             // Single-flight per key: a duplicate enqueued while the same key executes would run a
             // second worker against the same .part file — the executing job owns the outcome.
-            if (job.key == executingKey) continue
+            // Defensive: requeue at front and wait out the owner rather than ever dropping bytes.
+            if (job.key == executingKey) {
+                mutex.withLock { queue.add(0, job) }
+                executing?.join()
+                continue
+            }
             val j = scope.launch { runJob(job) }
             executing = j
             executingKey = job.key
@@ -261,6 +289,7 @@ class DownloadEngine(
 
         try {
             while (true) {
+                log.d("dl", "step=${step.name} ${key.provider}:${key.songId} attempts=$attempts partB=$partB")
                 when (step) {
                     Step.HYDRATE -> {
                         states.update { it + (key to JobState.Queued) }
@@ -467,7 +496,7 @@ class DownloadEngine(
                             deleteQuietly(tmp)
                             return fail(key, DylanFailure(ErrorCode.CORRUPT_SIZE, key))
                         }
-                        val derived = extFor(contentType, signed!!.type)
+                        val derived = extFor(contentType, signed!!.type) ?: sniffExt(tmp)
                         if (derived == null) {
                             deleteQuietly(tmp)
                             return fail(key, DylanFailure(ErrorCode.UNSUPPORTED, key))
@@ -592,7 +621,9 @@ class DownloadEngine(
                         if (!copy.isActive) break
                         val sinceChunk = lastMark.load().elapsedNow().inWholeMilliseconds
                         val totalElapsed = startedAt.elapsedNow().inWholeMilliseconds
-                        if (sinceChunk > cfg.stallTimeoutMs || totalElapsed > max(60_000, expectedB / 20)) {
+                        val wallCapMs = stallWallCapMs(cfg.stallWallFloorMs, expectedB)
+                        if (stallTripped(sinceChunk, totalElapsed, wallCapMs, cfg.stallTimeoutMs)) {
+                            log.w("dl", "stall ${key.provider}:${key.songId} sinceChunk=${sinceChunk}ms wall=${totalElapsed}ms cap=${wallCapMs}ms")
                             stalled.store(1)
                             copy.cancel(CancellationException("stall"))
                             break
@@ -652,9 +683,24 @@ class DownloadEngine(
         err: DylanFailure,
     ) {
         log.e("dl", "failed ${key.provider}:${key.songId} code=${err.code} detail=${err.detail ?: "-"}")
+        // Resumable failures keep the .part (§7.4 reconciler resume); permanent ones must not
+        // leak bytes until the reconciler grace window.
+        if (err.code in NON_RESUMABLE_CODES) deleteParts(key)
         states.update { it + (key to JobState.Failed(err, willRetry = false)) }
         progress.update { it - key }
         dropIntent(key)
+    }
+
+    private companion object {
+        private val NON_RESUMABLE_CODES =
+            setOf(
+                ErrorCode.NOT_CACHEABLE,
+                ErrorCode.NO_SOURCE,
+                ErrorCode.NOT_FOUND,
+                ErrorCode.UNSUPPORTED,
+                ErrorCode.CORRUPT_SIZE,
+                ErrorCode.CORRUPT_CONTAINER,
+            )
     }
 
     private fun requeueLater(
@@ -713,6 +759,32 @@ class DownloadEngine(
                     read += n
                 }
                 read == 4 && buf.decodeToString() == "ftyp"
+            } finally {
+                runCatching { h.close() }
+            }
+        }.getOrDefault(false)
+
+    // CDN Content-Type is unreliable (missing / binary/octet-stream / text/html error pages);
+    // body magic is the truth. ftyp at offset 4 ⇒ mp4-family; ID3 at 0 ⇒ mp3.
+    private fun sniffExt(p: okio.Path): String? =
+        when {
+            sniffFtyp(p) -> "m4a"
+            sniffId3(p) -> "mp3"
+            else -> null
+        }
+
+    private fun sniffId3(p: okio.Path): Boolean =
+        runCatching {
+            val h = fs.openReadOnly(p)
+            try {
+                val buf = ByteArray(3)
+                var read = 0
+                while (read < 3) {
+                    val n = h.read(read.toLong(), buf, read, 3 - read)
+                    if (n <= 0) break
+                    read += n
+                }
+                read == 3 && buf.decodeToString() == "ID3"
             } finally {
                 runCatching { h.close() }
             }

@@ -33,6 +33,12 @@ data class AppConfig(
     val rangeRestartsCap: Int = 1,
     val stallTimeoutMs: Long = 20_000,
     val stallWatchdogTickMs: Long = 2_000,
+    // Wall-clock cap floor: real cap = max(this, expectedB / 8) — i.e. time-to-download at a
+    // conservative 8 KB/s. Only a trickling transfer (below that average rate) is killed;
+    // a flowing-but-slow link never trips it. Configurable for tests.
+    val stallWallFloorMs: Long = 120_000,
+    // Max wait for a USER_NOW download before ensureReadyAndPlay gives up into Phase.Error.
+    val readyTimeoutMs: Long = 120_000,
     val skipSettleMs: Int = 350,
     val prefetchEnabled: Boolean = true,
     val prefetchCellularTracks: Int = 1,

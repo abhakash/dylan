@@ -15,6 +15,7 @@ import dylan.model.PlayerState
 import dylan.model.Repeat
 import dylan.model.Song
 import dylan.model.SongKey
+import dylan.model.message
 import dylan.repo.SettingsStore
 import dylan.util.AppDispatchers
 import dylan.util.nowMs
@@ -420,7 +421,7 @@ class Orchestrator(
             val bits = if (metered) cfg.meteredQuality.bits else settings.qualityPref().bits
             downloads.enqueue(DownloadJob(song.key, Priority.USER_NOW, bits, nowMs()))
             val outcome =
-                withTimeoutOrNull(120_000) {
+                withTimeoutOrNull(cfg.readyTimeoutMs) {
                     downloads.states.first { st ->
                         (st[song.key] as? JobState.Done)?.let { true }
                             ?: (st[song.key] as? JobState.Failed)?.let { true }
@@ -801,7 +802,7 @@ class Orchestrator(
 
     private fun enginePositionMs(): Long = lastPosMs
 
-    private fun failureText(f: DylanFailure): String = f.code.name
+    private fun failureText(f: DylanFailure): String = f.message()
 
     private fun toSong(r: Songs): Song =
         Song(

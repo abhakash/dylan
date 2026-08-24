@@ -1,6 +1,6 @@
 # DYLAN — Implementation Progress Checkpoint
 
-**Plan reference:** `DYLAN-PLAN.md` v1.3.2 · **Checkpoint:** 2026-08-24 ~13:20 — session wave 3: **Nothing geometry** (global `Shapes` 0px/6px, NP sheet + Album + Artist reskin, `[320]` chip removed) + **notification tap fix** (`setSessionActivity`) + **Home cross-section dedupe** (`recordingKey`) + **stuck-PAUSED-after-process-death fix** (`onEnsureService` on every play/pause entry point) + **LOGGING OVERHAUL** (`LogLevel` DEBUG..CRITICAL, minLevel INFO prod / DEBUG debug-builds, buffer threaded into orchestrator/downloads/cache/reconciler/search + Android lifecycle logs) + **D23 scope fix** (SupervisorJob + exception handler) — all gates green (`jvmTest 71/71 --rerun-tasks`, ktlint, detekt, debug+release APKs); git repo re-inited, commits `718a20c` → `685e5fb`; debug APK `431b4a97…` built — **install+soak BLOCKED: device disconnected mid-install (`adb: no devices/emulators found`)**
+**Plan reference:** `DYLAN-PLAN.md` v1.3.2 · **Checkpoint:** 2026-08-24 ~15:30 — session wave 3 + staff-review MUST fixes (§0h): **Nothing geometry** (`Shapes` 0px/6px, NP sheet + Album + Artist reskin, `[320]` chip removed) · **notification tap fix** (`setSessionActivity`) · **Home cross-section dedupe** (`recordingKey`) · **stuck-PAUSED fix** (`onEnsureService` entry points) · **LOGGING OVERHAUL** (`LogLevel`, INFO prod / DEBUG debug-builds, threaded into 5 components) · **D23 scope fix** · **M1–M6 review fixes** (rate-based stall watchdog wall-cap, resumption off session looper, ext body-sniff fallback, ready-timeout knob, shared failure copy, part cleanup on permanent failure) + **worker lost-retry race fix** — all gates green (`jvmTest 79/79 --rerun-tasks`, ktlint, detekt, iOS compile, debug+release APKs); commits `718a20c` → `685e5fb` → `d66fbc9` → this commit — **install+soak BLOCKED: device disconnected (`adb: no devices/emulators found`) — Xcode absent so iPhone deploy also blocked**
 **Env:** macOS 26.5 arm64 · JAVA_HOME=`/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home` · ANDROID_HOME=`/opt/homebrew/share/android-commandlinetools/platform-tools`
 **Device:** vivo V2130 (`1380891582000GP`) — was connected through the Nothing-UI verification pass (screenshots captured: home `[320]`-free, album 6dp buttons, NP square geometry), **DISCONNECTED ~19:05 2026-08-23 during install of `431b4a97…`** — reconnect → `adb install -r` → soak (§11 step 1).
 **iOS build tooling still absent (Xcode ~12 GB not installed) — klib compiles verified, Swift runtime/stores unverified (BUILD-NOTES.md §3).**
@@ -56,6 +56,27 @@
 ### 0g. Device verification status (BLOCKED — device disconnected)
 Verified on-device BEFORE disconnect (build `1f86b2a8…`, 2026-08-23 ~18:55): home `[320]`-free + Nothing intact · search 6dp box/chips · album 6dp PLAY/SHUFFLE + uppercase · NP sheet square art/thumb/play-button + uppercase + `320KBPS` · type-ahead stable.
 Pending on reconnect (install `431b4a97…` first): **(1)** stuck-play repro (force-stop → relaunch → tap mini-player play → must start service + drain + PLAYING; watch `adb logcat -s Dylan:play Dylan:service Dylan:exo`), **(2)** notification tap → app opens, **(3)** Home dedupe visual (WITHOUT ME once; Saiyaara once in jump-back), **(4)** logcat level proof (DEBUG lines present on debug build; `Dylan:dl` enqueue/done on a fresh download), **(5)** lock-screen art via `MediaMetadata` (B2 follow-up), **(6)** kill/resume `onPlaybackResumption` drill.
+
+### 0h. Staff-review MUST fixes (2026-08-24 ~15:00 — all coded, 79/79 green)
+| ID | Fix | Where | Test pin |
+|---|---|---|---|
+| M1 | Stall watchdog wall cap is rate-based: `stallWallCapMs(floor, expectedB) = max(floor, expectedB/8)` replaces bytes-as-ms `expectedB/20`; new `cfg.stallWallFloorMs=120s`; WARN logs sinceChunk/wall/cap | `DownloadEngine.kt` (`stallWallCapMs`, `stallTripped`, watchdog loop), `AppConfig.kt` | `wallCapIsRateBasedNotFixed` + `stallWatchdogTripMatrix` + e2e `slowFlowingStreamSurvivesWallCap` |
+| M2 | `onPlaybackResumption` DB reads off session looper: `Futures.submit(Callable, resumptionExecutor)` (single-thread daemon `dylan-resume`, `shutdownNow()` in onDestroy); explicit Callable SAM — Runnable overload silently discarded the result | `DylanMediaService.kt` | compile-time signature pin; device drill (0g #6) |
+| M3 | VERIFY falls back to body-magic sniff when CDN Content-Type unusable: `sniffExt` = ftyp@4 → m4a, ID3@0 → mp3 | `DownloadEngine.kt` (`sniffExt`/`sniffId3`) | `missingContentTypeSniffsM4aFromMagic`, `missingContentTypeSniffsMp3FromId3` |
+| M4 | Ready-wait timeout knob `cfg.readyTimeoutMs=120s` used by Orchestrator `withTimeoutOrNull` (reviewer's "hangs in Resolving" claim was outdated — arm already set Error+toast; now bounded by config) | `AppConfig.kt`, `Orchestrator.kt:424` | `readyTimeoutLandsInPhaseErrorWithUserCopy` (Error phase + NETWORK_TIMEOUT + user-copy toast) |
+| M5 | Single source of failure copy: `DylanFailure.message()` in shared `Models.kt`; Android `Copy.forCode`, iOS `IosGraph.failureMessage`, Orchestrator toast all delegate | `Models.kt`, `Copy.kt`, `IosGraph.kt`, `Orchestrator.failureText` | existing copy tests |
+| M6 | Permanent failures delete their `.part`: `fail()` removes parts for `NON_RESUMABLE_CODES` (NOT_CACHEABLE/NO_SOURCE/NOT_FOUND/UNSUPPORTED/CORRUPT_SIZE/CORRUPT_CONTAINER); resumable codes keep part for reconciler resume | `DownloadEngine.fail()` + companion | `nonResumableFailureDeletesItsPart`, `resumableFailureKeepsItsPartForReconciler` |
+
+**Bonus engine fix found while testing:** lost-retry race in worker loop — same-key re-enqueue dequeued during owner's `join()` window was **silently dropped** by the single-flight guard ⇒ user retry vanished forever. Loop now peeks (leaves head queued while an owner runs) and the defensive branch requeues instead of dropping (`loop()`). Exposed by new tests' timing.
+**Test-harness notes:** ktor-3 has no `writer{}`/lambda `ByteReadChannel{}` builders — scripted bodies use `ByteReadChannel(kotlinx.io RawSource.buffered())` with a 200 ms poll loop so stall-cancellation unwinds (never-EOF sources park ktor's internal pump and defeat cancel — production engines are socket-backed and unaffected). Stale-`Failed` StateFlow replay race fixed inside `staleFailedStateDoesNotBlockRetry…` itself.
+
+### 0i. Gates + artifacts (2026-08-24 ~15:30)
+| Gate | Result |
+|---|---|
+| `:shared:jvmTest --rerun-tasks` | **79/79 PASS** (71 prior + 8 new: wallCap formula, trip matrix, slow-flow e2e, sniff ×2, part cleanup ×2, ready-timeout) |
+| `ktlintFormat` + `ktlintCheck` + `detekt` (shared + androidApp) | PASS |
+| `:shared:compileKotlinIosSimulatorArm64` | PASS (incl. `failureMessage` delegation) |
+| `:androidApp:assembleDebug` / `assembleRelease` | PASS (fresh APKs, this wave) |
 
 ---
 

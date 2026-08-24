@@ -1,6 +1,8 @@
 package dylan.android.ui
 
+import dylan.model.DylanFailure
 import dylan.model.ErrorCode
+import dylan.model.message
 
 object Copy {
     val OFFLINE = "You're offline — saved music still plays."
@@ -14,17 +16,5 @@ object Copy {
     val RATE_LIMITED = "Slow down a moment…"
     val TOO_MANY_FAILURES = "Several tracks failed to load. Check your connection."
 
-    fun forCode(code: ErrorCode): String =
-        when (code) {
-            ErrorCode.OFFLINE -> OFFLINE
-            ErrorCode.NOT_FOUND -> NOT_FOUND
-            ErrorCode.EXPIRED -> EXPIRED
-            ErrorCode.NETWORK, ErrorCode.NETWORK_TIMEOUT, ErrorCode.DRIFT -> NETWORK
-            ErrorCode.STORAGE -> STORAGE
-            ErrorCode.CORRUPT_SIZE, ErrorCode.CORRUPT_CONTAINER -> CORRUPT
-            ErrorCode.NOT_CACHEABLE, ErrorCode.NO_SOURCE, ErrorCode.UNSUPPORTED -> NOT_CACHEABLE
-            ErrorCode.FORBIDDEN_REGION -> GEO_BLOCKED
-            ErrorCode.RATE_LIMITED, ErrorCode.RESOLVE_LIMIT -> RATE_LIMITED
-            ErrorCode.TOO_MANY_FAILURES -> TOO_MANY_FAILURES
-        }
+    fun forCode(code: ErrorCode): String = DylanFailure(code).message()
 }
