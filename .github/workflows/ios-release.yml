@@ -18,6 +18,7 @@ concurrency:
 
 jobs:
   ipa:
+    if: github.event_name == 'workflow_dispatch'
     name: ios/${{ inputs.lane }}
     runs-on: macos-14
     timeout-minutes: 45
@@ -37,12 +38,13 @@ jobs:
 
       # ── Signing (only for device lanes) ──────────────────────────────────
       - name: Install Apple certificate + profile (if secrets present)
-        if: inputs.lane != 'simulator' && secrets.APPLE_CERTIFICATE_P12 != ''
+        if: inputs.lane != 'simulator'
         env:
           CERT_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
           CERT_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           PROFILE: ${{ secrets.APPLE_PROVISIONING_PROFILE }}
         run: |
+          if [ -z "$CERT_P12" ]; then echo "No APPLE_CERTIFICATE_P12, skipping signing setup (simulator-style)"; exit 0; fi
           echo "$CERT_P12" | base64 --decode > /tmp/cert.p12
           security create-keychain -p "" build.keychain || true
           security import /tmp/cert.p12 -k build.keychain -P "$CERT_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
@@ -95,7 +97,7 @@ jobs:
           retention-days: 14
 
       - name: Upload to TestFlight (fastlane)
-        if: inputs.lane == 'testflight' && secrets.APPLE_API_KEY_P8 != ''
+        if: inputs.lane == 'testflight'
         env:
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY_P8 }}
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
