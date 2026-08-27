@@ -1,0 +1,215 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "30 21 * * *" # nightly 03:00 IST
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+  checks: write
+  actions: read
+  security-events: write
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  wrapper-validation:
+    name: supply-chain/wrapper
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: gradle/actions/wrapper-validation@v4
+
+  # ── Static analysis (ktlint + detekt + Android Lint + SQLDelight) ─────────
+  lint:
+    name: lint
+    needs: wrapper-validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+          cache-encryption-key: ${{ secrets.GRADLE_ENCRYPTION_KEY }}
+          gradle-home-cache-cleanup: true
+      - name: ktlint + detekt + Android lint
+        run: ./gradlew ktlintCheck detekt :androidApp:lintDebug --no-configuration-cache --continue
+      - name: Upload lint reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lint-reports
+          path: |
+            **/build/reports/lint-results-debug.html
+            **/build/reports/detekt/detekt.html
+            **/build/reports/ktlint/**
+            **/build/reports/detekt/**
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # ── Unit + contract tests (JVM) ───────────────────────────────────────────
+  test:
+    name: test/jvm
+    needs: wrapper-validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+      - name: JVM tests + probeCi + contract drift (hermetic, rerun)
+        run: ./gradlew :shared:jvmTest --rerun-tasks :shared:probeCi :shared:contractDrift --no-configuration-cache
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jvmTest-results
+          path: |
+            shared/build/test-results/**
+            shared/build/reports/tests/**
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # ── Android (debug + release R8) ──────────────────────────────────────────
+  android:
+    name: android
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # VERSION → versionCode
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+      - name: Assemble debug + release (R8, mapping)
+        run: ./gradlew :androidApp:assembleDebug :androidApp:assembleRelease --no-configuration-cache
+      - name: Version + checksums
+        run: |
+          echo "VERSION=$(cat VERSION)"
+          ls -lh androidApp/build/outputs/apk/debug/*.apk androidApp/build/outputs/apk/release/*.apk || true
+          sha256sum androidApp/build/outputs/apk/debug/*.apk androidApp/build/outputs/apk/release/*.apk 2>/dev/null || shasum -a 256 androidApp/build/outputs/apk/debug/*.apk 2>/dev/null || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apks
+          path: |
+            androidApp/build/outputs/apk/debug/*.apk
+            androidApp/build/outputs/apk/release/*.apk
+            androidApp/build/outputs/mapping/release/mapping.txt
+            androidApp/build/outputs/bundle/release/*.aab
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # ── iOS klibs (Kotlin/Native, no Xcode link — cheap gate) ────────────────
+  ios-klib:
+    name: ios/klib
+    needs: wrapper-validation
+    runs-on: macos-14
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+      - name: Select Xcode 16.2 (pin — FAANG hermetic)
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: "16.2"
+      - name: Compile iOS klibs
+        run: ./gradlew :shared:compileKotlinIosSimulatorArm64 :shared:compileKotlinIosArm64 --no-configuration-cache
+
+  # ── iOS simulator (full Xcode link — FAANG presubmit for Swift) ──────────
+  ios:
+    name: ios/simulator
+    needs: [lint, test]
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+      - name: Select Xcode 16.2
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: "16.2"
+      - name: Cache Kotlin/Native + DerivedData
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.konan
+            ~/Library/Developer/Xcode/DerivedData
+            shared/build
+          key: ios-${{ runner.os }}-${{ hashFiles('gradle/libs.versions.toml', 'shared/build.gradle.kts') }}
+          restore-keys: ios-${{ runner.os }}-
+      - name: Build shared XCFramework (no signing)
+        run: ./gradlew :shared:assembleXCFramework --no-configuration-cache
+      - name: xcodebuild simulator (CODE_SIGNING_ALLOWED=NO)
+        run: |
+          xcodebuild -project iosApp/iosApp.xcodeproj \
+            -scheme iosApp \
+            -sdk iphonesimulator \
+            -destination 'platform=iOS Simulator,name=iPhone 16,OS=18.2' \
+            -configuration Debug \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build | xcpretty || xcodebuild -project iosApp/iosApp.xcodeproj -scheme iosApp -sdk iphonesimulator -destination 'platform=iOS Simulator,name=iPhone 16' build CODE_SIGNING_ALLOWED=NO
+      - name: Upload Xcode logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcode-logs
+          path: ~/Library/Logs/DiagnosticReports/*.ips
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # ── Nightly live probe (schedule only) ────────────────────────────────────
+  nightly-probe-local:
+    name: nightly/probe
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Fast live probe (catalog sanity)
+        run: ./gradlew :shared:probeLocal -PprobeFast --no-configuration-cache

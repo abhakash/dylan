@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- DYLAN launcher foreground: Bob Dylan profile silhouette (CC0-derived, redrawn) +
+     red accent dot. 108dp adaptive viewport; group scales the art into the 66dp safe
+     circle. Same path doubles as the monochrome (themed-icon) layer via mipmap alias. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <group
+        android:translateX="22.7"
+        android:translateY="22.3"
+        android:scaleX="0.58"
+        android:scaleY="0.58">
+        <path
+            android:fillColor="#FFFFFFFF"
+            android:pathData="M60,98 C61,92 60,88 62,85 C65,83 66,80 64,77 C62,74 63,72 66,70 C71,68 74,65 73,62 C72,59 68,60 66,58 C63,56 62,53 61,49 C60,45 58,41 56,38 C58,36 58,33 56,30 C55,27 52,25 49,24 C51,20 49,15 44,13 C41,9 35,8 30,10 C25,8 19,10 15,14 C10,16 7,21 8,26 C5,30 5,36 8,40 C6,44 7,49 10,52 C9,56 11,60 14,62 C14,66 17,69 21,70 C21,74 24,77 28,78 C27,82 28,86 31,88 C32,91 32,94 33,98 Z" />
+        <path
+            android:fillColor="#FFFF3030"
+            android:pathData="M86,28 m-3.4,0 a3.4,3.4 0 1,0 6.8,0 a3.4,3.4 0 1,0 -6.8,0" />
+    </group>
+</vector>

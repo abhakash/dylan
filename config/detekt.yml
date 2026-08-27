@@ -1,0 +1,32 @@
+build:
+  maxIssues: 0
+
+complexity:
+  TooManyFunctions:
+    active: false
+  LongMethod:
+    active: false
+  LongParameterList:
+    active: false
+  CyclomaticComplexMethod:
+    active: false
+
+style:
+  MagicNumber:
+    active: false
+  ReturnCount:
+    active: false
+  UnusedPrivateMember:
+    ignoreAnnotated:
+      - 'Preview'
+
+naming:
+  FunctionNaming:
+    ignoreAnnotated:
+      - 'Composable'
+  TopLevelPropertyNaming:
+    active: false
+
+exceptions:
+  TooGenericExceptionCaught:
+    active: false

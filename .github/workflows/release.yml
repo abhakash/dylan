@@ -1,0 +1,68 @@
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Semver bump (patch/minor/major)"
+        required: true
+        default: "patch"
+        type: choice
+        options: [patch, minor, major]
+      dry_run:
+        description: "Dry run (no push/tag)"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  bump-and-tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Bump VERSION + sync iOS
+        run: |
+          ./tools/bump-version.sh ${{ inputs.bump }}
+          cat VERSION
+          cat iosApp/iosApp.xcodeproj/project.pbxproj | grep -E "MARKETING_VERSION|CURRENT_PROJECT_VERSION" | head -n 2
+
+      - name: Verify gates (no UP-TO-DATE)
+        run: ./gradlew ktlintCheck detekt :shared:jvmTest --rerun-tasks :shared:probeCi --no-configuration-cache
+
+      - name: Commit, tag and push
+        if: ${{ !inputs.dry_run }}
+        run: |
+          VER=$(cat VERSION)
+          git add VERSION iosApp/iosApp.xcodeproj/project.pbxproj
+          git commit -m "chore(release): v$VER"
+          git tag "v$VER"
+          git push origin HEAD:main
+          git push origin "v$VER"
+
+      - name: Build release APKs
+        run: ./gradlew :androidApp:assembleRelease --no-configuration-cache
+
+      - name: Upload release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-apk-${{ hashFiles('VERSION') }}
+          path: |
+            androidApp/build/outputs/apk/release/*.apk
+            androidApp/build/outputs/mapping/release/mapping.txt
