@@ -1,7 +1,10 @@
+@file:OptIn(androidx.media3.common.util.UnstableApi::class)
+
 package dylan.android.media
 
 import android.content.Intent
 import androidx.media3.common.MediaItem
+import androidx.media3.common.util.UnstableApi
 import androidx.media3.session.DefaultMediaNotificationProvider
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
@@ -16,6 +19,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
+@OptIn(UnstableApi::class)
 class DylanMediaService : MediaSessionService() {
     private var session: MediaSession? = null
     private var engine: ExoPlayerEngine? = null

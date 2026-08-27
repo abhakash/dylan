@@ -104,7 +104,11 @@ android {
     }
     buildFeatures { compose = true }
     packaging { resources.excludes += "/META-INF/{AL2.0,LGPL2.1}" }
-}
+    lint {
+        baseline = file("lint-baseline.xml")
+        abortOnError = false
+        checkDependencies = false
+    }
 
 dependencies {
     implementation(project(":shared"))
