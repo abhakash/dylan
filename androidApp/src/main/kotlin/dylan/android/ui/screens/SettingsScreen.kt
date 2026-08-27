@@ -2,7 +2,6 @@ package dylan.android.ui.screens
 
 import android.Manifest
 import android.content.pm.PackageManager
-import android.os.Build
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -26,6 +25,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -48,8 +48,8 @@ fun SettingsScreen(container: AppContainer) {
     val t = LocalDylanTokens.current
     val scope = androidx.compose.runtime.rememberCoroutineScope()
     var quality by remember { mutableStateOf(Quality.BITRATE_320) }
-    var songCount by remember { mutableStateOf(0L) }
-    var usedBytes by remember { mutableStateOf(0L) }
+    var songCount by remember { mutableLongStateOf(0L) }
+    var usedBytes by remember { mutableLongStateOf(0L) }
     var confirmClear by remember { mutableStateOf(false) }
     var notifGranted by remember { mutableStateOf(true) }
 
@@ -65,7 +65,7 @@ fun SettingsScreen(container: AppContainer) {
         val granted =
             ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS) ==
                 PackageManager.PERMISSION_GRANTED
-        notifGranted = Build.VERSION.SDK_INT < 33 || granted
+        notifGranted = granted
         onPauseOrDispose { }
     }
     LaunchedEffect(Unit) {

@@ -125,5 +125,5 @@ dependencies {
     implementation(libs.ktor.client.okhttp)
     implementation(libs.media3.exoplayer)
     implementation(libs.media3.session)
-    debugImplementation("androidx.compose.ui:ui-tooling")
+    debugImplementation(libs.compose.ui.tooling)
 }

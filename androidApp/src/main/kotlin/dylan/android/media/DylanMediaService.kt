@@ -1,4 +1,5 @@
 @file:OptIn(androidx.media3.common.util.UnstableApi::class)
+@file:Suppress("UnsafeOptInUsageError")
 
 package dylan.android.media
 

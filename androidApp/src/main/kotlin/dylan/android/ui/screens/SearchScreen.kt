@@ -24,6 +24,7 @@ import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -65,7 +66,7 @@ fun SearchScreen(
     var recent by remember { mutableStateOf<List<String>>(emptyList()) }
     var topSearches by remember { mutableStateOf<List<MiniEntity>>(emptyList()) }
     var results by remember { mutableStateOf<List<Song>>(emptyList()) }
-    var total by remember { mutableStateOf(0L) }
+    var total by remember { mutableLongStateOf(0L) }
 
     LaunchedEffect(Unit) {
         recent = runCatching { container.searchHistory.recent() }.getOrDefault(emptyList())

@@ -3,7 +3,6 @@ package dylan.android
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -33,7 +32,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun ensureNotificationPermission() {
-        if (notifAsked || Build.VERSION.SDK_INT < 33) return
+        if (notifAsked) return
         notifAsked = true
         val granted = ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
         if (!granted) notifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
