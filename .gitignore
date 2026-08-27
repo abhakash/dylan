@@ -13,7 +13,6 @@ shared/build/
 androidApp/build/
 .gradle-home/
 .kotlin-home/
-gradle/wrapper/gradle-wrapper.jar
 
 # Local env / secrets
 local.properties
