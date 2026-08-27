@@ -109,6 +109,7 @@ android {
         abortOnError = false
         checkDependencies = false
     }
+}
 
 dependencies {
     implementation(project(":shared"))
