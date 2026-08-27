@@ -1,0 +1,71 @@
+name: ios-free
+
+# Free sideload: builds unsigned .ipa on GitHub (no paid cert).
+# You sign locally on Mac with your free Apple ID via Xcode/AltStore.
+# Trigger: Actions -> ios-free -> Run workflow -> Download artifact Dylan-unsigned.ipa
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-free
+  cancel-in-progress: false
+
+jobs:
+  unsigned-ipa:
+    runs-on: macos-14
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Select Xcode 16.2
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: "16.2"
+
+      - name: Build shared frameworks (release)
+        run: ./gradlew :shared:assemble --no-configuration-cache
+
+      - name: Build unsigned .app (iphoneos, no signing)
+        run: |
+          set -e
+          xcodebuild -project iosApp/iosApp.xcodeproj \
+            -scheme iosApp \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build | xcpretty || xcodebuild -project iosApp/iosApp.xcodeproj -scheme iosApp -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build
+
+      - name: Package unsigned IPA
+        run: |
+          set -e
+          APP=$(find ~/Library/Developer/Xcode/DerivedData -name "iosApp.app" -path "*/Build/Products/Release-iphoneos/*" | head -n1)
+          if [ -z "$APP" ]; then APP=$(find . -path "*/Build/Products/Release-iphoneos/iosApp.app" | head -n1); fi
+          echo "Found .app: $APP"
+          ls -lh "$APP"
+          rm -rf /tmp/Payload /tmp/Dylan-unsigned.ipa
+          mkdir -p /tmp/Payload
+          cp -R "$APP" /tmp/Payload/
+          cd /tmp && zip -r Dylan-unsigned.ipa Payload > /dev/null
+          ls -lh Dylan-unsigned.ipa
+          unzip -l Dylan-unsigned.ipa | head -20
+
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Dylan-unsigned-ipa
+          path: /tmp/Dylan-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 14
