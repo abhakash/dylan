@@ -169,7 +169,7 @@ jobs:
         with:
           xcode-version: "16.2"
       - name: Cache Kotlin/Native + DerivedData
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.konan
