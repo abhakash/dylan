@@ -72,9 +72,11 @@ fun SettingsScreen(container: AppContainer) {
         quality = runCatching { container.settings.qualityPref() }.getOrDefault(Quality.BITRATE_320)
         runCatching {
             val row =
-                container.db.dylanQueries
-                    .cachedCountAndBytes()
-                    .executeAsOne()
+                kotlinx.coroutines.withContext(container.disp.dbLane) {
+                    container.db.dylanQueries
+                        .cachedCountAndBytes()
+                        .executeAsOne()
+                }
             songCount = row.song_count
             usedBytes = row.total_bytes
         }
@@ -200,9 +202,11 @@ fun SettingsScreen(container: AppContainer) {
                         runCatching { container.cacheManager.clearCacheExcludingProtected() }
                         val row =
                             runCatching {
-                                container.db.dylanQueries
-                                    .cachedCountAndBytes()
-                                    .executeAsOne()
+                                kotlinx.coroutines.withContext(container.disp.dbLane) {
+                                    container.db.dylanQueries
+                                        .cachedCountAndBytes()
+                                        .executeAsOne()
+                                }
                             }.getOrNull()
                         songCount = row?.song_count ?: 0L
                         usedBytes = row?.total_bytes ?: 0L

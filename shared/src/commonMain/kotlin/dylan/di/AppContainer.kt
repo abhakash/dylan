@@ -6,9 +6,11 @@ import dylan.cache.Reconciler
 import dylan.config.AppConfig
 import dylan.db.DriverFactory
 import dylan.db.Dylan
+import dylan.db.RecentAlbums
 import dylan.diag.LogBuffer
 import dylan.download.Breakers
 import dylan.download.DownloadEngine
+import dylan.model.Song
 import dylan.model.SongKey
 import dylan.net.apiClient
 import dylan.net.bulkClient
@@ -25,8 +27,11 @@ import dylan.util.AppDispatchers
 import dylan.util.NetMonitor
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.HttpClientEngine
+import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.plugins.websocket.WebSockets
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okio.FileSystem
@@ -37,7 +42,7 @@ class AppContainer(
     val cfg: AppConfig,
     val disp: AppDispatchers,
     val scope: kotlinx.coroutines.CoroutineScope,
-    baseDir: String,
+    private val baseDir: String,
     driverFactory: DriverFactory,
     val netMonitor: NetMonitor,
     httpEngine: HttpClientEngine,
@@ -71,6 +76,10 @@ class AppContainer(
     private val ws =
         HttpClient(httpEngine) {
             install(WebSockets) { pingIntervalMillis = cfg.wsPingIntervalMs.toLong() }
+            install(HttpTimeout) {
+                connectTimeoutMillis = 8_000
+                requestTimeoutMillis = 8_000
+            }
         }
 
     val provider = SaavnProvider(api, cfg)
@@ -113,49 +122,90 @@ class AppContainer(
     val homeCache = HomeCacheRepo(db, disp, cfg)
     val reconciler = Reconciler(db, fs, paths, cfg, disp, downloads, cacheManager, log)
 
+    data class HomeSnapshot(
+        val loaded: Boolean = false,
+        val jumpBack: List<Song> = emptyList(),
+        val favorites: List<Song> = emptyList(),
+        val albums: List<RecentAlbums> = emptyList(),
+    )
+
+    val homeSnapshot = MutableStateFlow(HomeSnapshot())
+
     fun createEngine(): dylan.playback.PlayerEngine = engineFactory()
 
-    init {
+    private var started = false
+    private val bgJobs = mutableListOf<Job>()
+
+    /** Pure ctor — no I/O. Call [start] after `setContent` to avoid blocking first frame. */
+    fun start() {
+        if (started) return
+        started = true
         log.i("boot", "container up dir=$baseDir")
         downloads.start()
-        scope.launch(disp.io) {
-            val t0 = dylan.util.nowMs()
-            runCatching { reconciler.run() }
-                .onSuccess { log.i("reconciler", "boot sweep done in ${dylan.util.nowMs() - t0}ms") }
-                .onFailure { log.e("reconciler", it.message ?: "failed") }
-            orchestrator.restoreFromSnapshot()
-        }
-        scope.launch(disp.io) {
-            while (true) {
-                val now = dylan.util.nowMs()
-                val last = runCatching { settings.get("gc_last_ms")?.toLongOrNull() ?: 0L }.getOrDefault(0L)
-                val weekMs = 7L * 24 * 60 * 60 * 1000
-                if (now - last >= weekMs) {
-                    log.i("weeklyGc", "running (last=$last)")
-                    runCatching { db.weeklyGc(disp, cfg) }
-                        .onSuccess { log.i("weeklyGc", "done") }
-                        .onFailure { log.e("weeklyGc", it.message ?: "failed") }
-                    runCatching { homeCache.evictWeekly() }
-                        .onSuccess { log.i("homeCacheEvict", "done") }
-                        .onFailure { log.e("homeCacheEvict", it.message ?: "failed") }
-                    runCatching { settings.put("gc_last_ms", now.toString()) }
+        // Single source of truth for protected keys — replaces scattered triple-union reads.
+        bgJobs +=
+            scope.launch(disp.state) {
+                combine(
+                    orchestrator.state,
+                    cacheManager.inFlightJobKeys,
+                    cacheManager.upgradeSourceKeys,
+                ) { st, inflight, upgrade ->
+                    buildSet {
+                        st.current?.let { add(it.key) }
+                        st.nextUp?.let { add(it.key) }
+                        addAll(inflight)
+                        addAll(upgrade)
+                    }
+                }.collect { protectedKeys.value = it }
+            }
+        bgJobs +=
+            scope.launch(disp.io) {
+                val t0 = dylan.util.nowMs()
+                runCatching { reconciler.run() }
+                    .onSuccess { log.i("reconciler", "boot sweep done in ${dylan.util.nowMs() - t0}ms") }
+                    .onFailure { log.e("reconciler", it.message ?: "failed") }
+                orchestrator.restoreFromSnapshot()
+            }
+        bgJobs +=
+            scope.launch(disp.io) {
+                while (true) {
+                    val now = dylan.util.nowMs()
+                    val last = runCatching { settings.get("gc_last_ms")?.toLongOrNull() ?: 0L }.getOrDefault(0L)
+                    val weekMs = 7L * 24 * 60 * 60 * 1000
+                    if (now - last >= weekMs) {
+                        log.i("weeklyGc", "running (last=$last)")
+                        runCatching { db.weeklyGc(disp, cfg) }
+                            .onSuccess { log.i("weeklyGc", "done") }
+                            .onFailure { log.e("weeklyGc", it.message ?: "failed") }
+                        runCatching { homeCache.evictWeekly() }
+                            .onSuccess { log.i("homeCacheEvict", "done") }
+                            .onFailure { log.e("homeCacheEvict", it.message ?: "failed") }
+                        runCatching { settings.put("gc_last_ms", now.toString()) }
+                    }
+                    val nextLast = runCatching { settings.get("gc_last_ms")?.toLongOrNull() ?: now }.getOrDefault(now)
+                    val delayMs = (nextLast + weekMs - dylan.util.nowMs()).coerceAtLeast(60_000L)
+                    kotlinx.coroutines.delay(delayMs)
                 }
-                val nextLast = runCatching { settings.get("gc_last_ms")?.toLongOrNull() ?: now }.getOrDefault(now)
-                val delayMs = (nextLast + weekMs - dylan.util.nowMs()).coerceAtLeast(60_000L)
-                kotlinx.coroutines.delay(delayMs)
             }
-        }
         // QUALITY_UPGRADE idle scanner — closes same-key window-skip gap (§7.3 sufficiency)
-        scope.launch(disp.io) {
-            while (true) {
-                kotlinx.coroutines.delay(30L * 60 * 1000)
-                if (netMonitor.current() == dylan.util.NetClass.METERED) continue
-                if (cacheManager.inFlightJobKeys.value.isNotEmpty()) continue
-                runCatching { scanQualityUpgrades() }
-                    .onSuccess { n -> if (n > 0) log.i("qualityScan", "enqueued $n upgrades") }
-                    .onFailure { log.e("qualityScan", it.message ?: "failed") }
+        bgJobs +=
+            scope.launch(disp.io) {
+                while (true) {
+                    kotlinx.coroutines.delay(30L * 60 * 1000)
+                    if (netMonitor.current() == dylan.util.NetClass.METERED) continue
+                    if (cacheManager.inFlightJobKeys.value.isNotEmpty()) continue
+                    runCatching { scanQualityUpgrades() }
+                        .onSuccess { n -> if (n > 0) log.i("qualityScan", "enqueued $n upgrades") }
+                        .onFailure { log.e("qualityScan", it.message ?: "failed") }
+                }
             }
-        }
+    }
+
+    fun stop() {
+        bgJobs.forEach { it.cancel() }
+        bgJobs.clear()
+        downloads.stop()
+        started = false
     }
 
     private suspend fun scanQualityUpgrades(): Int {

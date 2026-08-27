@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.Context
 import coil3.ImageLoader
 import coil3.SingletonImageLoader
+import coil3.disk.DiskCache
 import coil3.memory.MemoryCache
 import dylan.android.media.ExoPlayerEngine
 import dylan.android.media.MediaHub
@@ -15,6 +16,7 @@ import dylan.util.NetMonitor
 import io.ktor.client.engine.okhttp.OkHttp
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import okio.Path.Companion.toPath
 
 class DylanApp : Application() {
     lateinit var container: AppContainer
@@ -24,6 +26,7 @@ class DylanApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        val cfg = AppConfig()
         val disp =
             AppDispatchers(
                 Dispatchers.Main,
@@ -42,7 +45,7 @@ class DylanApp : Application() {
             )
         container =
             AppContainer(
-                cfg = AppConfig(),
+                cfg = cfg,
                 disp = disp,
                 scope = appScope,
                 baseDir = filesDir.absolutePath,
@@ -68,11 +71,18 @@ class DylanApp : Application() {
                 }
             android.util.Log.println(prio, "Dylan:${e.tag}", e.msg + (e.metaJson?.let { " $it" } ?: ""))
         }
+        container.start()
         SingletonImageLoader.setSafe { ctx ->
             ImageLoader
                 .Builder(ctx)
-                .memoryCache { MemoryCache.Builder().maxSizeBytes(48L * 1024 * 1024).build() }
-                .build()
+                .memoryCache { MemoryCache.Builder().maxSizeBytes(cfg.imageMemoryCacheBytes).build() }
+                .diskCache {
+                    DiskCache
+                        .Builder()
+                        .directory((ctx.cacheDir.resolve("coil").absolutePath).toPath())
+                        .maxSizeBytes(cfg.imageCacheBytes)
+                        .build()
+                }.build()
         }
     }
 

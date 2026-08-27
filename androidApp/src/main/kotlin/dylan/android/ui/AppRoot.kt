@@ -282,20 +282,15 @@ private fun NpOverlay(
         snapshotFlow { npState.currentValue }.collect { if (it == NpAnchor.Closed) onClosed() }
     }
 
-    val progress =
-        if (heightPx > 0f && npState.offset.isFinite()) {
-            (npState.offset / heightPx).coerceIn(0f, 1f)
-        } else {
-            1f
-        }
-
     Box(Modifier.fillMaxSize()) {
-        // Scrim — blocks touches to the app behind, fades with sheet position.
+        // Scrim — progress computed inside graphicsLayer (draw phase) so drag re-draws without recomposing.
         Box(
             Modifier
                 .fillMaxSize()
-                .graphicsLayer { alpha = 0.65f * (1f - progress) }
-                .background(androidx.compose.ui.graphics.Color.Black)
+                .graphicsLayer {
+                    val p = if (heightPx > 0f && npState.offset.isFinite()) (npState.offset / heightPx).coerceIn(0f, 1f) else 1f
+                    alpha = 0.65f * (1f - p)
+                }.background(androidx.compose.ui.graphics.Color.Black)
                 .pointerInput(Unit) {
                     detectTapGestures { }
                 },

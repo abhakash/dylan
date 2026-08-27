@@ -1,5 +1,5 @@
-# Dylan R8 — keep Media3 / SQLDelight / Ktor rules are pulled via consumer proguard
--keep class dylan.** { *; }
-# Okio / Ktor keep line numbers for LogBuffer
+# Dylan R8 — consumer rules from Media3/SQLDelight/Ktor already keep what they need.
+# Keep only DB schema (reflectively referenced) and diag sinks.
+-keep class dylan.db.** { *; }
+-keep class dylan.diag.** { *; }
 -keepattributes SourceFile,LineNumberTable
-# Coil / Compose no extra rules needed

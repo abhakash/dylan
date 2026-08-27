@@ -58,7 +58,7 @@ class PositionAdapter(
     scope: CoroutineScope,
     flow: Flow<Long>,
 ) {
-    private val inner = FlowAdapter(flow.conflate(), scope)
+    private val inner = FlowAdapter(flow, scope)
 
     fun subscribe(onEach: (Long) -> Unit): KotlinSubscription = inner.subscribe(onEach)
 }

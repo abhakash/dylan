@@ -141,7 +141,7 @@ fun AlbumScreen(
                     }
                 }
             }
-            itemsIndexed(songs) { i, song ->
+            itemsIndexed(songs, key = { _, s -> s.key.songId }) { i, song ->
                 SongRow(
                     song = song,
                     index = i + 1,

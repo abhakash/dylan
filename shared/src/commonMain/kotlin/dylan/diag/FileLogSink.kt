@@ -109,27 +109,22 @@ class FileLogSink(
             return "${isoUtc(e.ts)} ${e.level.name.first()}/${e.tag}: ${e.msg}$meta\n"
         }
 
-        /** Epoch-ms → ISO-8601 UTC, dependency-free (civil-from-days). */
         fun isoUtc(epochMs: Long): String {
-            val days = epochMs.floorDiv(86_400_000L)
-            val msOfDay = epochMs.mod(86_400_000L)
-            val z = days + 719_468
-            val era = z.floorDiv(146_097L)
-            val doe = z - era * 146_097
-            val yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365
-            val y = yoe + era * 400
-            val doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
-            val mp = (5 * doy + 2) / 153
-            val d = doy - (153 * mp + 2) / 5 + 1
-            val m = if (mp < 10) mp + 3 else mp - 9
-            val year = if (m <= 2) y + 1 else y
-
-            fun p(
-                v: Long,
-                n: Int = 2,
-            ) = v.toString().padStart(n, '0')
-            return "${p(year, 4)}-${p(m)}-${p(d)}T${p(msOfDay / 3_600_000)}:${p((msOfDay / 60_000) % 60)}:" +
-                "${p((msOfDay / 1_000) % 60)}.${p(msOfDay % 1_000, 3)}Z"
+            val s =
+                kotlinx.datetime.Instant
+                    .fromEpochMilliseconds(epochMs)
+                    .toString()
+            val withoutZ = s.removeSuffix("Z")
+            val withMillis =
+                if ('.' !in withoutZ) {
+                    "$withoutZ.000"
+                } else {
+                    val dot = withoutZ.lastIndexOf('.')
+                    val base = withoutZ.substring(0, dot)
+                    val frac = withoutZ.substring(dot + 1).padEnd(3, '0').take(3)
+                    "$base.$frac"
+                }
+            return "${withMillis}Z"
         }
     }
 }

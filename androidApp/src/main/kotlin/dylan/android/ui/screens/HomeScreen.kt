@@ -22,6 +22,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -54,33 +55,39 @@ fun HomeScreen(
     onOpenArtist: (MiniEntity) -> Unit = {},
 ) {
     val t = LocalDylanTokens.current
-    // Process-wide local snapshot — survives tab switches so re-entering Home renders the
-    // SQLite-backed sections on the FIRST frame (no pop-in, no layout shift).
-    val local = remember(container) { HomeLocalData }
+    val snapshot by container.homeSnapshot.collectAsState()
     var trending by remember { mutableStateOf<List<dylan.model.MiniEntity>>(emptyList()) }
     var topSearches by remember { mutableStateOf<List<dylan.model.MiniEntity>>(emptyList()) }
-    var jumpBack by remember { mutableStateOf(local.jumpBack) }
-    var albumHistory by remember { mutableStateOf(local.albums) }
-    var favorites by remember { mutableStateOf(local.favorites) }
+    var jumpBack by remember { mutableStateOf(snapshot.jumpBack) }
+    var albumHistory by remember { mutableStateOf(snapshot.albums) }
+    var favorites by remember { mutableStateOf(snapshot.favorites) }
     var offline by remember { mutableStateOf(false) }
     val actions = rememberSongActions(container)
     val favKeys = rememberFavoriteKeys(container)
 
     LaunchedEffect(Unit) {
-        // Fast local data first — pure SQLite, no network.
-        // Catalog-level dedupe: JioSaavn serves one recording under multiple song ids —
-        // dedupe by recordingKey and across sections by section precedence.
-        jumpBack =
-            runCatching { container.history.recent(20) }
-                .getOrDefault(emptyList())
-                .distinctRecordings()
-                .take(5)
-        favorites = runCatching { container.favorites.all() }.getOrDefault(emptyList()).distinctRecordings()
-        albumHistory = runCatching { container.history.recentAlbums(12) }.getOrDefault(emptyList())
-        local.jumpBack = jumpBack
-        local.favorites = favorites
-        local.albums = albumHistory
-        local.loaded = true
+        if (!container.homeSnapshot.value.loaded) {
+            // Fast local data first — pure SQLite, no network. Snapshot survives tab switches
+            // via AppContainer StateFlow (no object singleton, unidirectional).
+            jumpBack =
+                runCatching { container.history.recent(20) }
+                    .getOrDefault(emptyList())
+                    .distinctRecordings()
+                    .take(5)
+            favorites = runCatching { container.favorites.all() }.getOrDefault(emptyList()).distinctRecordings()
+            albumHistory = runCatching { container.history.recentAlbums(12) }.getOrDefault(emptyList())
+            container.homeSnapshot.value =
+                AppContainer.HomeSnapshot(
+                    loaded = true,
+                    jumpBack = jumpBack,
+                    favorites = favorites,
+                    albums = albumHistory,
+                )
+        } else {
+            jumpBack = snapshot.jumpBack
+            favorites = snapshot.favorites
+            albumHistory = snapshot.albums
+        }
         coroutineScope {
             val feedDeferred = async { runCatching { container.provider.home() }.getOrNull() }
             val topSearchesDeferred = async { runCatching { container.provider.topSearches() }.getOrDefault(emptyList()) }
@@ -95,6 +102,7 @@ fun HomeScreen(
             topSearches = topSearchesDeferred.await()
         }
     }
+    val favoritesShown = remember(favorites, jumpBack) { favorites.filter { f -> !jumpBack.containsRecording(f) } }
     LazyColumn(
         Modifier.fillMaxSize(),
         contentPadding =
@@ -162,14 +170,12 @@ fun HomeScreen(
             item {
                 AlbumCarousel(albumHistory, onOpenAlbum)
             }
-        } else if (!local.loaded) {
+        } else if (!snapshot.loaded) {
             item { SectionTitle("Recently played albums") }
             item {
                 AlbumSkeleton()
             }
         }
-        // Cross-section dedupe: a favorite already visible in Jump back in is hidden here.
-        val favoritesShown = favorites.filter { f -> !jumpBack.containsRecording(f) }
         if (favoritesShown.isNotEmpty()) {
             item { SectionTitle("Your favorites") }
             val topFive = favoritesShown.take(5)
@@ -316,10 +322,4 @@ private fun AlbumSkeleton() {
     }
 }
 
-/** Session-scoped cache of the SQLite-backed Home sections (instant tab revisits). */
-private object HomeLocalData {
-    var loaded = false
-    var jumpBack: List<Song> = emptyList()
-    var favorites: List<Song> = emptyList()
-    var albums: List<dylan.db.RecentAlbums> = emptyList()
-}
+/** HomeSnapshot now lives in AppContainer.homeSnapshot (StateFlow, unidirectional). */

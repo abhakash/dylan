@@ -76,6 +76,7 @@ class Orchestrator(
     private var pushedUpNextId: String? = null
     private var doneJoinedKey: SongKey? = null
     private var playGeneration = 0L
+    private val windowPreparer = WindowPreparer(db, fs, paths, disp)
 
     init {
         scope.launch(disp.state) {
@@ -341,7 +342,7 @@ class Orchestrator(
         }
     }
 
-    private fun transportable(p: Phase) = p is Phase.Playing || p is Phase.Paused || p is Phase.Ready
+    private fun transportable(p: Phase) = QueueStateMachine.transportable(p)
 
     private fun setStateQueue(
         s: PlayerState,
@@ -380,30 +381,7 @@ class Orchestrator(
             }
     }
 
-    private fun resolveAdvance(dir: Int): Int? {
-        val s = _state.value
-        if (s.queue.isEmpty()) return null
-        return if (s.shuffleOn) {
-            val order = s.shuffleOrder ?: return null
-            val pos = order.indexOf(s.index)
-            if (pos < 0) return null
-            val nextPos = pos + dir
-            when {
-                nextPos in order.indices -> order[nextPos]
-                dir > 0 && s.repeat == Repeat.ALL -> order.first()
-                dir < 0 && s.repeat == Repeat.ALL -> order.last()
-                else -> null
-            }
-        } else {
-            val n = s.index + dir
-            when {
-                n in s.queue.indices -> n
-                dir > 0 && s.repeat == Repeat.ALL -> 0
-                dir < 0 && s.repeat == Repeat.ALL -> s.queue.lastIndex
-                else -> null
-            }
-        }
-    }
+    private fun resolveAdvance(dir: Int): Int? = QueueStateMachine.resolveAdvance(_state.value, dir)
 
     private suspend fun ensureReadyAndPlay(
         index: Int,
@@ -757,48 +735,11 @@ class Orchestrator(
         }
     }
 
-    private suspend fun cachedRow(key: SongKey) =
-        withContext(disp.dbLane) {
-            db.dylanQueries.selectCached(key.provider, key.songId).executeAsOneOrNull()
-        }
+    private suspend fun cachedRow(key: SongKey) = windowPreparer.cachedRow(key)
 
-    private fun sniffOk(row: dylan.db.Cached_files): Boolean {
-        val key = SongKey(row.provider, row.song_id)
-        val path = paths.final(key, row.bitrate.toInt(), row.ext)
-        val meta = runCatching { fs.metadataOrNull(path) }.getOrNull() ?: return false
-        if (meta.size ?: -1L != row.bytes) return false
-        return runCatching {
-            val h = fs.openReadOnly(path)
-            try {
-                val buf = ByteArray(12)
-                var read = 0
-                while (read < 12) {
-                    val n = h.read(read.toLong(), buf, read, 12 - read)
-                    if (n <= 0) break
-                    read += n
-                }
-                if (read < 12) return@runCatching false
-                val head = buf.decodeToString(4, 8)
-                head == "ftyp" || buf[0] == 'I'.code.toByte() && buf[1] == 'D'.code.toByte() && buf[2] == '3'.code.toByte()
-            } finally {
-                runCatching { h.close() }
-            }
-        }.getOrDefault(false)
-    }
+    private fun sniffOk(row: dylan.db.Cached_files): Boolean = windowPreparer.sniffOk(row)
 
-    private suspend fun localTrackFor(song: Song): dylan.playback.LocalTrack? {
-        val row = cachedRow(song.key) ?: return null
-        if (!sniffOk(row)) return null
-        val path = paths.final(song.key, row.bitrate.toInt(), row.ext)
-        return LocalTrack(
-            itemId = song.key.itemId(row.bitrate.toInt()),
-            path = path.toString(),
-            durationHintMs = song.durationS * 1000,
-            title = song.title,
-            artist = song.artistName ?: song.subtitle,
-            artworkUri = song.artUrl500.takeIf { it.isNotBlank() } ?: song.artUrl150.takeIf { it.isNotBlank() },
-        )
-    }
+    private suspend fun localTrackFor(song: Song): LocalTrack? = windowPreparer.localTrackFor(song)
 
     private fun enginePositionMs(): Long = lastPosMs
 

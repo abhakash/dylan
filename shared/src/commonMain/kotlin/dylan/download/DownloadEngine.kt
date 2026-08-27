@@ -131,10 +131,12 @@ class DownloadEngine(
     private val queue = mutableListOf<DownloadJob>()
     private var executing: Job? = null
     private var executingKey: SongKey? = null
+    private var executingJob: DownloadJob? = null
+    private val preemptedKey = AtomicReference<SongKey?>(null)
 
     val states = MutableStateFlow<Map<SongKey, JobState>>(emptyMap())
     val progress = MutableStateFlow<Map<SongKey, Int>>(emptyMap())
-    private var lastProgressEmit = 0L
+    private val lastProgressEmit = mutableMapOf<SongKey, Long>()
 
     fun stop() {
         supervisor.cancel()
@@ -148,26 +150,46 @@ class DownloadEngine(
         log.i("dl", "enqueue ${job.key.provider}:${job.key.songId} prio=${job.reason} bits=${job.bitrate}")
         scope.launch {
             states.update { it - job.key }
+            var victim: DownloadJob? = null
+            var aborted = false
             mutex.withLock {
                 val existing = queue.firstOrNull { it.key == job.key }
                 if (existing != null && existing.reason.ordinal < job.reason.ordinal) {
                     log.d("dl", "enqueue skipped (higher prio queued) ${job.key.provider}:${job.key.songId}")
-                    return@launch
+                    aborted = true
+                    return@withLock
                 }
                 queue.removeAll { it.key == job.key }
                 queue += job
                 queue.sortWith(compareBy({ it.reason.ordinal }, { it.enqueuedAtMs }))
+                // Strictly-higher-priority preempt: keep .part, requeue victim
+                val execJob = executingJob
+                val execKey = executingKey
+                if (execJob != null && execKey != null && job.key != execKey && job.reason.ordinal < execJob.reason.ordinal) {
+                    victim = execJob
+                    preemptedKey.store(execKey)
+                    queue.removeAll { it.key == execKey }
+                    queue.add(execJob.copy(enqueuedAtMs = nowMs()))
+                    queue.sortWith(compareBy({ it.reason.ordinal }, { it.enqueuedAtMs }))
+                }
             }
-            runCatching {
-                db.dylanQueries.upsertIntent(
-                    job.key.provider,
-                    job.key.songId,
-                    job.reason.name,
-                    job.bitrate.toLong(),
-                    job.enqueuedAtMs,
-                )
+            if (aborted) return@launch
+            withContext(disp.dbLane) {
+                runCatching {
+                    db.dylanQueries.upsertIntent(
+                        job.key.provider,
+                        job.key.songId,
+                        job.reason.name,
+                        job.bitrate.toLong(),
+                        job.enqueuedAtMs,
+                    )
+                }
             }
             enforcePartCap()
+            victim?.let {
+                log.i("dl", "preempt ${it.key.provider}:${it.key.songId} prio=${it.reason} for ${job.key.provider}:${job.key.songId}")
+                executing?.cancel(CancellationException("preempted"))
+            }
             wake.trySend(Unit)
         }
     }
@@ -185,8 +207,10 @@ class DownloadEngine(
         }
     }
 
-    fun dropIntent(key: SongKey) {
-        runCatching { db.dylanQueries.deleteIntent(key.provider, key.songId) }
+    suspend fun dropIntent(key: SongKey) {
+        withContext(disp.dbLane) {
+            runCatching { db.dylanQueries.deleteIntent(key.provider, key.songId) }
+        }
     }
 
     suspend fun enforcePartCap() {
@@ -221,7 +245,7 @@ class DownloadEngine(
                         { runCatching { fs.metadataOrNull(it)?.lastModifiedAtMillis ?: 0L }.getOrDefault(0L) },
                     ),
                 ).take(eligible.size - cfg.maxConcurrentParts)
-        victims.forEach { p ->
+        for (p in victims) {
             parsePartName(p.name)?.let { (prov, sid) -> dropIntent(SongKey(prov, sid)) }
             runCatching { fs.delete(p) }
         }
@@ -259,9 +283,11 @@ class DownloadEngine(
             val j = scope.launch { runJob(job) }
             executing = j
             executingKey = job.key
+            executingJob = job
             j.join()
             executing = null
             executingKey = null
+            executingJob = null
             wake.trySend(Unit)
         }
     }
@@ -455,8 +481,11 @@ class DownloadEngine(
                                         }
                                     is HttpOutcome.NotFound -> return fail(key, DylanFailure(ErrorCode.NOT_FOUND, key))
                                     is HttpOutcome.RangeNotSatisfiable -> {
-                                        log.w("dl", "416 restart ${key.provider}:${key.songId} rangeRestarts=$rangeRestarts")
+                                        log.w("dl", "416 restart ${key.provider}:${key.songId} rangeRestarts=$rangeRestarts cap=${cfg.rangeRestartsCap}")
                                         rangeRestarts++
+                                        if (rangeRestarts > cfg.rangeRestartsCap) {
+                                            return fail(key, DylanFailure(ErrorCode.NETWORK, key))
+                                        }
                                         truncate(paths.part(key, q.bits))
                                         partB = 0
                                         etag = null
@@ -568,7 +597,14 @@ class DownloadEngine(
                 }
             }
         } catch (e: CancellationException) {
-            states.update { it + (key to JobState.Cancelled) }
+            val isPreempt = e.message == "preempted" && preemptedKey.load() == key
+            if (isPreempt) {
+                preemptedKey.store(null)
+                states.update { it - key }
+                progress.update { it - key }
+            } else {
+                states.update { it + (key to JobState.Cancelled) }
+            }
             throw e
         } finally {
             cacheManager.inFlightJobKeys.update { it - key }
@@ -599,13 +635,17 @@ class DownloadEngine(
                             while (true) {
                                 val n = ch.readAvailable(buf, 0, buf.size)
                                 if (n == -1) break
-                                if (n == 0) continue
+                                if (n == 0) {
+                                    delay(10)
+                                    continue
+                                }
                                 h.write(pos, buf, 0, n)
                                 pos += n
                                 lastMark.store(TimeSource.Monotonic.markNow())
                                 emitProgress(key, pos, totalLen ?: expectedB)
                             }
                         } finally {
+                            runCatching { h.flush() }
                             runCatching { h.close() }
                         }
                     } catch (e: CancellationException) {
@@ -672,8 +712,9 @@ class DownloadEngine(
         denom: Long,
     ) {
         val n = nowMs()
-        if (n - lastProgressEmit < 250 && loaded < denom) return
-        lastProgressEmit = n
+        val last = lastProgressEmit[key] ?: 0L
+        if (n - last < 250 && loaded < denom) return
+        lastProgressEmit[key] = n
         val pct = (((loaded * 100) / denom.coerceAtLeast(1)).coerceIn(0L, 99L)).toInt()
         progress.update { it + (key to pct) }
     }

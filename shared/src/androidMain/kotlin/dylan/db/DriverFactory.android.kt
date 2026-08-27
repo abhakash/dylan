@@ -9,8 +9,10 @@ actual class DriverFactory(
 ) {
     actual fun createDriver(): SqlDriver {
         val driver = AndroidSqliteDriver(Dylan.Schema, ctx, "dylan.db")
-        // F1 pragmas deferred for Android — AndroidSqliteDriver treats PRAGMA as query
-        // and execute() throws; keep original behaviour until a safe exec path is verified.
+        runCatching { driver.execute(null, "PRAGMA journal_mode=WAL", 0) }
+        runCatching { driver.execute(null, "PRAGMA synchronous=NORMAL", 0) }
+        runCatching { driver.execute(null, "PRAGMA foreign_keys=ON", 0) }
+        runCatching { driver.execute(null, "PRAGMA busy_timeout=5000", 0) }
         return driver
     }
 }

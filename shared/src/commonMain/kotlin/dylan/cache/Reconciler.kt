@@ -68,7 +68,7 @@ class Reconciler(
                         .map { SongKey(it.provider, it.song_id) }
                         .toSet()
                 }
-            intents.forEach { intent ->
+            for (intent in intents) {
                 val key = SongKey(intent.provider, intent.song_id)
                 if (key in cachedKeys) {
                     engine.dropIntent(key)

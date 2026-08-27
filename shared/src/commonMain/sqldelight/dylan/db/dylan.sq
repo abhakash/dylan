@@ -38,7 +38,7 @@ CREATE TABLE favorites (
   song_id     TEXT NOT NULL,
   added_at_ms INTEGER NOT NULL,
   PRIMARY KEY (provider, song_id),
-  FOREIGN KEY (provider, song_id) REFERENCES songs(provider, song_id)
+  FOREIGN KEY (provider, song_id) REFERENCES songs(provider, song_id) ON DELETE CASCADE
 );
 CREATE INDEX idx_favorites ON favorites(added_at_ms DESC);
 

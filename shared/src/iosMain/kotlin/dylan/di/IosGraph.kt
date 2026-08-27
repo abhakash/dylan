@@ -276,7 +276,9 @@ class IosGraph private constructor(
         /**
          * baseDir = Application Support dir (Swift side). Audio lives at <baseDir>/audio per §8.2;
          * DB directory intentionally NOT backup-excluded (§5.6). Scope mirrors Android's
-         * DylanApp.onCreate exactly (SupervisorJob-free state-lane scope, D23/B5a parity).
+         * DylanApp.onCreate exactly (SupervisorJob + state lane + CEH, D23/B5a parity) — single
+         * SupervisorJob shared between graph and container so a reconciler throw cannot kill one
+         * half of the graph while leaving the other alive.
          */
         fun create(baseDir: String): IosGraph {
             val cfg = AppConfig()
@@ -288,16 +290,22 @@ class IosGraph private constructor(
                     dbLane = Dispatchers.Default.limitedParallelism(1),
                     state = Dispatchers.Default.limitedParallelism(1),
                 )
+            val stateJob = kotlinx.coroutines.SupervisorJob()
+            val ceh =
+                kotlinx.coroutines.CoroutineExceptionHandler { _, t ->
+                    platform.Foundation.NSLog("dylan:scope %@", t.message ?: t.toString())
+                }
+            val sharedScope = CoroutineScope(stateJob + disp.state + ceh)
             val graph =
                 IosGraph(
                     cfg = cfg,
                     disp = disp,
-                    scope = CoroutineScope(disp.state),
+                    scope = sharedScope,
                     container =
                         AppContainer(
                             cfg = cfg,
                             disp = disp,
-                            scope = CoroutineScope(disp.state),
+                            scope = sharedScope,
                             baseDir = baseDir,
                             driverFactory = DriverFactory(baseDir),
                             netMonitor = NetMonitor(),
@@ -312,6 +320,7 @@ class IosGraph private constructor(
                     graph.container.log.i("toast", msg)
                     graph.onToast?.invoke(msg)
                 }
+            graph.container.start()
             return graph
         }
     }

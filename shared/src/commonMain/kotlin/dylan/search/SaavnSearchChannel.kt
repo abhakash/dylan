@@ -12,6 +12,7 @@ import io.ktor.client.request.header
 import io.ktor.client.request.parameter
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.HttpHeaders
+import io.ktor.http.encodeURLParameter
 import io.ktor.http.isSuccess
 import io.ktor.websocket.CloseReason
 import io.ktor.websocket.Frame
@@ -141,9 +142,10 @@ class SaavnSearchChannel(
         val added = correlationMode != CorrelationMode.UNORDERED
         if (added) sentQueries.addLast(query)
         return try {
+            val qEnc = query.encodeURLParameter()
             val sendJson =
                 buildJsonObject {
-                    put("url", "/api.php?__call=autocomplete.get&query=$query&_format=json&_marker=0&ctx=web6dot0")
+                    put("url", "/api.php?__call=autocomplete.get&query=$qEnc&_format=json&_marker=0&ctx=web6dot0")
                 }.toString()
             s.send(Frame.Text(sendJson))
             val text =

@@ -27,12 +27,16 @@ fun apiClient(
         install(HttpTimeout) {
             connectTimeoutMillis = 5_000
             socketTimeoutMillis = 15_000
+            requestTimeoutMillis = 20_000
         }
         install(HttpRequestRetry) {
             maxRetries = 1
             exponentialDelay(baseDelayMs = 400)
             retryIf { _, response ->
                 response.status.value in 500..599 && response.status.value != 503
+            }
+            retryOnExceptionIf { _, cause ->
+                cause !is kotlinx.coroutines.CancellationException
             }
         }
         install(UserAgent) { agent = cfg.userAgent }
@@ -46,5 +50,6 @@ fun bulkClient(
         install(HttpTimeout) {
             connectTimeoutMillis = 10_000
             socketTimeoutMillis = 30_000
+            requestTimeoutMillis = 45_000
         }
     }
