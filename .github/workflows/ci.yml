@@ -49,7 +49,7 @@ jobs:
         run: ./gradlew ktlintCheck detekt :androidApp:lintDebug --no-configuration-cache --continue
       - name: Upload lint reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: lint-reports
           path: |
@@ -79,7 +79,7 @@ jobs:
         run: ./gradlew :shared:jvmTest --rerun-tasks :shared:probeCi :shared:contractDrift --no-configuration-cache
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: jvmTest-results
           path: |
@@ -112,7 +112,7 @@ jobs:
           echo "VERSION=$(cat VERSION)"
           ls -lh androidApp/build/outputs/apk/debug/*.apk androidApp/build/outputs/apk/release/*.apk || true
           sha256sum androidApp/build/outputs/apk/debug/*.apk androidApp/build/outputs/apk/release/*.apk 2>/dev/null || shasum -a 256 androidApp/build/outputs/apk/debug/*.apk 2>/dev/null || true
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: apks
           path: |
@@ -191,7 +191,7 @@ jobs:
             build | xcpretty || xcodebuild -project iosApp/iosApp.xcodeproj -scheme iosApp -sdk iphonesimulator -destination 'platform=iOS Simulator,name=iPhone 16' build CODE_SIGNING_ALLOWED=NO
       - name: Upload Xcode logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: xcode-logs
           path: ~/Library/Logs/DiagnosticReports/*.ips
