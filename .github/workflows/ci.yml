@@ -177,8 +177,8 @@ jobs:
             shared/build
           key: ios-${{ runner.os }}-${{ hashFiles('gradle/libs.versions.toml', 'shared/build.gradle.kts') }}
           restore-keys: ios-${{ runner.os }}-
-      - name: Build shared XCFramework (no signing)
-        run: ./gradlew :shared:assembleXCFramework --no-configuration-cache
+      - name: Build shared frameworks
+        run: ./gradlew :shared:assemble --no-configuration-cache
       - name: xcodebuild simulator (CODE_SIGNING_ALLOWED=NO)
         run: |
           xcodebuild -project iosApp/iosApp.xcodeproj \

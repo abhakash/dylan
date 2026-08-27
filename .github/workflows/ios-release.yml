@@ -55,8 +55,8 @@ jobs:
           echo "$PROFILE" | base64 --decode > ~/Library/MobileDevice/Provisioning\ Profiles/profile.mobileprovision
           security find-identity -v -p codesigning build.keychain
 
-      - name: Build shared XCFramework (release)
-        run: ./gradlew :shared:assembleXCFramework --no-configuration-cache
+      - name: Build shared frameworks (release)
+        run: ./gradlew :shared:assemble --no-configuration-cache
 
       - name: Archive IPA (adhoc/testflight)
         if: inputs.lane != 'simulator'
