@@ -1,0 +1,573 @@
+{
+ "total": 134,
+ "start": 1,
+ "results": [
+  {
+   "id": "w2kcgktu",
+   "title": "Awarapan",
+   "subtitle": "Rakht Music - Awarapan",
+   "header_desc": "",
+   "type": "song",
+   "perma_url": "https://www.jiosaavn.com/song/awarapan/B1oAUhNbQ0Y",
+   "image": "https://c.saavncdn.com/432/Awarapan-Hindi-2025-20250403203542-150x150.jpg",
+   "language": "hindi",
+   "year": "2025",
+   "play_count": "452335",
+   "explicit_content": "0",
+   "list_count": "0",
+   "list_type": "",
+   "list": "",
+   "more_info": {
+    "music": "Rakht Music",
+    "album_id": "63455736",
+    "album": "Awarapan",
+    "label": "Rakht Music",
+    "label_id": null,
+    "origin": "search",
+    "is_dolby_content": false,
+    "320kbps": "true",
+    "encrypted_media_url": "ID2ieOjCrwfgWvL5sXl4B1ImC5QfbsDyPjfbTnbigGgcPQ2tEHelAs8DHpU766xADpFzOvioe745tZE4fGt6zhw7tS9a8Gtq",
+    "encrypted_cache_url": "",
+    "encrypted_drm_cache_url": "",
+    "encrypted_drm_media_url": "ID2ieOjCrwdjlkMElYlzWCptgNdUpWD8P1npULnfAyApDs/D6VJ8dQ0Ql1RREtsjsTWMSS7P/X5poQyt9cj2rI92mytrdt3FDnQW0nglPS4=",
+    "album_url": "https://www.jiosaavn.com/album/awarapan/-0Zqn01iUcE_",
+    "duration": "186",
+    "rights": {
+     "code": "0",
+     "cacheable": "true",
+     "delete_cached_object": "false",
+     "reason": ""
+    },
+    "cache_state": "false",
+    "has_lyrics": "false",
+    "lyrics_snippet": "",
+    "has_trivia": "false",
+    "trivia": [],
+    "starred": "false",
+    "copyright_text": "© 2025 Rakht Music",
+    "artistMap": {
+     "primary_artists": [
+      {
+       "id": "11941552",
+       "name": "Rakht Music",
+       "role": "primary_artists",
+       "image": "",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/rakht-music-songs/qJ6f-X7Q5aY_"
+      }
+     ],
+     "featured_artists": [],
+     "artists": [
+      {
+       "id": "11941552",
+       "name": "Rakht Music",
+       "role": "music",
+       "image": "",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/rakht-music-songs/qJ6f-X7Q5aY_"
+      },
+      {
+       "id": "11941552",
+       "name": "Rakht Music",
+       "role": "singer",
+       "image": "",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/rakht-music-songs/qJ6f-X7Q5aY_"
+      }
+     ]
+    },
+    "release_date": null,
+    "label_url": "/label/rakht-music-albums/",
+    "vcode": "010912023100451",
+    "vlink": "https://jiotunepreview.jio.com/content/Converted/010912023059701.mp3",
+    "triller_available": false,
+    "request_jiotune_flag": false,
+    "webp": "true"
+   },
+   "button_tooltip_info": [],
+   "pro_hva_campaigns": []
+  },
+  {
+   "id": "Wh4lv4R8",
+   "title": "Awarapan",
+   "subtitle": "Udit Narayan - Awarapan",
+   "header_desc": "",
+   "type": "song",
+   "perma_url": "https://www.jiosaavn.com/song/awarapan/JwBfXQIEZQs",
+   "image": "https://c.saavncdn.com/023/Awarapan-Hindi-2026-20260710143018-150x150.jpg",
+   "language": "hindi",
+   "year": "2026",
+   "play_count": "20388",
+   "explicit_content": "0",
+   "list_count": "0",
+   "list_type": "",
+   "list": "",
+   "more_info": {
+    "music": "Jewel Lama",
+    "album_id": "77856368",
+    "album": "Awarapan",
+    "label": "Retro Bombay Records",
+    "label_id": null,
+    "origin": "search",
+    "is_dolby_content": false,
+    "320kbps": "true",
+    "encrypted_media_url": "ID2ieOjCrwfgWvL5sXl4B1ImC5QfbsDyqTKIzzxdxpYYsO/xeq30G10B29uj9F2ULCPQ3FKnur7wKMUE8nH3WBw7tS9a8Gtq",
+    "encrypted_cache_url": "",
+    "encrypted_drm_cache_url": "",
+    "encrypted_drm_media_url": "ID2ieOjCrwdjlkMElYlzWCptgNdUpWD8kpuGNn8oQue19sJ5P2qAsc+3wds8uJGbwLd7MSaRgFMNBnbxP8XHhY92mytrdt3FDnQW0nglPS4=",
+    "album_url": "https://www.jiosaavn.com/album/awarapan/zIQ4hp6r65I_",
+    "duration": "417",
+    "rights": {
+     "code": "0",
+     "cacheable": "true",
+     "delete_cached_object": "false",
+     "reason": ""
+    },
+    "cache_state": "false",
+    "has_lyrics": "false",
+    "lyrics_snippet": "",
+    "has_trivia": "false",
+    "trivia": [],
+    "starred": "false",
+    "copyright_text": "(C) 2026 Retro Bombay Records",
+    "artistMap": {
+     "primary_artists": [
+      {
+       "id": "455127",
+       "name": "Udit Narayan",
+       "role": "primary_artists",
+       "image": "https://c.saavncdn.com/artists/Udit_Narayan_004_20241029065120_150x150.jpg",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/udit-narayan-songs/kLtmb7Vh8Rs_"
+      }
+     ],
+     "featured_artists": [],
+     "artists": [
+      {
+       "id": "26093161",
+       "name": "Jewel Lama",
+       "role": "music",
+       "image": "",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/jewel-lama-songs/r1niU1XQHvU_"
+      },
+      {
+       "id": "11941552",
+       "name": "Rakht Music",
+       "role": "singer",
+       "image": "",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/rakht-music-songs/qJ6f-X7Q5aY_"
+      }
+     ]
+    },
+    "release_date": null,
+    "label_url": "/label/retro-bombay-records-albums/",
+    "triller_available": false,
+    "request_jiotune_flag": false,
+    "webp": "true"
+   },
+   "button_tooltip_info": [],
+   "pro_hva_campaigns": []
+  },
+  {
+   "id": "Y29QlnIt",
+   "title": "Yeh Awarapan",
+   "subtitle": "Amaal Mallik, Arijit Singh, Rashmi-Virag - Awarapan 2",
+   "header_desc": "",
+   "type": "song",
+   "perma_url": "https://www.jiosaavn.com/song/yeh-awarapan/KVpSYBhefkc",
+   "image": "https://c.saavncdn.com/820/Awarapan-2-Hindi-2026-20260811181221-150x150.jpg",
+   "language": "hindi",
+   "year": "2026",
+   "play_count": "1544319",
+   "explicit_content": "0",
+   "list_count": "0",
+   "list_type": "",
+   "list": "",
+   "more_info": {
+    "music": "Amaal Mallik",
+    "album_id": "79121261",
+    "album": "Awarapan 2",
+    "label": "Sony Music Entertainment India Pvt. Ltd.",
+    "label_id": null,
+    "origin": "search",
+    "is_dolby_content": false,
+    "320kbps": "true",
+    "encrypted_media_url": "ID2ieOjCrwfgWvL5sXl4B1ImC5QfbsDyEkE4QXC9N+kW7IdDtyHzFUvUwgLzPqrEx25tNz+OTV8XR1hIGJ434hw7tS9a8Gtq",
+    "encrypted_cache_url": "",
+    "encrypted_drm_cache_url": "",
+    "encrypted_drm_media_url": "ID2ieOjCrwdjlkMElYlzWCptgNdUpWD8zf/N1HeeU9wR78nH+55KEv1VuKGyRK1hEYnAoFXc2ZSYdsh30Fb/dI92mytrdt3FDnQW0nglPS4=",
+    "album_url": "https://www.jiosaavn.com/album/awarapan-2/e9NTAB1tQ9M_",
+    "duration": "298",
+    "rights": {
+     "code": "0",
+     "cacheable": "true",
+     "delete_cached_object": "false",
+     "reason": ""
+    },
+    "cache_state": "false",
+    "has_lyrics": "false",
+    "lyrics_snippet": "",
+    "has_trivia": "false",
+    "trivia": [],
+    "starred": "false",
+    "copyright_text": "(P) 2026 Sony Music Entertainment India Pvt. Ltd.",
+    "artistMap": {
+     "primary_artists": [
+      {
+       "id": "743637",
+       "name": "Amaal Mallik",
+       "role": "primary_artists",
+       "image": "https://c.saavncdn.com/artists/Amaal_Mallik_004_20260224065851_150x150.jpg",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/amaal-mallik-songs/hZrw5p6a5Sk_"
+      },
+      {
+       "id": "459320",
+       "name": "Arijit Singh",
+       "role": "primary_artists",
+       "image": "https://c.saavncdn.com/artists/Arijit_Singh_004_20241118063717_150x150.jpg",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/arijit-singh-songs/LlRWpHzy3Hk_"
+      },
+      {
+       "id": "13934123",
+       "name": "Rashmi-Virag",
+       "role": "primary_artists",
+       "image": "https://c.saavncdn.com/artists/Rashmi_Virag_000_20220920120709_150x150.jpg",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/rashmi-virag-songs/rR69rrf5dlo_"
+      }
+     ],
+     "featured_artists": [],
+     "artists": [
+      {
+       "id": "743637",
+       "name": "Amaal Mallik",
+       "role": "music",
+       "image": "https://c.saavncdn.com/artists/Amaal_Mallik_004_20260224065851_150x150.jpg",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/amaal-mallik-songs/hZrw5p6a5Sk_"
+      },
+      {
+       "id": "13934123",
+       "name": "Rashmi-Virag",
+       "role": "lyricist",
+       "image": "https://c.saavncdn.com/artists/Rashmi_Virag_000_20220920120709_150x150.jpg",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/rashmi-virag-songs/rR69rrf5dlo_"
+      },
+      {
+       "id": "458251",
+       "name": "Emraan Hashmi",
+       "role": "starring",
+       "image": "https://c.saavncdn.com/artists/Emraan_Hashmi_002_20230228120108_150x150.jpg",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/emraan-hashmi-songs/M4ByRDEAbdI_"
+      },
+      {
+       "id": "1413118",
+       "name": "Disha Patani",
+       "role": "starring",
+       "image": "https://c.saavncdn.com/artists/Disha_Patani_150x150.jpg",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/disha-patani-songs/T7YfKU-oM7c_"
+      },
+      {
+       "id": "459009",
+       "name": "Shabana Azmi",
+       "role": "starring",
+       "image": "https://c.saavncdn.com/artists/Shabana_Azmi_20190904072221_150x150.jpg",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/shabana-azmi-songs/w8MFLeuzjzM_"
+      }
+     ]
+    },
+    "release_date": null,
+    "label_url": "/label/sony-music-entertainment-india-pvt.-ltd.-albums/",
+    "vcode": "010910143785442",
+    "vlink": "https://jiotunepreview.jio.com/content/Converted/010910143741305.mp3",
+    "triller_available": false,
+    "request_jiotune_flag": false,
+    "webp": "true"
+   },
+   "button_tooltip_info": [],
+   "pro_hva_campaigns": []
+  },
+  {
+   "id": "2uasUClO",
+   "title": "Yeh Awarapan (From &quot;Awarapan 2&quot;)",
+   "subtitle": "Amaal Mallik, Arijit Singh, Rashmi-Virag - Yeh Awarapan (From &quot;Awarapan 2&quot;)",
+   "header_desc": "",
+   "type": "song",
+   "perma_url": "https://www.jiosaavn.com/song/yeh-awarapan-from-awarapan-2/Qh0KQiFzW3w",
+   "image": "https://c.saavncdn.com/936/Yeh-Awarapan-From-Awarapan-2-Hindi-2026-20260721110124-150x150.jpg",
+   "language": "hindi",
+   "year": "2026",
+   "play_count": "1544319",
+   "explicit_content": "0",
+   "list_count": "0",
+   "list_type": "",
+   "list": "",
+   "more_info": {
+    "music": "Amaal Mallik",
+    "album_id": "78274310",
+    "album": "Yeh Awarapan (From &quot;Awarapan 2&quot;)",
+    "label": "Sony Music Entertainment India Pvt. Ltd.",
+    "label_id": null,
+    "origin": "search",
+    "is_dolby_content": false,
+    "320kbps": "true",
+    "encrypted_media_url": "ID2ieOjCrwfgWvL5sXl4B1ImC5QfbsDyOXgkPd0IF22qc0hsLdKl/QvCjhbs484L8FYuki+W/m5Nh+69rL/ODhw7tS9a8Gtq",
+    "encrypted_cache_url": "",
+    "encrypted_drm_cache_url": "",
+    "encrypted_drm_media_url": "ID2ieOjCrwdjlkMElYlzWCptgNdUpWD8u0GH3mFq0J8P3s9AtlivE1/YFS4/sMDEd+FhnurTHh8sAsqPCOwmL492mytrdt3FDnQW0nglPS4=",
+    "album_url": "https://www.jiosaavn.com/album/yeh-awarapan-from-awarapan-2/ZSyKa7oyQbE_",
+    "duration": "298",
+    "rights": {
+     "code": "0",
+     "cacheable": "true",
+     "delete_cached_object": "false",
+     "reason": ""
+    },
+    "cache_state": "false",
+    "has_lyrics": "false",
+    "lyrics_snippet": "",
+    "has_trivia": "false",
+    "trivia": [],
+    "starred": "false",
+    "copyright_text": "(P) 2026 Sony Music Entertainment India Pvt. Ltd.",
+    "artistMap": {
+     "primary_artists": [
+      {
+       "id": "743637",
+       "name": "Amaal Mallik",
+       "role": "primary_artists",
+       "image": "https://c.saavncdn.com/artists/Amaal_Mallik_004_20260224065851_150x150.jpg",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/amaal-mallik-songs/hZrw5p6a5Sk_"
+      },
+      {
+       "id": "459320",
+       "name": "Arijit Singh",
+       "role": "primary_artists",
+       "image": "https://c.saavncdn.com/artists/Arijit_Singh_004_20241118063717_150x150.jpg",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/arijit-singh-songs/LlRWpHzy3Hk_"
+      },
+      {
+       "id": "13934123",
+       "name": "Rashmi-Virag",
+       "role": "primary_artists",
+       "image": "https://c.saavncdn.com/artists/Rashmi_Virag_000_20220920120709_150x150.jpg",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/rashmi-virag-songs/rR69rrf5dlo_"
+      }
+     ],
+     "featured_artists": [],
+     "artists": [
+      {
+       "id": "743637",
+       "name": "Amaal Mallik",
+       "role": "music",
+       "image": "https://c.saavncdn.com/artists/Amaal_Mallik_004_20260224065851_150x150.jpg",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/amaal-mallik-songs/hZrw5p6a5Sk_"
+      },
+      {
+       "id": "13934123",
+       "name": "Rashmi-Virag",
+       "role": "lyricist",
+       "image": "https://c.saavncdn.com/artists/Rashmi_Virag_000_20220920120709_150x150.jpg",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/rashmi-virag-songs/rR69rrf5dlo_"
+      },
+      {
+       "id": "458251",
+       "name": "Emraan Hashmi",
+       "role": "starring",
+       "image": "https://c.saavncdn.com/artists/Emraan_Hashmi_002_20230228120108_150x150.jpg",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/emraan-hashmi-songs/M4ByRDEAbdI_"
+      },
+      {
+       "id": "1413118",
+       "name": "Disha Patani",
+       "role": "starring",
+       "image": "https://c.saavncdn.com/artists/Disha_Patani_150x150.jpg",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/disha-patani-songs/T7YfKU-oM7c_"
+      },
+      {
+       "id": "459009",
+       "name": "Shabana Azmi",
+       "role": "starring",
+       "image": "https://c.saavncdn.com/artists/Shabana_Azmi_20190904072221_150x150.jpg",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/shabana-azmi-songs/w8MFLeuzjzM_"
+      }
+     ]
+    },
+    "release_date": null,
+    "label_url": "/label/sony-music-entertainment-india-pvt.-ltd.-albums/",
+    "vcode": "010910143785442",
+    "vlink": "https://jiotunepreview.jio.com/content/Converted/010910143741305.mp3",
+    "triller_available": false,
+    "request_jiotune_flag": false,
+    "webp": "true"
+   },
+   "button_tooltip_info": [],
+   "pro_hva_campaigns": []
+  },
+  {
+   "id": "LYBC0vEH",
+   "title": "Tera Mera Rishta -  New Version (From &quot;Awarapan 2&quot;)",
+   "subtitle": "Mithoon, Pritam, Sayeed Quadri, Saaj Bhatt, Subodhh Sharma - Tera Mera Rishta - New Version (From &quot;Awarapan 2&quot;)",
+   "header_desc": "",
+   "type": "song",
+   "perma_url": "https://www.jiosaavn.com/song/tera-mera-rishta-new-version-from-awarapan-2/PDEpckRGcns",
+   "image": "https://c.saavncdn.com/114/Tera-Mera-Rishta-New-Version-From-Awarapan-2-Hindi-2026-20260812173715-150x150.jpg",
+   "language": "hindi",
+   "year": "2026",
+   "play_count": "1877616",
+   "explicit_content": "0",
+   "list_count": "0",
+   "list_type": "",
+   "list": "",
+   "more_info": {
+    "music": "Mithoon, Pritam",
+    "album_id": "78931262",
+    "album": "Tera Mera Rishta - New Version (From &quot;Awarapan 2&quot;)",
+    "label": "Sony Music Entertainment India Pvt. Ltd.",
+    "label_id": null,
+    "origin": "search",
+    "is_dolby_content": false,
+    "320kbps": "true",
+    "encrypted_media_url": "ID2ieOjCrwfgWvL5sXl4B1ImC5QfbsDyFGH4nXzm+ghrjgQxmwzq8hI/rOw9f58wbgMvNubT5aGMjqwsjb8cThw7tS9a8Gtq",
+    "encrypted_cache_url": "",
+    "encrypted_drm_cache_url": "",
+    "encrypted_drm_media_url": "ID2ieOjCrwdjlkMElYlzWCptgNdUpWD8rHTKNVcCxV6JD+5VxGuUlNrXplzJ4rv/UfzEOD+FmDjI80sqO9uJ9Y92mytrdt3FDnQW0nglPS4=",
+    "album_url": "https://www.jiosaavn.com/album/tera-mera-rishta-new-version-from-awarapan-2/tDfih5tw9Ew_",
+    "duration": "365",
+    "rights": {
+     "code": "0",
+     "cacheable": "true",
+     "delete_cached_object": "false",
+     "reason": ""
+    },
+    "cache_state": "false",
+    "has_lyrics": "false",
+    "lyrics_snippet": "",
+    "has_trivia": "false",
+    "trivia": [],
+    "starred": "false",
+    "copyright_text": "(P) 2026 Sony Music Entertainment India Pvt. Ltd.",
+    "artistMap": {
+     "primary_artists": [
+      {
+       "id": "702592",
+       "name": "Mithoon",
+       "role": "primary_artists",
+       "image": "https://c.saavncdn.com/artists/Mithoon_002_20200908073735_150x150.jpg",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/mithoon-songs/nQKQiNRsTKs_"
+      },
+      {
+       "id": "456323",
+       "name": "Pritam",
+       "role": "primary_artists",
+       "image": "https://c.saavncdn.com/artists/Pritam_Chakraborty-20170711073326_150x150.jpg",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/pritam-songs/OaFg9HPZgq8_"
+      },
+      {
+       "id": "669007",
+       "name": "Sayeed Quadri",
+       "role": "primary_artists",
+       "image": "https://c.saavncdn.com/artists/Sayeed_Quadri_001_20210616180918_150x150.jpg",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/sayeed-quadri-songs/CkMFUTAeb,c_"
+      },
+      {
+       "id": "11230967",
+       "name": "Saaj Bhatt",
+       "role": "primary_artists",
+       "image": "https://c.saavncdn.com/artists/Saaj_Bhatt_002_20240227102346_150x150.jpg",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/saaj-bhatt-songs/PK,2w3SGLm4_"
+      },
+      {
+       "id": "7862370",
+       "name": "Subodhh Sharma",
+       "role": "primary_artists",
+       "image": "",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/subodhh-sharma-songs/wTz,Wi8,-4I_"
+      }
+     ],
+     "featured_artists": [],
+     "artists": [
+      {
+       "id": "702592",
+       "name": "Mithoon",
+       "role": "music",
+       "image": "https://c.saavncdn.com/artists/Mithoon_002_20200908073735_150x150.jpg",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/mithoon-songs/nQKQiNRsTKs_"
+      },
+      {
+       "id": "456323",
+       "name": "Pritam",
+       "role": "music",
+       "image": "https://c.saavncdn.com/artists/Pritam_Chakraborty-20170711073326_150x150.jpg",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/pritam-songs/OaFg9HPZgq8_"
+      },
+      {
+       "id": "669007",
+       "name": "Sayeed Quadri",
+       "role": "lyricist",
+       "image": "https://c.saavncdn.com/artists/Sayeed_Quadri_001_20210616180918_150x150.jpg",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/sayeed-quadri-songs/CkMFUTAeb,c_"
+      },
+      {
+       "id": "458251",
+       "name": "Emraan Hashmi",
+       "role": "starring",
+       "image": "https://c.saavncdn.com/artists/Emraan_Hashmi_002_20230228120108_150x150.jpg",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/emraan-hashmi-songs/M4ByRDEAbdI_"
+      },
+      {
+       "id": "1413118",
+       "name": "Disha Patani",
+       "role": "starring",
+       "image": "https://c.saavncdn.com/artists/Disha_Patani_150x150.jpg",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/disha-patani-songs/T7YfKU-oM7c_"
+      },
+      {
+       "id": "459009",
+       "name": "Shabana Azmi",
+       "role": "starring",
+       "image": "https://c.saavncdn.com/artists/Shabana_Azmi_20190904072221_150x150.jpg",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/shabana-azmi-songs/w8MFLeuzjzM_"
+      }
+     ]
+    },
+    "release_date": null,
+    "label_url": "/label/sony-music-entertainment-india-pvt.-ltd.-albums/",
+    "vcode": "010910143798954",
+    "vlink": "https://jiotunepreview.jio.com/content/Converted/010910143754812.mp3",
+    "triller_available": false,
+    "request_jiotune_flag": false,
+    "webp": "true"
+   },
+   "button_tooltip_info": [],
+   "pro_hva_campaigns": []
+  }
+ ]
+}

@@ -1,0 +1,682 @@
+{
+ "id": "79121261",
+ "title": "Awarapan 2",
+ "subtitle": "Various Artists,  Mithoon,  Amaal Mallik,  Pritam,  Wasif Ahmad,  Akhil Sachdeva,  Jeet Gannguli,  Sayeed Quadri,  Rashmi-Virag,  Sachin Urmtosh",
+ "header_desc": "2026 · Hindi Album · Various Artists, Mithoon, and Amaal Mallik",
+ "type": "album",
+ "perma_url": "https://www.jiosaavn.com/album/awarapan-2/e9NTAB1tQ9M_",
+ "image": "https://c.saavncdn.com/820/Awarapan-2-Hindi-2026-20260811181221-150x150.jpg",
+ "language": "hindi",
+ "year": "2026",
+ "play_count": "",
+ "explicit_content": "0",
+ "list_count": "8",
+ "list_type": "song",
+ "list": [
+  {
+   "id": "2pxZEGuS",
+   "title": "Ve Junoon",
+   "subtitle": "Mithoon, Sayeed Quadri, Subodhh Sharma - Awarapan 2",
+   "header_desc": "",
+   "type": "song",
+   "perma_url": "https://www.jiosaavn.com/song/ve-junoon/QhgTazF3QmA",
+   "image": "https://c.saavncdn.com/820/Awarapan-2-Hindi-2026-20260811181221-150x150.jpg",
+   "language": "hindi",
+   "year": "2026",
+   "play_count": "1678935",
+   "explicit_content": "0",
+   "list_count": "0",
+   "list_type": "",
+   "list": "",
+   "more_info": {
+    "music": "Mithoon",
+    "album_id": "79121261",
+    "album": "Awarapan 2",
+    "label": "Sony Music Entertainment India Pvt. Ltd.",
+    "label_id": "1070109",
+    "origin": "album",
+    "is_dolby_content": false,
+    "320kbps": "true",
+    "encrypted_media_url": "ID2ieOjCrwfgWvL5sXl4B1ImC5QfbsDyhdCC7CA/LS2fy3pvEpy94VlF9bPHRyUy9b8mfhRfZHqZhkvuSI7ItRw7tS9a8Gtq",
+    "encrypted_cache_url": "",
+    "encrypted_drm_cache_url": "",
+    "encrypted_drm_media_url": "ID2ieOjCrwdjlkMElYlzWCptgNdUpWD8zf/N1HeeU9z1tVi9NnGK3HFT7O0MEt0RFnSw6XbB1wVF+0SIiEXj1I92mytrdt3FDnQW0nglPS4=",
+    "album_url": "https://www.jiosaavn.com/album/awarapan-2/e9NTAB1tQ9M_",
+    "duration": "402",
+    "rights": {
+     "code": "0",
+     "cacheable": "true",
+     "delete_cached_object": "false",
+     "reason": ""
+    },
+    "cache_state": "",
+    "has_lyrics": "false",
+    "lyrics_snippet": "",
+    "has_trivia": "false",
+    "trivia": [],
+    "starred": "false",
+    "copyright_text": "(P) 2026 Sony Music Entertainment India Pvt. Ltd.",
+    "artistMap": {
+     "primary_artists": [
+      {
+       "id": "702592",
+       "name": "Mithoon",
+       "role": "primary_artists",
+       "image": "https://c.saavncdn.com/artists/Mithoon_002_20200908073735_150x150.jpg",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/mithoon-songs/nQKQiNRsTKs_"
+      },
+      {
+       "id": "669007",
+       "name": "Sayeed Quadri",
+       "role": "primary_artists",
+       "image": "https://c.saavncdn.com/artists/Sayeed_Quadri_001_20210616180918_150x150.jpg",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/sayeed-quadri-songs/CkMFUTAeb,c_"
+      },
+      {
+       "id": "7862370",
+       "name": "Subodhh Sharma",
+       "role": "primary_artists",
+       "image": "",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/subodhh-sharma-songs/wTz,Wi8,-4I_"
+      }
+     ],
+     "featured_artists": [],
+     "artists": [
+      {
+       "id": "702592",
+       "name": "Mithoon",
+       "role": "music",
+       "image": "https://c.saavncdn.com/artists/Mithoon_002_20200908073735_150x150.jpg",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/mithoon-songs/nQKQiNRsTKs_"
+      },
+      {
+       "id": "669007",
+       "name": "Sayeed Quadri",
+       "role": "lyricist",
+       "image": "https://c.saavncdn.com/artists/Sayeed_Quadri_001_20210616180918_150x150.jpg",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/sayeed-quadri-songs/CkMFUTAeb,c_"
+      },
+      {
+       "id": "458251",
+       "name": "Emraan Hashmi",
+       "role": "starring",
+       "image": "https://c.saavncdn.com/artists/Emraan_Hashmi_002_20230228120108_150x150.jpg",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/emraan-hashmi-songs/M4ByRDEAbdI_"
+      },
+      {
+       "id": "1413118",
+       "name": "Disha Patani",
+       "role": "starring",
+       "image": "https://c.saavncdn.com/artists/Disha_Patani_150x150.jpg",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/disha-patani-songs/T7YfKU-oM7c_"
+      },
+      {
+       "id": "459009",
+       "name": "Shabana Azmi",
+       "role": "starring",
+       "image": "https://c.saavncdn.com/artists/Shabana_Azmi_20190904072221_150x150.jpg",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/shabana-azmi-songs/w8MFLeuzjzM_"
+      }
+     ]
+    },
+    "release_date": "2026-08-11",
+    "label_url": "/label/sony-music-entertainment-india-pvt.-ltd.-albums/LaFAA6h1q2U_",
+    "vcode": "010910143769885",
+    "vlink": "https://jiotunepreview.jio.com/content/Converted/010910143725754.mp3",
+    "triller_available": false,
+    "request_jiotune_flag": false,
+    "webp": "true"
+   },
+   "button_tooltip_info": [],
+   "pro_hva_campaigns": []
+  },
+  {
+   "id": "Y29QlnIt",
+   "title": "Yeh Awarapan",
+   "subtitle": "Amaal Mallik, Arijit Singh, Rashmi-Virag - Awarapan 2",
+   "header_desc": "",
+   "type": "song",
+   "perma_url": "https://www.jiosaavn.com/song/yeh-awarapan/KVpSYBhefkc",
+   "image": "https://c.saavncdn.com/820/Awarapan-2-Hindi-2026-20260811181221-150x150.jpg",
+   "language": "hindi",
+   "year": "2026",
+   "play_count": "1542125",
+   "explicit_content": "0",
+   "list_count": "0",
+   "list_type": "",
+   "list": "",
+   "more_info": {
+    "music": "Amaal Mallik",
+    "album_id": "79121261",
+    "album": "Awarapan 2",
+    "label": "Sony Music Entertainment India Pvt. Ltd.",
+    "label_id": "1070109",
+    "origin": "album",
+    "is_dolby_content": false,
+    "320kbps": "true",
+    "encrypted_media_url": "ID2ieOjCrwfgWvL5sXl4B1ImC5QfbsDyEkE4QXC9N+kW7IdDtyHzFUvUwgLzPqrEx25tNz+OTV8XR1hIGJ434hw7tS9a8Gtq",
+    "encrypted_cache_url": "",
+    "encrypted_drm_cache_url": "",
+    "encrypted_drm_media_url": "ID2ieOjCrwdjlkMElYlzWCptgNdUpWD8zf/N1HeeU9wR78nH+55KEv1VuKGyRK1hEYnAoFXc2ZSYdsh30Fb/dI92mytrdt3FDnQW0nglPS4=",
+    "album_url": "https://www.jiosaavn.com/album/awarapan-2/e9NTAB1tQ9M_",
+    "duration": "298",
+    "rights": {
+     "code": "0",
+     "cacheable": "true",
+     "delete_cached_object": "false",
+     "reason": ""
+    },
+    "cache_state": "",
+    "has_lyrics": "false",
+    "lyrics_snippet": "",
+    "has_trivia": "false",
+    "trivia": [],
+    "starred": "false",
+    "copyright_text": "(P) 2026 Sony Music Entertainment India Pvt. Ltd.",
+    "artistMap": {
+     "primary_artists": [
+      {
+       "id": "743637",
+       "name": "Amaal Mallik",
+       "role": "primary_artists",
+       "image": "https://c.saavncdn.com/artists/Amaal_Mallik_004_20260224065851_150x150.jpg",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/amaal-mallik-songs/hZrw5p6a5Sk_"
+      },
+      {
+       "id": "459320",
+       "name": "Arijit Singh",
+       "role": "primary_artists",
+       "image": "https://c.saavncdn.com/artists/Arijit_Singh_004_20241118063717_150x150.jpg",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/arijit-singh-songs/LlRWpHzy3Hk_"
+      },
+      {
+       "id": "13934123",
+       "name": "Rashmi-Virag",
+       "role": "primary_artists",
+       "image": "https://c.saavncdn.com/artists/Rashmi_Virag_000_20220920120709_150x150.jpg",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/rashmi-virag-songs/rR69rrf5dlo_"
+      }
+     ],
+     "featured_artists": [],
+     "artists": [
+      {
+       "id": "743637",
+       "name": "Amaal Mallik",
+       "role": "music",
+       "image": "https://c.saavncdn.com/artists/Amaal_Mallik_004_20260224065851_150x150.jpg",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/amaal-mallik-songs/hZrw5p6a5Sk_"
+      },
+      {
+       "id": "13934123",
+       "name": "Rashmi-Virag",
+       "role": "lyricist",
+       "image": "https://c.saavncdn.com/artists/Rashmi_Virag_000_20220920120709_150x150.jpg",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/rashmi-virag-songs/rR69rrf5dlo_"
+      },
+      {
+       "id": "458251",
+       "name": "Emraan Hashmi",
+       "role": "starring",
+       "image": "https://c.saavncdn.com/artists/Emraan_Hashmi_002_20230228120108_150x150.jpg",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/emraan-hashmi-songs/M4ByRDEAbdI_"
+      },
+      {
+       "id": "1413118",
+       "name": "Disha Patani",
+       "role": "starring",
+       "image": "https://c.saavncdn.com/artists/Disha_Patani_150x150.jpg",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/disha-patani-songs/T7YfKU-oM7c_"
+      },
+      {
+       "id": "459009",
+       "name": "Shabana Azmi",
+       "role": "starring",
+       "image": "https://c.saavncdn.com/artists/Shabana_Azmi_20190904072221_150x150.jpg",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/shabana-azmi-songs/w8MFLeuzjzM_"
+      }
+     ]
+    },
+    "release_date": "2026-08-11",
+    "label_url": "/label/sony-music-entertainment-india-pvt.-ltd.-albums/LaFAA6h1q2U_",
+    "vcode": "010910143785442",
+    "vlink": "https://jiotunepreview.jio.com/content/Converted/010910143741305.mp3",
+    "triller_available": false,
+    "request_jiotune_flag": false,
+    "webp": "true"
+   },
+   "button_tooltip_info": [],
+   "pro_hva_campaigns": []
+  },
+  {
+   "id": "wfTj8NYC",
+   "title": "Tera Mera Rishta - New Version",
+   "subtitle": "Mithoon, Pritam, Sayeed Quadri, Saaj Bhatt, Subodhh Sharma - Awarapan 2",
+   "header_desc": "",
+   "type": "song",
+   "perma_url": "https://www.jiosaavn.com/song/tera-mera-rishta-new-version/Bw4-W0x,bnA",
+   "image": "https://c.saavncdn.com/820/Awarapan-2-Hindi-2026-20260811181221-150x150.jpg",
+   "language": "hindi",
+   "year": "2026",
+   "play_count": "1870572",
+   "explicit_content": "0",
+   "list_count": "0",
+   "list_type": "",
+   "list": "",
+   "more_info": {
+    "music": "Mithoon, Pritam",
+    "album_id": "79121261",
+    "album": "Awarapan 2",
+    "label": "Sony Music Entertainment India Pvt. Ltd.",
+    "label_id": "1070109",
+    "origin": "album",
+    "is_dolby_content": false,
+    "320kbps": "true",
+    "encrypted_media_url": "ID2ieOjCrwfgWvL5sXl4B1ImC5QfbsDy8zzxccrChjJYq4KpBqVfmVkEroWCf6oKzaT2DQpKfWPpuFPKGLmO3hw7tS9a8Gtq",
+    "encrypted_cache_url": "",
+    "encrypted_drm_cache_url": "",
+    "encrypted_drm_media_url": "ID2ieOjCrwdjlkMElYlzWCptgNdUpWD8zf/N1HeeU9wo27tQOz/PQC3LaLj1zC6PKyaIXAxvMvHQveL3DGYP8o92mytrdt3FDnQW0nglPS4=",
+    "album_url": "https://www.jiosaavn.com/album/awarapan-2/e9NTAB1tQ9M_",
+    "duration": "365",
+    "rights": {
+     "code": "0",
+     "cacheable": "true",
+     "delete_cached_object": "false",
+     "reason": ""
+    },
+    "cache_state": "",
+    "has_lyrics": "false",
+    "lyrics_snippet": "",
+    "has_trivia": "false",
+    "trivia": [],
+    "starred": "false",
+    "copyright_text": "(P) 2026 Sony Music Entertainment India Pvt. Ltd.",
+    "artistMap": {
+     "primary_artists": [
+      {
+       "id": "702592",
+       "name": "Mithoon",
+       "role": "primary_artists",
+       "image": "https://c.saavncdn.com/artists/Mithoon_002_20200908073735_150x150.jpg",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/mithoon-songs/nQKQiNRsTKs_"
+      },
+      {
+       "id": "456323",
+       "name": "Pritam",
+       "role": "primary_artists",
+       "image": "https://c.saavncdn.com/artists/Pritam_Chakraborty-20170711073326_150x150.jpg",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/pritam-songs/OaFg9HPZgq8_"
+      },
+      {
+       "id": "669007",
+       "name": "Sayeed Quadri",
+       "role": "primary_artists",
+       "image": "https://c.saavncdn.com/artists/Sayeed_Quadri_001_20210616180918_150x150.jpg",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/sayeed-quadri-songs/CkMFUTAeb,c_"
+      },
+      {
+       "id": "11230967",
+       "name": "Saaj Bhatt",
+       "role": "primary_artists",
+       "image": "https://c.saavncdn.com/artists/Saaj_Bhatt_002_20240227102346_150x150.jpg",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/saaj-bhatt-songs/PK,2w3SGLm4_"
+      },
+      {
+       "id": "7862370",
+       "name": "Subodhh Sharma",
+       "role": "primary_artists",
+       "image": "",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/subodhh-sharma-songs/wTz,Wi8,-4I_"
+      }
+     ],
+     "featured_artists": [],
+     "artists": [
+      {
+       "id": "702592",
+       "name": "Mithoon",
+       "role": "music",
+       "image": "https://c.saavncdn.com/artists/Mithoon_002_20200908073735_150x150.jpg",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/mithoon-songs/nQKQiNRsTKs_"
+      },
+      {
+       "id": "456323",
+       "name": "Pritam",
+       "role": "music",
+       "image": "https://c.saavncdn.com/artists/Pritam_Chakraborty-20170711073326_150x150.jpg",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/pritam-songs/OaFg9HPZgq8_"
+      },
+      {
+       "id": "669007",
+       "name": "Sayeed Quadri",
+       "role": "lyricist",
+       "image": "https://c.saavncdn.com/artists/Sayeed_Quadri_001_20210616180918_150x150.jpg",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/sayeed-quadri-songs/CkMFUTAeb,c_"
+      },
+      {
+       "id": "458251",
+       "name": "Emraan Hashmi",
+       "role": "starring",
+       "image": "https://c.saavncdn.com/artists/Emraan_Hashmi_002_20230228120108_150x150.jpg",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/emraan-hashmi-songs/M4ByRDEAbdI_"
+      },
+      {
+       "id": "1413118",
+       "name": "Disha Patani",
+       "role": "starring",
+       "image": "https://c.saavncdn.com/artists/Disha_Patani_150x150.jpg",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/disha-patani-songs/T7YfKU-oM7c_"
+      },
+      {
+       "id": "459009",
+       "name": "Shabana Azmi",
+       "role": "starring",
+       "image": "https://c.saavncdn.com/artists/Shabana_Azmi_20190904072221_150x150.jpg",
+       "type": "artist",
+       "perma_url": "https://www.jiosaavn.com/artist/shabana-azmi-songs/w8MFLeuzjzM_"
+      }
+     ]
+    },
+    "release_date": "2026-08-11",
+    "label_url": "/label/sony-music-entertainment-india-pvt.-ltd.-albums/LaFAA6h1q2U_",
+    "vcode": "010910143798954",
+    "vlink": "https://jiotunepreview.jio.com/content/Converted/010910143754812.mp3",
+    "triller_available": false,
+    "request_jiotune_flag": false,
+    "webp": "true"
+   },
+   "button_tooltip_info": [],
+   "pro_hva_campaigns": []
+  }
+ ],
+ "more_info": {
+  "artistMap": {
+   "primary_artists": [
+    {
+     "id": "455494",
+     "name": "Various Artists",
+     "role": "",
+     "image": "",
+     "type": "artist",
+     "perma_url": "https://www.jiosaavn.com/artist/various-artists-songs/ztKx8IUBme8_"
+    },
+    {
+     "id": "702592",
+     "name": " Mithoon",
+     "role": "",
+     "image": "https://c.saavncdn.com/artists/Mithoon_002_20200908073735_150x150.jpg",
+     "type": "artist",
+     "perma_url": "https://www.jiosaavn.com/artist/-mithoon-songs/nQKQiNRsTKs_"
+    },
+    {
+     "id": "743637",
+     "name": " Amaal Mallik",
+     "role": "",
+     "image": "https://c.saavncdn.com/artists/Amaal_Mallik_004_20260224065851_150x150.jpg",
+     "type": "artist",
+     "perma_url": "https://www.jiosaavn.com/artist/-amaal-mallik-songs/hZrw5p6a5Sk_"
+    },
+    {
+     "id": "456323",
+     "name": " Pritam",
+     "role": "",
+     "image": "https://c.saavncdn.com/artists/Pritam_Chakraborty-20170711073326_150x150.jpg",
+     "type": "artist",
+     "perma_url": "https://www.jiosaavn.com/artist/-pritam-songs/OaFg9HPZgq8_"
+    },
+    {
+     "id": "20024886",
+     "name": " Wasif Ahmad",
+     "role": "",
+     "image": "",
+     "type": "artist",
+     "perma_url": "https://www.jiosaavn.com/artist/-wasif-ahmad-songs/t6Alft5G5uQ_"
+    },
+    {
+     "id": "481043",
+     "name": " Akhil Sachdeva",
+     "role": "",
+     "image": "https://c.saavncdn.com/artists/Akhil_Sachdeva_001_20260811094044_150x150.jpg",
+     "type": "artist",
+     "perma_url": "https://www.jiosaavn.com/artist/-akhil-sachdeva-songs/wTX9Hfv1bmM_"
+    },
+    {
+     "id": "464912",
+     "name": " Jeet Gannguli",
+     "role": "",
+     "image": "https://c.saavncdn.com/artists/Jeet_Gannguli_003_20241209065157_150x150.jpg",
+     "type": "artist",
+     "perma_url": "https://www.jiosaavn.com/artist/-jeet-gannguli-songs/37adMqLwAgI_"
+    },
+    {
+     "id": "669007",
+     "name": " Sayeed Quadri",
+     "role": "",
+     "image": "https://c.saavncdn.com/artists/Sayeed_Quadri_001_20210616180918_150x150.jpg",
+     "type": "artist",
+     "perma_url": "https://www.jiosaavn.com/artist/-sayeed-quadri-songs/CkMFUTAeb,c_"
+    },
+    {
+     "id": "13934123",
+     "name": " Rashmi-Virag",
+     "role": "",
+     "image": "https://c.saavncdn.com/artists/Rashmi_Virag_000_20220920120709_150x150.jpg",
+     "type": "artist",
+     "perma_url": "https://www.jiosaavn.com/artist/-rashmi-virag-songs/rR69rrf5dlo_"
+    },
+    {
+     "id": "8551274",
+     "name": " Sachin Urmtosh",
+     "role": "",
+     "image": "",
+     "type": "artist",
+     "perma_url": "https://www.jiosaavn.com/artist/-sachin-urmtosh-songs/XGcMOg9p3jE_"
+    }
+   ],
+   "featured_artists": [],
+   "artists": [
+    {
+     "id": "455494",
+     "name": "Various Artists",
+     "role": "",
+     "image": "",
+     "type": "artist",
+     "perma_url": "https://www.jiosaavn.com/artist/various-artists-songs/ztKx8IUBme8_"
+    },
+    {
+     "id": "702592",
+     "name": " Mithoon",
+     "role": "",
+     "image": "https://c.saavncdn.com/artists/Mithoon_002_20200908073735_150x150.jpg",
+     "type": "artist",
+     "perma_url": "https://www.jiosaavn.com/artist/-mithoon-songs/nQKQiNRsTKs_"
+    },
+    {
+     "id": "743637",
+     "name": " Amaal Mallik",
+     "role": "",
+     "image": "https://c.saavncdn.com/artists/Amaal_Mallik_004_20260224065851_150x150.jpg",
+     "type": "artist",
+     "perma_url": "https://www.jiosaavn.com/artist/-amaal-mallik-songs/hZrw5p6a5Sk_"
+    },
+    {
+     "id": "456323",
+     "name": " Pritam",
+     "role": "",
+     "image": "https://c.saavncdn.com/artists/Pritam_Chakraborty-20170711073326_150x150.jpg",
+     "type": "artist",
+     "perma_url": "https://www.jiosaavn.com/artist/-pritam-songs/OaFg9HPZgq8_"
+    },
+    {
+     "id": "20024886",
+     "name": " Wasif Ahmad",
+     "role": "",
+     "image": "",
+     "type": "artist",
+     "perma_url": "https://www.jiosaavn.com/artist/-wasif-ahmad-songs/t6Alft5G5uQ_"
+    },
+    {
+     "id": "481043",
+     "name": " Akhil Sachdeva",
+     "role": "",
+     "image": "https://c.saavncdn.com/artists/Akhil_Sachdeva_001_20260811094044_150x150.jpg",
+     "type": "artist",
+     "perma_url": "https://www.jiosaavn.com/artist/-akhil-sachdeva-songs/wTX9Hfv1bmM_"
+    },
+    {
+     "id": "464912",
+     "name": " Jeet Gannguli",
+     "role": "",
+     "image": "https://c.saavncdn.com/artists/Jeet_Gannguli_003_20241209065157_150x150.jpg",
+     "type": "artist",
+     "perma_url": "https://www.jiosaavn.com/artist/-jeet-gannguli-songs/37adMqLwAgI_"
+    },
+    {
+     "id": "669007",
+     "name": " Sayeed Quadri",
+     "role": "",
+     "image": "https://c.saavncdn.com/artists/Sayeed_Quadri_001_20210616180918_150x150.jpg",
+     "type": "artist",
+     "perma_url": "https://www.jiosaavn.com/artist/-sayeed-quadri-songs/CkMFUTAeb,c_"
+    },
+    {
+     "id": "13934123",
+     "name": " Rashmi-Virag",
+     "role": "",
+     "image": "https://c.saavncdn.com/artists/Rashmi_Virag_000_20220920120709_150x150.jpg",
+     "type": "artist",
+     "perma_url": "https://www.jiosaavn.com/artist/-rashmi-virag-songs/rR69rrf5dlo_"
+    },
+    {
+     "id": "8551274",
+     "name": " Sachin Urmtosh",
+     "role": "",
+     "image": "",
+     "type": "artist",
+     "perma_url": "https://www.jiosaavn.com/artist/-sachin-urmtosh-songs/XGcMOg9p3jE_"
+    }
+   ]
+  },
+  "song_count": "8",
+  "copyright_text": "(P) 2026 Sony Music Entertainment India Pvt. Ltd.",
+  "is_dolby_content": false,
+  "label_url": "/label/sony-music-entertainment-india-pvt.-ltd.-albums/LaFAA6h1q2U_"
+ },
+ "button_tooltip_info": [],
+ "pro_hva_campaigns": [],
+ "modules": {
+  "list": {
+   "source": "list",
+   "position": 1,
+   "score": "",
+   "bucket": "",
+   "scroll_type": "Cells_Standard",
+   "title": "",
+   "subtitle": "",
+   "highlight": "",
+   "simpleHeader": false,
+   "noHeader": true,
+   "view_more": [],
+   "is_JT_module": false,
+   "button_tooltip_info": ""
+  },
+  "reco": {
+   "source": "reco.getAlbumReco",
+   "position": 2,
+   "score": "",
+   "bucket": "",
+   "scroll_type": "SS_Basic",
+   "title": "You Might Like",
+   "subtitle": "",
+   "highlight": "",
+   "simpleHeader": false,
+   "noHeader": false,
+   "source_api": true,
+   "source_params": {
+    "albumid": "79121261"
+   },
+   "view_more": [],
+   "is_JT_module": false,
+   "button_tooltip_info": ""
+  },
+  "currentlyTrending": {
+   "source": "content.getTrending",
+   "position": 3,
+   "score": "",
+   "bucket": "",
+   "scroll_type": "SS_Basic",
+   "title": "Currently Trending Albums",
+   "subtitle": "",
+   "highlight": "",
+   "simpleHeader": false,
+   "noHeader": false,
+   "source_api": true,
+   "source_params": {
+    "entity_type": "album",
+    "entity_language": "hindi"
+   },
+   "view_more": [],
+   "is_JT_module": false,
+   "button_tooltip_info": ""
+  },
+  "topAlbumsFromSameYear": {
+   "source": "search.topAlbumsoftheYear",
+   "position": 4,
+   "score": "",
+   "bucket": "",
+   "scroll_type": "SS_Basic",
+   "title": "Top Albums from Same Year",
+   "subtitle": "",
+   "highlight": "",
+   "simpleHeader": false,
+   "noHeader": false,
+   "source_api": true,
+   "source_params": {
+    "album_year": "2026",
+    "album_lang": "hindi"
+   },
+   "view_more": [],
+   "is_JT_module": false,
+   "button_tooltip_info": ""
+  },
+  "artists": {
+   "source": "artists",
+   "position": 5,
+   "score": "",
+   "bucket": "",
+   "scroll_type": "SS_Basic",
+   "title": "Artists",
+   "subtitle": "",
+   "highlight": "",
+   "simpleHeader": false,
+   "noHeader": false,
+   "view_more": [],
+   "is_JT_module": false,
+   "button_tooltip_info": ""
+  }
+ }
+}
