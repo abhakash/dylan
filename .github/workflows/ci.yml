@@ -183,8 +183,10 @@ jobs:
         run: |
           HDR=$(find shared/build -name "shared.h" | head -n1)
           echo "HDR=$HDR"
-          grep -n -A 30 "SharedTransitionReason" "$HDR" | head -n 50
-          grep -n -A 30 "TransitionReason" "$HDR" | head -n 50
+          echo "--- SharedTransitionReason interface ---"
+          grep -n -A 50 "@interface SharedTransitionReason" "$HDR" | head -n 80
+          echo "--- TransitionReason swift_name ---"
+          grep -n "TransitionReason" "$HDR" | head -n 20
       - name: xcodebuild simulator (CODE_SIGNING_ALLOWED=NO)
         run: |
           set -o pipefail
