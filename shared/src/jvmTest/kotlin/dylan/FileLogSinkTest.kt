@@ -51,11 +51,9 @@ class FileLogSinkTest {
 
     private fun read(name: String): String? =
         (dir.toPath() / name).let {
-            if (fs.exists(it)) {
-                fs.source(it).buffer().use { s -> s.readUtf8() }
-            } else {
-                null
-            }
+            runCatching {
+                if (fs.exists(it)) fs.source(it).buffer().use { s -> s.readUtf8() } else null
+            }.getOrNull()
         }
 
     private fun exists(name: String) = fs.exists(dir.toPath() / name)
