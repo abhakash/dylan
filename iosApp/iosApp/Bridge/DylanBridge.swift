@@ -22,8 +22,8 @@ import shared
 //       spellings (shared.Foo) do NOT exist and will not compile.
 //   A2  Kotlin interface → ObjC @protocol; importer appends "-Protocol" where
 //       a same-named entity exists (applies to every *-Protocol alias below).
-//   A3  Nested classes flatten: Intent.PlayNow → SharedIntentPlayNow;
-//       EngineEvent.Prepared → SharedEngineEventPrepared.
+//   A3  Nested classes flatten: Intent.PlayNow → IntentPlayNow;
+//       EngineEvent.Prepared → EngineEventPrepared.
 //   A4  Kotlin object/data object → class + `.shared` singleton accessor.
 //   A5  Kotlin Int → Int32, Long → Int64, Boolean → Bool; enum entries
 //       lowerCamelCase (SESSION_ACTIVATION → .sessionActivation).
@@ -36,77 +36,77 @@ import shared
 // =============================================================================
 
 // ---- core graph & models ----------------------------------------------------
-//   check: @interface SharedIosGraph (class dylan.di.IosGraph)
-typealias KGraph = SharedIosGraph
-//   check: @interface SharedKotlinSubscription (dylan.bridge.KotlinSubscription);
+//   check: @interface IosGraph (class dylan.di.IosGraph)
+typealias KGraph = IosGraph
+//   check: @interface KotlinSubscription (dylan.bridge.KotlinSubscription);
 //          NOTE: was `shared.KotlinSubscription` — unprefixed spelling is wrong.
-typealias KSubscription = SharedKotlinSubscription
-typealias KSong = SharedSong                    // data class Song
-typealias KSongKey = SharedSongKey              // data class SongKey
-typealias KMiniEntity = SharedMiniEntity        // data class MiniEntity
-typealias KAlbum = SharedAlbum                  // data class Album
-typealias KHomeSection = SharedHomeSection      // data class HomeSection
-typealias KPlayerState = SharedPlayerState      // data class PlayerState
-typealias KDylanFailure = SharedDylanFailure    // data class DylanFailure
-typealias KCachedSongInfo = SharedCachedSongInfo // data class CachedSongInfo (iosMain)
-typealias KCacheStats = SharedCacheStats        // data class CacheStats (iosMain)
+typealias KSubscription = KotlinSubscription
+typealias KSong = Song                    // data class Song
+typealias KSongKey = SongKey              // data class SongKey
+typealias KMiniEntity = MiniEntity        // data class MiniEntity
+typealias KAlbum = Album                  // data class Album
+typealias KHomeSection = HomeSection      // data class HomeSection
+typealias KPlayerState = PlayerState      // data class PlayerState
+typealias KDylanFailure = DylanFailure    // data class DylanFailure
+typealias KCachedSongInfo = CachedSongInfo // data class CachedSongInfo (iosMain)
+typealias KCacheStats = CacheStats        // data class CacheStats (iosMain)
 //   check: generic erasure — Paged<T> exports WITHOUT its type parameter;
 //   `.items` arrives as [Any] (A6), `.total` as Int64 (A5).
-typealias KPaged = SharedPaged                  // data class Paged<T>
-typealias KLocalTrack = SharedLocalTrack        // data class LocalTrack
+typealias KPaged = Paged                  // data class Paged<T>
+typealias KLocalTrack = LocalTrack        // data class LocalTrack
 
 // ---- engine seam -------------------------------------------------------------
-//   check: @protocol SharedNativeAudioOutput ("NativeAudioOutput" + -Protocol, A2)
-typealias KNativeAudioOutput = SharedNativeAudioOutputProtocol
-//   check: @protocol SharedEngineEventSink ("EngineEventSink" + -Protocol, A2)
-typealias KEngineEventSink = SharedEngineEventSinkProtocol
+//   check: @protocol NativeAudioOutput ("NativeAudioOutput" + -Protocol, A2)
+typealias KNativeAudioOutput = NativeAudioOutputProtocol
+//   check: @protocol EngineEventSink ("EngineEventSink" + -Protocol, A2)
+typealias KEngineEventSink = EngineEventSinkProtocol
 
 // ---- intents -------------------------------------------------------------------
-//   check: @protocol SharedIntent ("Intent" sealed interface + -Protocol, A2)
-typealias KIntent = SharedIntentProtocol
+//   check: @protocol Intent ("Intent" sealed interface + -Protocol, A2)
+typealias KIntent = IntentProtocol
 //   check: flattened nested data classes (A3); initializers take
 //   songs:[Any]/startIndex:Int32 and ms:Int64 respectively (A5/A6).
-typealias KIntentPlayNow = SharedIntentPlayNow  // Intent.PlayNow
-typealias KIntentSeek = SharedIntentSeek        // Intent.Seek
+typealias KIntentPlayNow = IntentPlayNow  // Intent.PlayNow
+typealias KIntentSeek = IntentSeek        // Intent.Seek
 
 // ---- events ---------------------------------------------------------------------
 //   check: enum TransitionReason { AUTO, SEEK, EXPLICIT } → .auto/.seek/.explicit
-typealias KTransitionReason = SharedTransitionReason
+typealias KTransitionReason = TransitionReason
 //   check: enum EngineErr { DECODE, SOURCE, SESSION_ACTIVATION } →
 //   .decode/.source/.sessionActivation (lowerCamelCase, A5)
-typealias KEngineErr = SharedEngineErr
-//   check: @protocol SharedEngineEvent ("EngineEvent" sealed interface, A2 rule).
+typealias KEngineErr = EngineErr
+//   check: @protocol EngineEvent ("EngineEvent" sealed interface, A2 rule).
 //   NOTE: was spelled `shared.EngineEvent` — unprefixed spelling is wrong.
-typealias KEngineEvent = SharedEngineEventProtocol
+typealias KEngineEvent = EngineEventProtocol
 
 /// Engine event constructors (flattened classes per A3; singletons per A4).
 enum Events {
-    static func prepared(_ itemId: String) -> SharedEngineEventPrepared {
-        SharedEngineEventPrepared(itemId: itemId)
+    static func prepared(_ itemId: String) -> EngineEventPrepared {
+        EngineEventPrepared(itemId: itemId)
     }
 
-    static func trackChanged(_ itemId: String, _ reason: KTransitionReason) -> SharedEngineEventTrackChanged {
-        SharedEngineEventTrackChanged(itemId: itemId, reason: reason)
+    static func trackChanged(_ itemId: String, _ reason: KTransitionReason) -> EngineEventTrackChanged {
+        EngineEventTrackChanged(itemId: itemId, reason: reason)
     }
 
-    static func itemEnded(_ itemId: String) -> SharedEngineEventItemEnded {
-        SharedEngineEventItemEnded(itemId: itemId)
+    static func itemEnded(_ itemId: String) -> EngineEventItemEnded {
+        EngineEventItemEnded(itemId: itemId)
     }
 
-    static func queueExhausted() -> SharedEngineEventQueueExhausted {
-        SharedEngineEventQueueExhausted.shared
+    static func queueExhausted() -> EngineEventQueueExhausted {
+        EngineEventQueueExhausted.shared
     }
 
-    static func error(_ itemId: String?, _ kind: KEngineErr) -> SharedEngineEventError {
-        SharedEngineEventError(itemId: itemId, kind: kind)
+    static func error(_ itemId: String?, _ kind: KEngineErr) -> EngineEventError {
+        EngineEventError(itemId: itemId, kind: kind)
     }
 
-    static func routeLost() -> SharedEngineEventRouteLost {
-        SharedEngineEventRouteLost.shared
+    static func routeLost() -> EngineEventRouteLost {
+        EngineEventRouteLost.shared
     }
 
-    static func interrupted(_ shouldResume: Bool) -> SharedEngineEventInterrupted {
-        SharedEngineEventInterrupted(shouldResume: shouldResume)
+    static func interrupted(_ shouldResume: Bool) -> EngineEventInterrupted {
+        EngineEventInterrupted(shouldResume: shouldResume)
     }
 }
 
@@ -119,18 +119,18 @@ enum Intents {
         KIntentPlayNow(songs: songs, startIndex: Int32(index))
     }
 
-    static var toggle: KIntent { SharedIntentTogglePlayPause.shared }
-    static var next: KIntent { SharedIntentNext.shared }
-    static var previous: KIntent { SharedIntentPrevious.shared }
-    static var toggleShuffle: KIntent { SharedIntentToggleShuffle.shared }
-    static var cycleRepeat: KIntent { SharedIntentCycleRepeat.shared }
-    static var clearUpNext: KIntent { SharedIntentClearUpNext.shared }
+    static var toggle: KIntent { IntentTogglePlayPause.shared }
+    static var next: KIntent { IntentNext.shared }
+    static var previous: KIntent { IntentPrevious.shared }
+    static var toggleShuffle: KIntent { IntentToggleShuffle.shared }
+    static var cycleRepeat: KIntent { IntentCycleRepeat.shared }
+    static var clearUpNext: KIntent { IntentClearUpNext.shared }
 
-    static func playNext(_ song: KSong) -> KIntent { SharedIntentPlayNext(song: song) }
-    static func addLast(_ song: KSong) -> KIntent { SharedIntentAddLast(song: song) }
-    static func remove(at queuePos: Int) -> KIntent { SharedIntentRemoveAt(queuePos: Int32(queuePos)) }
+    static func playNext(_ song: KSong) -> KIntent { IntentPlayNext(song: song) }
+    static func addLast(_ song: KSong) -> KIntent { IntentAddLast(song: song) }
+    static func remove(at queuePos: Int) -> KIntent { IntentRemoveAt(queuePos: Int32(queuePos)) }
     static func move(from: Int, to: Int) -> KIntent {
-        SharedIntentMoveWithinQueue(from: Int32(from), to: Int32(to))
+        IntentMoveWithinQueue(from: Int32(from), to: Int32(to))
     }
 
     static func seek(ms: Int64) -> KIntent { KIntentSeek(ms: ms) }
@@ -140,10 +140,10 @@ enum Intents {
 
 /// Graph bootstrap — keeps the `companion` spelling assumption inside this file.
 enum DylanGraph {
-    /// check: SharedIosGraph.companion.create(baseDir:) — Kotlin companion object
+    /// check: IosGraph.companion.create(baseDir:) — Kotlin companion object
     /// surfaces as a static `.companion` property on the class.
     static func create(baseDir: String) -> KGraph {
-        SharedIosGraph.companion.create(baseDir: baseDir)
+        IosGraph.companion.create(baseDir: baseDir)
     }
 }
 
@@ -170,7 +170,7 @@ extension KGraph {
     /// Full-results with the server total for the "N of M" footer (§11.4).
     func searchSongsPaged(
         q: String,
-        page: Int,
+        page: Int
     ) async -> ([KSong], Int64) {
         do {
             let paged = try await container.provider.search(query: q, page: Int32(page))

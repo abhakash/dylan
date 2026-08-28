@@ -52,7 +52,7 @@ struct NowPlayingSheet: View {
                         if abs(g.translation.width) > 60 {
                             env.graph.submit(g.translation.width < 0 ? Intents.next : Intents.previous)
                         }
-                    },
+                    }
                 )
 
             Text(song.title)
@@ -71,7 +71,7 @@ struct NowPlayingSheet: View {
             Slider(
                 value: Binding(
                     get: { min(max(shown, 0), Double(durMs)) },
-                    set: { dragging = true; dragPos = $0 },
+                    set: { dragging = true; dragPos = $0 }
                 ),
                 in: 0 ... Double(durMs),
                 onEditingChanged: { editing in
@@ -79,7 +79,7 @@ struct NowPlayingSheet: View {
                         env.graph.submit(Intents.seek(ms: Int64(dragPos)))
                         dragging = false
                     }
-                },
+                }
             )
             .tint(DylanTokens.primary)
             .padding(.horizontal, DylanTokens.s24)
@@ -170,7 +170,7 @@ struct NowPlayingSheet: View {
     /// Mirrors the Android status-label arm; Playing/Paused shows the REAL cached bitrate.
     private func statusText(
         for _: KSong,
-        bitsFallback: String,
+        bitsFallback: String
     ) -> String {
         switch env.player.phaseKind {
         case "downloading", "resolving", "error":
@@ -231,7 +231,7 @@ struct QueueSheet: View {
 
     @ViewBuilder private func queueRow(
         _ i: Int,
-        _ song: KSong,
+        _ song: KSong
     ) -> some View {
         let isCurrent = i == Int(env.player.currentIndex)
         HStack(spacing: DylanTokens.s8) {

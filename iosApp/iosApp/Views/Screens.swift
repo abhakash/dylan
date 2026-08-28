@@ -50,7 +50,7 @@ struct HomeScreen: View {
                             song: song,
                             index: nil,
                             isPlaying: env.isPlaying(song),
-                            onTap: { env.play([song], at: 0) },
+                            onTap: { env.play([song], at: 0) }
                         )
                     }
                 }
@@ -117,7 +117,7 @@ struct SearchScreen: View {
         VStack(spacing: 0) {
             TextField("Search songs, albums…", text: Binding(
                 get: { store.query },
-                set: { store.query = $0 },
+                set: { store.query = $0 }
             ))
             .font(.dylBodyLarge)
             .padding(DylanTokens.s12)
@@ -152,7 +152,7 @@ struct SearchScreen: View {
                     onTap: { env.play(store.results, at: idx) },
                     onPlayNext: { env.graph.submit(Intents.playNext(song)) },
                     onAddLast: { env.graph.submit(Intents.addLast(song)) },
-                    onDownload: { Task { await env.downloadNow(song) } },
+                    onDownload: { Task { await env.downloadNow(song) } }
                 )
                 .listRowInsets(EdgeInsets())
                 .listRowSeparator(.hidden)
@@ -205,7 +205,7 @@ struct SearchScreen: View {
 
     private func chipRail(
         _ texts: [String],
-        onTap: @escaping (String) -> Void,
+        onTap: @escaping (String) -> Void
     ) -> some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: DylanTokens.s8) {
@@ -263,7 +263,7 @@ struct LibraryScreen: View {
                                 let songs = env.library.downloads.map(\.song)
                                 let idx = max(0, env.library.downloads.firstIndex { $0.song.key.token == info.song.key.token } ?? 0)
                                 env.play(songs, at: idx)
-                            },
+                            }
                         )
                         .listRowInsets(EdgeInsets())
                         .listRowSeparator(.hidden)
@@ -306,7 +306,7 @@ struct LibraryScreen: View {
                             onTap: { env.play(env.library.favorites, at: idx) },
                             onPlayNext: { env.graph.submit(Intents.playNext(song)) },
                             onAddLast: { env.graph.submit(Intents.addLast(song)) },
-                            onFavorite: { Task { await env.toggleFavorite(song) } },
+                            onFavorite: { Task { await env.toggleFavorite(song) } }
                         )
                         .listRowInsets(EdgeInsets())
                         .listRowSeparator(.hidden)
@@ -341,7 +341,7 @@ struct AlbumScreen: View {
                     LinearGradient(
                         colors: [.clear, DylanTokens.background],
                         startPoint: .center,
-                        endPoint: .bottom,
+                        endPoint: .bottom
                     )
                     VStack(alignment: .leading, spacing: DylanTokens.s8) {
                         Text(album?.title ?? "")
@@ -398,7 +398,7 @@ struct AlbumScreen: View {
                         enabled: song.cacheable,
                         onTap: { env.play(songs, at: i) },
                         onPlayNext: { env.graph.submit(Intents.playNext(song)) },
-                        onAddLast: { env.graph.submit(Intents.addLast(song)) },
+                        onAddLast: { env.graph.submit(Intents.addLast(song)) }
                     )
                 }
 
@@ -584,7 +584,7 @@ struct SettingsPanel: View {
         label: String,
         sub: String,
         selected: Bool,
-        onSelect: @escaping () -> Void,
+        onSelect: @escaping () -> Void
     ) -> some View {
         Button(action: onSelect) {
             HStack(spacing: DylanTokens.s6) {

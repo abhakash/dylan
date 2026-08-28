@@ -57,7 +57,7 @@ final class Thumbnailer {
     /// 150 MB artwork disk budget; decode happens at request time via ImageIO.
     private static func fetchAndDownsample(
         _ urlString: String,
-        maxPixel: CGFloat,
+        maxPixel: CGFloat
     ) async -> UIImage? {
         guard let url = URL(string: urlString) else { return nil }
         do {

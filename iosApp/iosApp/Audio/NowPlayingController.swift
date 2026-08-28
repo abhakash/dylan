@@ -24,7 +24,7 @@ final class NowPlayingController {
     init(
         graph: KGraph,
         store: PlayerStore,
-        thumbs: Thumbnailer,
+        thumbs: Thumbnailer
     ) {
         self.graph = graph
         self.store = store
