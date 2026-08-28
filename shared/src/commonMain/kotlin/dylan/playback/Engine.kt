@@ -76,7 +76,7 @@ interface NativeAudioOutput {
 
     fun bindEvents(sink: EngineEventSink)
 
-    fun release()
+    fun dispose()
 }
 
 /** Implemented by the Kotlin engine; Swift's output impl pushes AVFoundation events through it. */

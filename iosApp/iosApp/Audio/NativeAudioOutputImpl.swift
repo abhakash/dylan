@@ -161,8 +161,7 @@ final class NativeAudioOutputImpl: NSObject, KNativeAudioOutput {
         self.sink = sink
     }
 
-    @objc(release_)
-    func release() {
+    func dispose() {
         guard !released else { return }
         released = true
         player.pause()
@@ -181,9 +180,9 @@ final class NativeAudioOutputImpl: NSObject, KNativeAudioOutput {
 
     /// Safety net: block-based NotificationCenter tokens are NOT auto-removed on
     /// dealloc (unlike NSKeyValueObservation), so a dealloc without release() would
-    /// leak observer blocks. release() is idempotent via the released flag.
+    /// leak observer blocks. dispose() is idempotent via the released flag.
     deinit {
-        release()
+        dispose()
     }
 
     // ---- internals -----------------------------------------------------------------------

@@ -179,19 +179,6 @@ jobs:
           restore-keys: ios-${{ runner.os }}-
       - name: Build shared frameworks
         run: ./gradlew :shared:assemble --no-configuration-cache
-      - name: Dump Kotlin Swift header (debug)
-        run: |
-          echo "=== Headers ==="
-          HDR=$(find shared/build -name "shared.h" | head -n1)
-          echo "HDR=$HDR"
-          if [ -f "$HDR" ]; then
-            echo "--- NativeAudioOutput protocol ---"
-            grep -n -A 30 "SharedNativeAudioOutput" "$HDR" | head -n 60
-            echo "--- EngineEventSink ---"
-            grep -n -A 10 "SharedEngineEventSink" "$HDR" | head -n 20
-            echo "--- IosGraph ---"
-            grep -n -A 20 "SharedIosGraph" "$HDR" | head -n 40
-          fi
       - name: xcodebuild simulator (CODE_SIGNING_ALLOWED=NO)
         run: |
           set -o pipefail

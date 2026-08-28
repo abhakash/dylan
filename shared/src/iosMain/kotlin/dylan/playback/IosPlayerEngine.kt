@@ -67,7 +67,7 @@ class IosPlayerEngine(
         if (released) return
         released = true
         stopPolling()
-        out.release()
+        out.dispose()
     }
 
     override fun onEvent(e: EngineEvent) {
