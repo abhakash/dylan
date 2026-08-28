@@ -60,7 +60,7 @@ final class NowPlayingController {
 
     private func syncInfo() {
         let st = store.state
-        guard let song = st.current else {
+        guard let song = st?.current else {
             MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
             return
         }

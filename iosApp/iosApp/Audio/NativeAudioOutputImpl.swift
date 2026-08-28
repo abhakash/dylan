@@ -238,7 +238,7 @@ final class NativeAudioOutputImpl: NSObject, KNativeAudioOutput {
         if let item = newItem {
             guard let id = itemIds[ObjectIdentifier(item)] else { return } // unknown id → orchestrator resync not needed; window is ours
             queueExhaustedEmitted = false
-            emit(Events.trackChanged(id, KTransitionReason.AUTO))
+            emit(Events.trackChanged(id, SharedTransitionReason.auto))
         } else if !queueExhaustedEmitted, player.items().isEmpty {
             queueExhaustedEmitted = true
             emit(Events.queueExhausted())
