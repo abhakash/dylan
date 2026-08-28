@@ -185,12 +185,20 @@ jobs:
           HDR=$(find shared/build -name "shared.h" | head -n1)
           echo "HDR=$HDR"
           if [ -f "$HDR" ]; then
-            echo "--- NativeAudioOutput protocol ---"
-            grep -n -A 30 "SharedNativeAudioOutput" "$HDR" | head -n 60
-            echo "--- EngineEventSink ---"
-            grep -n -A 10 "SharedEngineEventSink" "$HDR" | head -n 20
-            echo "--- IosGraph ---"
-            grep -n -A 20 "SharedIosGraph" "$HDR" | head -n 40
+            echo "--- line numbers ---"
+            grep -n "SharedNativeAudioOutput\|SharedEngineEventSink\|SharedLocalTrack\|NativeAudioOutput" "$HDR" | head -n 100
+            echo "--- NativeAudioOutput protocol block ---"
+            L=$(grep -n "@protocol SharedNativeAudioOutput" "$HDR" | cut -d: -f1 | head -n1)
+            echo "L=$L"
+            if [ -n "$L" ]; then sed -n "${L},$((L+80))p" "$HDR" | cat -n | head -n 120; fi
+            echo "--- EngineEventSink block ---"
+            L2=$(grep -n "@protocol SharedEngineEventSink" "$HDR" | cut -d: -f1 | head -n1)
+            echo "L2=$L2"
+            if [ -n "$L2" ]; then sed -n "${L2},$((L2+30))p" "$HDR" | cat -n | head -n 50; fi
+            echo "--- LocalTrack class ---"
+            L3=$(grep -n "SharedLocalTrack" "$HDR" | head -n1 | cut -d: -f1)
+            echo "L3=$L3"
+            if [ -n "$L3" ]; then sed -n "$((L3-5)),$((L3+50))p" "$HDR" | cat -n | head -n 80; fi
           fi
       - name: xcodebuild simulator (CODE_SIGNING_ALLOWED=NO)
         run: |
