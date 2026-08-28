@@ -42,7 +42,7 @@ final class NowPlayingController {
         stateHandle = graph.subscribePlayerState { [weak self] st in
             guard let self else { return }
             self.syncInfo()
-            let song = st?.current
+            let song = st.current
             if song?.key.songId != self.lastSubmittedSongId {
                 self.lastSubmittedSongId = song?.key.songId
                 self.loadArtwork(song)
@@ -60,7 +60,7 @@ final class NowPlayingController {
 
     private func syncInfo() {
         let st = store.state
-        guard let song = st?.current else {
+        guard let song = st.current else {
             MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
             return
         }
@@ -70,7 +70,7 @@ final class NowPlayingController {
             MPMediaItemPropertyArtist: song.subtitle.isEmpty ? (song.albumName ?? "") : song.subtitle,
             MPMediaItemPropertyPlaybackDuration: durS,
             MPNowPlayingInfoPropertyElapsedPlaybackTime: Double(store.positionMs) / 1000.0,
-            MPNowPlayingInfoPropertyPlaybackRate: graph.playPauseShowsPause(st) ? 1.0 : 0.0,
+            MPNowPlayingInfoPropertyPlaybackRate: graph.playPauseShowsPause(state: st) ? 1.0 : 0.0,
         ]
         if let album = song.albumName { info[MPMediaItemPropertyAlbumTitle] = album }
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
@@ -103,27 +103,27 @@ final class NowPlayingController {
 
         // The shared bus has no bare "play" — TogglePlayPause covers resume-from-paused.
         // All intents come from Bridge.Intents — this file names no raw Kotlin symbols.
-        commandTokens.append(center.playCommand.addHandler { [weak self] _ in
+        commandTokens.append(center.playCommand.addTarget { [weak self] event in
             self?.submit(Intents.toggle)
             return .success
         })
-        commandTokens.append(center.pauseCommand.addHandler { [weak self] _ in
+        commandTokens.append(center.pauseCommand.addTarget { [weak self] event in
             self?.submit(Intents.toggle)
             return .success
         })
-        commandTokens.append(center.togglePlayPauseCommand.addHandler { [weak self] _ in
+        commandTokens.append(center.togglePlayPauseCommand.addTarget { [weak self] event in
             self?.submit(Intents.toggle)
             return .success
         })
-        commandTokens.append(center.nextTrackCommand.addHandler { [weak self] _ in
+        commandTokens.append(center.nextTrackCommand.addTarget { [weak self] event in
             self?.submit(Intents.next)
             return .success
         })
-        commandTokens.append(center.previousTrackCommand.addHandler { [weak self] _ in
+        commandTokens.append(center.previousTrackCommand.addTarget { [weak self] event in
             self?.submit(Intents.previous)
             return .success
         })
-        commandTokens.append(center.changePlaybackPositionCommand.addHandler { [weak self] event in
+        commandTokens.append(center.changePlaybackPositionCommand.addTarget { [weak self] event in
             guard let posEvent = event as? MPChangePlaybackPositionCommandEvent else { return .commandFailed }
             let ms = Int64(max(0, posEvent.positionTime) * 1000.0)
             self?.submit(Intents.seek(ms: ms))

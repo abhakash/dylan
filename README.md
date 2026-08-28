@@ -5,7 +5,7 @@
 [![Kotlin](https://img.shields.io/badge/Kotlin-2.4.10-7f52ff)](https://kotlinlang.org)
 [![Platform](https://img.shields.io/badge/Platform-Android%20%7C%20iOS-lightgrey)](https://github.com/abhakash/dylan)
 
-**Dylan** is an offline-first personal music player built on JioSaavn's unofficial web API. Kotlin Multiplatform core with native UIs (Jetpack Compose on Android, SwiftUI on iOS). Every track is downloaded, verified, and played from local storage — no streaming in v1.
+**Dylan** is an offline-first personal music player. Kotlin Multiplatform core with native UIs (Jetpack Compose on Android, SwiftUI on iOS). Every track is downloaded, verified, and played from local storage — no streaming in v1.
 
 > **Status:** Incubating · **License:** Apache 2.0 · **Personal use only** — catalog access relies on undocumented endpoints with no redistribution grant. Do not distribute APKs or fetched content.
 
@@ -35,7 +35,7 @@ androidApp (Compose, minSdk 34)          iosApp (SwiftUI, iOS 17+)
                          shared Kotlin core
   PlaybackOrchestrator  ·  QueueStateMachine  ·  WindowPreparer  ·  SnapshotStore
   DownloadEngine  ·  DownloadQueue  ·  Fetcher  ·  Verifier  ·  Breaker
-  SaavnProvider + Mapper  ·  SearchChannel (WS+HTTP)  ·  CacheManager/Reconciler
+  CatalogProvider + Mapper  ·  SearchChannel (WS+HTTP)  ·  CacheManager/Reconciler
   SQLDelight (WAL, single dbLane)  ·  okio fs  ·  AppContainer (pure ctor start/stop)
   FlowAdapter → Swift
 ```
@@ -44,7 +44,7 @@ androidApp (Compose, minSdk 34)          iosApp (SwiftUI, iOS 17+)
 
 | Seam | Prod | Alt |
 |------|------|-----|
-| `MusicProvider` | `SaavnProvider` | test fakes |
+| `MusicProvider` | `CatalogProvider` | test fakes |
 | `SearchChannel` | WS + HTTP | HTTP-only fallback |
 | `PlayerEngine` | `ExoPlayerEngine` / `IosPlayerEngine` | `FakeEngine` in tests |
 
@@ -144,12 +144,6 @@ PRs must be green (`ktlintCheck detekt jvmTest` + `android` + `ios`). Keep seams
 ## License
 
 Apache 2.0 — see [LICENSE](LICENSE). Copyright 2026 Dylan Contributors.
-
----
-
-## Disclaimer
-
-JioSaavn endpoints are unofficial and may change. This project is for personal use and research. No affiliation with JioSaavn. Use at your own risk; do not redistribute fetched content.
 
 ---
 

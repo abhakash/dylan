@@ -312,7 +312,7 @@ extension KGraph {
     /// Real cached bitrate for the NP quality chip — 0 when uncached.
     func cachedBitrate(for song: KSong) async -> Int32 {
         do {
-            let v = try await cachedBitrateOf(key: song.key); if let n = v as? KotlinInt { return n.intValue }; if let n = v as? Int32 { return n }; return (v as? NSNumber)?.intValue ?? 0
+            let v = try await cachedBitrateOf(key: song.key); if let n = v as? KotlinInt { return Int32(n.intValue) }; if let n = v as? Int32 { return n }; return Int32((v as? NSNumber)?.intValue ?? 0)
         } catch {
             bridgeLog.error("cachedBitrate failed: \(error.localizedDescription)")
             return 0
@@ -321,7 +321,7 @@ extension KGraph {
 
     func clearCacheNow() async -> Int64 {
         do {
-            let v = try await clearCacheExcludingProtected(); if let n = v as? KotlinLong { return n.int64Value }; if let n = v as? Int64 { return n }; return (v as? NSNumber)?.int64Value ?? 0
+            let v = try await clearCacheExcludingProtected(); if let n = v as? KotlinLong { return n.int64Value }; if let n = v as? Int64 { return n }; return Int64((v as? NSNumber)?.int64Value ?? 0)
         } catch {
             bridgeLog.error("clearCache failed: \(error.localizedDescription)")
             return 0

@@ -32,7 +32,7 @@ final class AppEnvironment {
 
     private let remote: NowPlayingController
     private let pathMonitor = NWPathMonitor()
-    private var warningToken: NSObjectProtocol?
+    nonisolated(unsafe) private var warningToken: NSObjectProtocol?
 
     var prefetchEnabled: Bool { graph.cfg.prefetchEnabled }
 
@@ -104,9 +104,6 @@ final class AppEnvironment {
 
     deinit {
         pathMonitor.cancel()
-        if let warningToken {
-            NotificationCenter.default.removeObserver(warningToken)
-        }
     }
 
     // ---- UI action helpers ---------------------------------------------------------------

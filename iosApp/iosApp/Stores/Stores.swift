@@ -21,8 +21,8 @@ final class PlayerStore {
     /// Phase-derived status line for Now Playing (mirrors Android's label arm).
     private(set) var statusLine: String = ""
 
-    private var stateHandle: KSubscription?
-    private var posHandle: KSubscription?
+    nonisolated(unsafe) private var stateHandle: KSubscription?
+    nonisolated(unsafe) private var posHandle: KSubscription?
     private weak var graph: KGraph?
 
     func bind(_ g: KGraph) {
@@ -74,9 +74,9 @@ final class SearchStore {
     private(set) var recent: [String] = []
     private(set) var topSearches: [KMiniEntity] = []
 
-    private var suggestionsHandle: KSubscription?
+    nonisolated(unsafe) private var suggestionsHandle: KSubscription?
     private var latestAnswered: String = ""
-    private var demandTask: Task<Void, Never>?
+    nonisolated(unsafe) private var demandTask: Task<Void, Never>?
     private weak var graph: KGraph?
 
     func bind(_ g: KGraph) {
@@ -133,7 +133,7 @@ final class SearchStore {
             if self.submitted != nil { return }
             let trimmed = q.trimmingCharacters(in: .whitespaces)
             if trimmed.count >= 2 {
-                g.search.request(trimmed)
+                g.search.request(query: trimmed)
             } else {
                 self.suggestions = []
             }
