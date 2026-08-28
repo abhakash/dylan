@@ -114,7 +114,7 @@ struct EqBars: View {
                         reduceMotion ? nil : .easeInOut(duration: 0.5)
                             .repeatForever(autoreverses: true)
                             .delay(Double(i) * 0.15),
-                        value: animating,
+                        value: animating
                     )
             }
         }

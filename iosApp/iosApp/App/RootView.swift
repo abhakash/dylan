@@ -79,7 +79,7 @@ struct RootView: View {
     private func tabButton(
         _ index: Int,
         _ label: String,
-        icon: String,
+        icon: String
     ) -> some View {
         Button {
             withAnimation(.easeInOut(duration: DylanTokens.fastMs / 1000)) {

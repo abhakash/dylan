@@ -36,7 +36,7 @@ final class AppEnvironment {
 
     var prefetchEnabled: Bool { graph.cfg.prefetchEnabled }
 
-    lazy var appVersion: String = {
+    var appVersion: String = {
         (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "1.0"
     }()
 
@@ -46,7 +46,7 @@ final class AppEnvironment {
         URLCache.shared = URLCache(
             memoryCapacity: 32 * 1024 * 1024,
             diskCapacity: 150 * 1024 * 1024,
-            directory: Self.artworkCacheDir(),
+            directory: Self.artworkCacheDir()
         )
 
         let support = Self.applicationSupportDir()
@@ -86,7 +86,7 @@ final class AppEnvironment {
         warningToken = NotificationCenter.default.addObserver(
             forName: UIApplication.didReceiveMemoryWarningNotification,
             object: nil,
-            queue: .main,
+            queue: .main
         ) { [weak self] _ in
             self?.thumbs.flushMemory()
             URLCache.shared.removeAllCachedResponses()

@@ -42,7 +42,7 @@ final class NativeAudioOutputImpl: NSObject, KNativeAudioOutput {
         endObserver = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemDidPlayToEndTime,
             object: nil,
-            queue: nil,
+            queue: nil
         ) { [weak self] note in
             self?.itemDidEnd(note.object as? AVPlayerItem)
         }
@@ -50,7 +50,7 @@ final class NativeAudioOutputImpl: NSObject, KNativeAudioOutput {
         routeObserver = NotificationCenter.default.addObserver(
             forName: AVAudioSession.routeChangeNotification,
             object: nil,
-            queue: nil,
+            queue: nil
         ) { [weak self] note in
             guard let self, !self.released else { return }
             let reason = UInt(note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt ?? 0)
@@ -63,7 +63,7 @@ final class NativeAudioOutputImpl: NSObject, KNativeAudioOutput {
         interruptionObserver = NotificationCenter.default.addObserver(
             forName: AVAudioSession.interruptionNotification,
             object: nil,
-            queue: nil,
+            queue: nil
         ) { [weak self] note in
             guard let self, !self.released else { return }
             let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt ?? 0
@@ -132,7 +132,7 @@ final class NativeAudioOutputImpl: NSObject, KNativeAudioOutput {
         player.currentItem?.seek(
             to: time,
             toleranceBefore: .zero,
-            toleranceAfter: .zero,
+            toleranceAfter: .zero
         )
     }
 
@@ -183,7 +183,7 @@ final class NativeAudioOutputImpl: NSObject, KNativeAudioOutput {
     @discardableResult
     private func insert(
         _ t: KLocalTrack,
-        after anchor: AVPlayerItem?,
+        after anchor: AVPlayerItem?
     ) -> AVPlayerItem {
         let av = AVPlayerItem(url: URL(fileURLWithPath: t.path))
         itemIds[ObjectIdentifier(av)] = t.itemId

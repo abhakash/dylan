@@ -57,13 +57,13 @@ typealias KLocalTrack = LocalTrack        // data class LocalTrack
 
 // ---- engine seam -------------------------------------------------------------
 //   check: @protocol NativeAudioOutput ("NativeAudioOutput" + -Protocol, A2)
-typealias KNativeAudioOutput = NativeAudioOutputProtocol
+typealias KNativeAudioOutput = SharedNativeAudioOutputProtocol
 //   check: @protocol EngineEventSink ("EngineEventSink" + -Protocol, A2)
-typealias KEngineEventSink = EngineEventSinkProtocol
+typealias KEngineEventSink = SharedEngineEventSinkProtocol
 
 // ---- intents -------------------------------------------------------------------
 //   check: @protocol Intent ("Intent" sealed interface + -Protocol, A2)
-typealias KIntent = IntentProtocol
+typealias KIntent = SharedIntentProtocol
 //   check: flattened nested data classes (A3); initializers take
 //   songs:[Any]/startIndex:Int32 and ms:Int64 respectively (A5/A6).
 typealias KIntentPlayNow = IntentPlayNow  // Intent.PlayNow
@@ -77,7 +77,7 @@ typealias KTransitionReason = TransitionReason
 typealias KEngineErr = EngineErr
 //   check: @protocol EngineEvent ("EngineEvent" sealed interface, A2 rule).
 //   NOTE: was spelled `shared.EngineEvent` — unprefixed spelling is wrong.
-typealias KEngineEvent = EngineEventProtocol
+typealias KEngineEvent = SharedEngineEventProtocol
 
 /// Engine event constructors (flattened classes per A3; singletons per A4).
 enum Events {
