@@ -314,7 +314,7 @@ extension KGraph {
     func cachedBitrate(for song: KSong) async -> Int32 {
         do {
             let v = try await cachedBitrateOf(key: song.key) as? KotlinInt
-            return v?.intValue ?? 0
+            return v.map { Int32($0.intValue) } ?? 0
         } catch {
             bridgeLog.error("cachedBitrate failed: \(error.localizedDescription)")
             return 0

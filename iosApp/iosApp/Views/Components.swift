@@ -148,7 +148,7 @@ private struct DownloadRing: View {
         }
         .onAppear {
             guard handle == nil else { return }
-            handle = env.graph.subscribeProgress(key: key) { p in pct = p.intValue }
+            handle = env.graph.subscribeProgress(key: key) { p in pct = Int32(p.intValue) }
         }
         .onDisappear {
             handle?.cancel()
