@@ -210,7 +210,7 @@
             );
             runOnlyForDeploymentPostprocessing = 0;
             shellPath = /bin/zsh;
-            shellScript = "cd \"$SRCROOT/..\"\nexport JAVA_HOME=\"/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home\"\n./gradlew :shared:embedAndSignAppleFrameworkForXcode --no-configuration-cache || exit 1\n";
+            shellScript = "cd \"$SRCROOT/..\"\nif [ -z \"$JAVA_HOME\" ] || [ ! -d \"$JAVA_HOME\" ]; then if [ -d \"/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home\" ]; then export JAVA_HOME=\"/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home\"; fi; fi\n./gradlew :shared:embedAndSignAppleFrameworkForXcode --no-configuration-cache || exit 1\n";
         };
 /* End PBXShellScriptBuildPhase section */
 

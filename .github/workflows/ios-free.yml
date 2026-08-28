@@ -37,7 +37,7 @@ jobs:
 
       - name: Build unsigned .app (iphoneos, no signing)
         run: |
-          set -e
+          set -o pipefail
           xcodebuild -project iosApp/iosApp.xcodeproj \
             -scheme iosApp \
             -configuration Release \
@@ -46,7 +46,9 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            build | xcpretty || xcodebuild -project iosApp/iosApp.xcodeproj -scheme iosApp -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build
+            build 2>&1 | tee /tmp/xcode-free.log
+          EXIT=${PIPESTATUS[0]}
+          if [ $EXIT -ne 0 ]; then echo "xcodebuild failed, log:"; cat /tmp/xcode-free.log | tail -n 100; exit $EXIT; fi
 
       - name: Package unsigned IPA
         run: |
@@ -55,12 +57,17 @@ jobs:
           if [ -z "$APP" ]; then APP=$(find . -path "*/Build/Products/Release-iphoneos/iosApp.app" | head -n1); fi
           echo "Found .app: $APP"
           ls -lh "$APP"
+          echo "--- app contents ---"
+          ls -R "$APP" | head -n 100
+          du -sh "$APP"
+          test -f "$APP/iosApp" || (echo "ERROR: iosApp binary missing — build produced empty stub"; ls -R ~/Library/Developer/Xcode/DerivedData | head -n 50; exit 1)
           rm -rf /tmp/Payload /tmp/Dylan-unsigned.ipa
           mkdir -p /tmp/Payload
           cp -R "$APP" /tmp/Payload/
           cd /tmp && zip -r Dylan-unsigned.ipa Payload > /dev/null
           ls -lh Dylan-unsigned.ipa
-          unzip -l Dylan-unsigned.ipa | head -20
+          unzip -l Dylan-unsigned.ipa | head -30
+          echo "IPA size $(stat -f%z /tmp/Dylan-unsigned.ipa 2>/dev/null || stat -c%s /tmp/Dylan-unsigned.ipa) bytes"
 
       - name: Upload unsigned IPA
         uses: actions/upload-artifact@v4

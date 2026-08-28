@@ -181,6 +181,7 @@ jobs:
         run: ./gradlew :shared:assemble --no-configuration-cache
       - name: xcodebuild simulator (CODE_SIGNING_ALLOWED=NO)
         run: |
+          set -o pipefail
           xcodebuild -project iosApp/iosApp.xcodeproj \
             -scheme iosApp \
             -sdk iphonesimulator \
@@ -188,7 +189,9 @@ jobs:
             -configuration Debug \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
-            build | xcpretty || xcodebuild -project iosApp/iosApp.xcodeproj -scheme iosApp -sdk iphonesimulator -destination 'platform=iOS Simulator,name=iPhone 16' build CODE_SIGNING_ALLOWED=NO
+            build 2>&1 | tee /tmp/xcode-sim.log
+          EXIT=${PIPESTATUS[0]}
+          if [ $EXIT -ne 0 ]; then cat /tmp/xcode-sim.log; exit $EXIT; fi
       - name: Upload Xcode logs
         if: always()
         uses: actions/upload-artifact@v4
