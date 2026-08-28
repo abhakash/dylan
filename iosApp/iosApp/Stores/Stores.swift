@@ -29,7 +29,7 @@ final class PlayerStore {
         guard stateHandle == nil else { return }
         graph = g
         stateHandle = g.subscribePlayerState { [weak self] st in self?.apply(st) }
-        posHandle = g.subscribePosition { [weak self] ms in self?.positionMs = (ms as? KotlinLong)?.int64Value ?? (ms as? Int64) ?? 0 }
+        posHandle = g.subscribePosition { [weak self] ms in self?.positionMs = ms.int64Value }
     }
 
     deinit {

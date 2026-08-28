@@ -148,7 +148,7 @@ private struct DownloadRing: View {
         }
         .onAppear {
             guard handle == nil else { return }
-            handle = env.graph.subscribeProgress(key: key) { p in if let k = p as? KotlinInt { pct = k.intValue } else if let n = p as? NSNumber { pct = Int32(n.intValue) } else if let i = p as? Int32 { pct = i } else { pct = 0 } }
+            handle = env.graph.subscribeProgress(key: key) { p in pct = p.intValue }
         }
         .onDisappear {
             handle?.cancel()
