@@ -179,16 +179,6 @@ jobs:
           restore-keys: ios-${{ runner.os }}-
       - name: Build shared frameworks
         run: ./gradlew :shared:assemble --no-configuration-cache
-      - name: Dump TransitionReason header
-        run: |
-          HDR=$(find shared/build -name "shared.h" | head -n1)
-          echo "HDR=$HDR"
-          echo "--- SharedTransitionReason full ---"
-          awk '/@interface SharedTransitionReason/,/@end/ {print NR": "$0}' "$HDR" | head -n 80
-          echo "--- grep TransitionReason ---"
-          grep -n "TransitionReason" "$HDR" | head -n 20
-          echo "--- All SharedTransitionReason lines ---"
-          grep -n "SharedTransitionReason" "$HDR" | head -n 30
       - name: xcodebuild simulator (CODE_SIGNING_ALLOWED=NO)
         run: |
           set -o pipefail
