@@ -237,7 +237,10 @@ extension KGraph {
 
     func isFavorite(_ song: KSong) async -> Bool {
         do {
-            return try await container.favorites.isFavorite(key: song.key)
+            let v = try await container.favorites.isFavorite(key: song.key)
+            if let b = v as? KotlinBoolean { return b.boolValue }
+            if let b = v as? Bool { return b }
+            return (v as? NSNumber)?.boolValue ?? false
         } catch {
             bridgeLog.error("favorite.isFavorite failed: \(error.localizedDescription)")
             return false
@@ -282,7 +285,7 @@ extension KGraph {
 
     func loadHighQualityPref() async -> Bool {
         do {
-            return try await isHighQualityPref()
+            let v = try await isHighQualityPref(); if let b = v as? KotlinBoolean { return b.boolValue }; if let b = v as? Bool { return b }; return (v as? NSNumber)?.boolValue ?? true
         } catch {
             bridgeLog.error("qualityPref failed: \(error.localizedDescription)")
             return true
@@ -291,7 +294,7 @@ extension KGraph {
 
     func saveHighQualityPref(_ high: Bool) async {
         do {
-            try await setHighQualityPref(high)
+            try await setHighQualityPref(high: high)
         } catch {
             bridgeLog.error("setQualityPref failed: \(error.localizedDescription)")
         }
@@ -309,7 +312,7 @@ extension KGraph {
     /// Real cached bitrate for the NP quality chip — 0 when uncached.
     func cachedBitrate(for song: KSong) async -> Int32 {
         do {
-            return try await cachedBitrateOf(key: song.key)
+            let v = try await cachedBitrateOf(key: song.key); if let n = v as? KotlinInt { return n.intValue }; if let n = v as? Int32 { return n }; return (v as? NSNumber)?.intValue ?? 0
         } catch {
             bridgeLog.error("cachedBitrate failed: \(error.localizedDescription)")
             return 0
@@ -318,7 +321,7 @@ extension KGraph {
 
     func clearCacheNow() async -> Int64 {
         do {
-            return try await clearCacheExcludingProtected()
+            let v = try await clearCacheExcludingProtected(); if let n = v as? KotlinLong { return n.int64Value }; if let n = v as? Int64 { return n }; return (v as? NSNumber)?.int64Value ?? 0
         } catch {
             bridgeLog.error("clearCache failed: \(error.localizedDescription)")
             return 0

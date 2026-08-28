@@ -29,28 +29,28 @@ final class PlayerStore {
         guard stateHandle == nil else { return }
         graph = g
         stateHandle = g.subscribePlayerState { [weak self] st in self?.apply(st) }
-        posHandle = g.subscribePosition { [weak self] ms in self?.positionMs = ms }
+        posHandle = g.subscribePosition { [weak self] ms in self?.positionMs = (ms as? KotlinLong)?.int64Value ?? (ms as? Int64) ?? 0 }
     }
 
     deinit {
-        stateHandle?.cancel()
-        posHandle?.cancel()
+        // MainActor properties - best effort
+        Task { @MainActor [stateHandle, posHandle] in stateHandle?.cancel(); posHandle?.cancel() }
     }
 
     private func apply(_ st: KPlayerState?) {
         guard let g = graph else { return }
         state = st
-        queueSongs = ((st.flatMap { g.queueAsList($0) }) as? [KSong]) ?? []
-        phaseKind = st == nil ? "idle" : g.phaseKind(st)
-        repeatKind = g.repeatKind(st)
-        showsPause = g.playPauseShowsPause(st)
-        switch g.phaseKind(st) {
+        queueSongs = ((st.flatMap { g.queueAsList(state: $0) }) as? [KSong]) ?? []
+        phaseKind = st == nil ? "idle" : g.phaseKind(state: st)
+        repeatKind = g.repeatKind(state: st)
+        showsPause = g.playPauseShowsPause(state: st)
+        switch g.phaseKind(state: st) {
         case "downloading":
             statusLine = "Saving…"
         case "resolving":
             statusLine = "Preparing…"
         case "error":
-            if let f = g.failureOf(st) { statusLine = g.failureMessage(f) } else { statusLine = "" }
+            if let f = g.failureOf(state: st) { statusLine = g.failureMessage(failure: f) } else { statusLine = "" }
         default:
             statusLine = ""
         }

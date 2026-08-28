@@ -78,7 +78,7 @@ final class AppEnvironment {
         pathMonitor.pathUpdateHandler = { [weak self] path in
             let metered = path.isExpensive || path.isConstrained
             DispatchQueue.main.async {
-                self?.graph.pushMetered(metered)
+                self?.graph.pushMetered(isMetered: metered)
             }
         }
         pathMonitor.start(queue: .global(qos: .utility))
@@ -97,7 +97,7 @@ final class AppEnvironment {
     static func bootstrap() -> AppEnvironment {
         if shared == nil {
             shared = AppEnvironment()
-            shared.graph.attachAudio(shared.output)
+            shared.graph.attachAudio(output: shared.output)
         }
         return shared
     }

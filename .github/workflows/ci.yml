@@ -175,7 +175,7 @@ jobs:
             ~/.konan
             ~/Library/Developer/Xcode/DerivedData
             shared/build
-          key: ios-${{ runner.os }}-${{ hashFiles('gradle/libs.versions.toml', 'shared/build.gradle.kts') }}
+          key: ios-${{ runner.os }}-${{ hashFiles('gradle/libs.versions.toml', 'shared/build.gradle.kts', 'shared/src/**/*.kt') }}
           restore-keys: ios-${{ runner.os }}-
       - name: Build shared frameworks
         run: ./gradlew :shared:assemble --no-configuration-cache
