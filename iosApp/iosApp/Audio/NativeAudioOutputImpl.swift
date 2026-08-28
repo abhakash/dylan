@@ -82,7 +82,13 @@ final class NativeAudioOutputImpl: NSObject, KNativeAudioOutput {
     }
 
     // ---- NativeAudioOutput ------------------------------------------------------------
+    // ObjC selectors are suffixed (prepareItems:, bindEventsSink:, etc.) with swift_name mapping
+    // to clean Swift names (prepare(items:), bindEvents(sink:), etc.). `release` is mangled to
+    // `release_` in ObjC to avoid NSObject collision but Swift name remains `release()`.
+    // Explicit @objc(selector) ensures the Swift witness uses the ObjC selector expected by the
+    // Kotlin header (`shared.h` @protocol SharedNativeAudioOutput, swift_name NativeAudioOutput).
 
+    @objc(prepareItems:)
     func prepare(items: [KLocalTrack]) {
         guard !released else { return }
         suppressCurrentItemEvents = true
@@ -97,6 +103,7 @@ final class NativeAudioOutputImpl: NSObject, KNativeAudioOutput {
         suppressCurrentItemEvents = false
     }
 
+    @objc(replaceUpNextItem:)
     func replaceUpNext(item: KLocalTrack?) {
         guard !released else { return }
         // Remove ONLY queued items beyond index 0 (§9.4 iOS mapping).
@@ -111,6 +118,7 @@ final class NativeAudioOutputImpl: NSObject, KNativeAudioOutput {
         queueExhaustedEmitted = false
     }
 
+    @objc(play)
     func play() {
         guard !released else { return }
         do {
@@ -121,11 +129,13 @@ final class NativeAudioOutputImpl: NSObject, KNativeAudioOutput {
         }
     }
 
+    @objc(pause)
     func pause() {
         guard !released else { return }
         player.pause()
     }
 
+    @objc(seekToMs:)
     func seekTo(ms: Int64) {
         guard !released else { return }
         let time = CMTime(value: CMTimeValue(ms), timescale: 1000)
@@ -136,6 +146,7 @@ final class NativeAudioOutputImpl: NSObject, KNativeAudioOutput {
         )
     }
 
+    @objc(currentTimeMs)
     func currentTimeMs() -> Int64 {
         guard !released else { return 0 }
         // CMTimeGetSeconds returns NaN/∞ for invalid times; converting non-finite
@@ -145,10 +156,12 @@ final class NativeAudioOutputImpl: NSObject, KNativeAudioOutput {
         return Int64(seconds * 1000.0)
     }
 
+    @objc(bindEventsSink:)
     func bindEvents(sink: KEngineEventSink) {
         self.sink = sink
     }
 
+    @objc(release_)
     func release() {
         guard !released else { return }
         released = true
