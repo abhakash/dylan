@@ -24,13 +24,14 @@ actual class DriverFactory(
         val driver = JdbcSqliteDriver("jdbc:sqlite:$dbPath")
         // NB: in SQLDelight 2.x the executeQuery mapper itself returns QueryResult<R>.
         val ddl: String? =
-            driver.executeQuery(
-                null,
-                "SELECT sql FROM sqlite_master WHERE type='table' AND name='songs'",
-                { cursor -> QueryResult.Value(if (cursor.next().value) cursor.getString(0) else null) },
-                0,
-                null,
-            ).value
+            driver
+                .executeQuery(
+                    null,
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='songs'",
+                    { cursor -> QueryResult.Value(if (cursor.next().value) cursor.getString(0) else null) },
+                    0,
+                    null,
+                ).value
         if (ddl == null) {
             Dylan.Schema.create(driver)
         } else if ("cacheable" in ddl) {

@@ -41,8 +41,8 @@ import dylan.android.ui.components.canPlay
 import dylan.android.ui.components.containsRecording
 import dylan.android.ui.components.distinctRecordings
 import dylan.android.ui.components.rememberCachedKeys
-import dylan.android.ui.components.rememberIsOnline
 import dylan.android.ui.components.rememberFavoriteKeys
+import dylan.android.ui.components.rememberIsOnline
 import dylan.android.ui.components.rememberSongActions
 import dylan.android.ui.components.toArtistEntry
 import dylan.di.AppContainer
@@ -162,7 +162,9 @@ fun HomeScreen(
                     enabled = can,
                     onTap = {
                         if (!can) {
-                            android.widget.Toast.makeText(ctx, Copy.OFFLINE, android.widget.Toast.LENGTH_SHORT).show()
+                            android.widget.Toast
+                                .makeText(ctx, Copy.OFFLINE, android.widget.Toast.LENGTH_SHORT)
+                                .show()
                         } else {
                             onPlaySongs(listOf(song), 0)
                         }
@@ -203,7 +205,9 @@ fun HomeScreen(
                     enabled = can,
                     onTap = {
                         if (!can) {
-                            android.widget.Toast.makeText(ctx, Copy.OFFLINE, android.widget.Toast.LENGTH_SHORT).show()
+                            android.widget.Toast
+                                .makeText(ctx, Copy.OFFLINE, android.widget.Toast.LENGTH_SHORT)
+                                .show()
                         } else {
                             onPlaySongs(topFive, topFive.indexOfFirst { it.key == song.key }.coerceAtLeast(0))
                         }

@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- DYLAN launcher foreground: Bob Dylan profile silhouette (CC0-derived, redrawn) +
      red accent dot. 108dp adaptive viewport; group scales the art into the 66dp safe
-     circle. Same path doubles as the monochrome (themed-icon) layer via mipmap alias. -->
+     circle. Themed icons use ic_launcher_monochrome (single-color); do NOT point
+     <monochrome> at this file (the red dot breaks dynamic tint). -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp" android:height="108dp"
     android:viewportWidth="108" android:viewportHeight="108">

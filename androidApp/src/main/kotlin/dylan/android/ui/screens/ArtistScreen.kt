@@ -131,7 +131,9 @@ fun ArtistScreen(
                 enabled = can,
                 onTap = {
                     if (!can) {
-                        android.widget.Toast.makeText(ctx, Copy.OFFLINE, android.widget.Toast.LENGTH_SHORT).show()
+                        android.widget.Toast
+                            .makeText(ctx, Copy.OFFLINE, android.widget.Toast.LENGTH_SHORT)
+                            .show()
                     } else {
                         onPlaySongs(songs, i)
                     }

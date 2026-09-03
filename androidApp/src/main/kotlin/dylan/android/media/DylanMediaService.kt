@@ -128,12 +128,16 @@ class DylanMediaService : MediaSessionService() {
                             session: MediaSession,
                             controller: MediaSession.ControllerInfo,
                         ): MediaSession.ConnectionResult {
-                            val state = DylanApp.of(this@DylanMediaService).container.orchestrator.state.value
+                            val state =
+                                DylanApp
+                                    .of(this@DylanMediaService)
+                                    .container.orchestrator.state.value
                             val canNext = state.queue.size > 1 || state.repeat != dylan.model.Repeat.OFF
                             val canPrev = state.queue.size > 1 || state.repeat != dylan.model.Repeat.OFF
                             val buttons = buildMediaButtons(canNext, canPrev)
                             val playerCommands =
-                                Player.Commands.Builder()
+                                Player.Commands
+                                    .Builder()
                                     .addAll(Player.Commands.EMPTY)
                                     .add(Player.COMMAND_PLAY_PAUSE)
                                     .add(Player.COMMAND_GET_CURRENT_MEDIA_ITEM)
@@ -145,11 +149,13 @@ class DylanMediaService : MediaSessionService() {
                                     .addIf(Player.COMMAND_SEEK_TO_PREVIOUS, canPrev)
                                     .build()
                             val sessionCommands =
-                                androidx.media3.session.SessionCommands.Builder()
+                                androidx.media3.session.SessionCommands
+                                    .Builder()
                                     .add(SessionCommand(CMD_NEXT, android.os.Bundle.EMPTY))
                                     .add(SessionCommand(CMD_PREV, android.os.Bundle.EMPTY))
                                     .build()
-                            return MediaSession.ConnectionResult.AcceptedResultBuilder(session, controller)
+                            return MediaSession.ConnectionResult
+                                .AcceptedResultBuilder(session, controller)
                                 .setAvailablePlayerCommands(playerCommands)
                                 .setAvailableSessionCommands(sessionCommands)
                                 .setCustomLayout(buttons)
@@ -212,7 +218,8 @@ class DylanMediaService : MediaSessionService() {
                     // setAvailableCommands requires a ControllerInfo, so iterate connected ones.
                     try {
                         val playerCommands =
-                            Player.Commands.Builder()
+                            Player.Commands
+                                .Builder()
                                 .addAll(Player.Commands.EMPTY)
                                 .add(Player.COMMAND_PLAY_PAUSE)
                                 .add(Player.COMMAND_GET_CURRENT_MEDIA_ITEM)
@@ -224,7 +231,8 @@ class DylanMediaService : MediaSessionService() {
                                 .addIf(Player.COMMAND_SEEK_TO_PREVIOUS, canPrev)
                                 .build()
                         val sessionCommands =
-                            androidx.media3.session.SessionCommands.Builder()
+                            androidx.media3.session.SessionCommands
+                                .Builder()
                                 .add(SessionCommand(CMD_NEXT, android.os.Bundle.EMPTY))
                                 .add(SessionCommand(CMD_PREV, android.os.Bundle.EMPTY))
                                 .build()
@@ -240,14 +248,18 @@ class DylanMediaService : MediaSessionService() {
             }
     }
 
-    private fun buildMediaButtons(canNext: Boolean, canPrev: Boolean): ImmutableList<CommandButton> {
+    private fun buildMediaButtons(
+        canNext: Boolean,
+        canPrev: Boolean,
+    ): ImmutableList<CommandButton> {
         // Use proper ICON constants so getDefaultSlot() maps to SLOT_BACK/FORWARD, not OVERFLOW.
         // Slot assignment is critical: DefaultMediaNotificationProvider.getMediaButtons hides
         // OVERFLOW buttons in compact view and some OEMs (Vivo) drop them entirely.
         // We keep custom white icons (ic_prev/next) via setCustomIconResId for contrast on
         // dark notification background (media_notification_small_icon bg) but also declare slots.
         val prev =
-            CommandButton.Builder(CommandButton.ICON_PREVIOUS)
+            CommandButton
+                .Builder(CommandButton.ICON_PREVIOUS)
                 .setDisplayName("Previous")
                 .setSessionCommand(SessionCommand(CMD_PREV, android.os.Bundle.EMPTY))
                 .setSlots(CommandButton.SLOT_BACK)
@@ -255,7 +267,8 @@ class DylanMediaService : MediaSessionService() {
                 .setCustomIconResId(dylan.android.R.drawable.ic_prev)
                 .build()
         val next =
-            CommandButton.Builder(CommandButton.ICON_NEXT)
+            CommandButton
+                .Builder(CommandButton.ICON_NEXT)
                 .setDisplayName("Next")
                 .setSessionCommand(SessionCommand(CMD_NEXT, android.os.Bundle.EMPTY))
                 .setSlots(CommandButton.SLOT_FORWARD)

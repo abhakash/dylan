@@ -40,8 +40,8 @@ import dylan.android.ui.components.SongRow
 import dylan.android.ui.components.canPlay
 import dylan.android.ui.components.quietLoad
 import dylan.android.ui.components.rememberCachedKeys
-import dylan.android.ui.components.rememberIsOnline
 import dylan.android.ui.components.rememberFavoriteKeys
+import dylan.android.ui.components.rememberIsOnline
 import dylan.android.ui.components.rememberSongActions
 import dylan.di.AppContainer
 import dylan.model.Song
@@ -134,7 +134,9 @@ fun LibraryScreen(
                         enabled = can,
                         onTap = {
                             if (!can) {
-                                android.widget.Toast.makeText(ctx, Copy.OFFLINE, android.widget.Toast.LENGTH_SHORT).show()
+                                android.widget.Toast
+                                    .makeText(ctx, Copy.OFFLINE, android.widget.Toast.LENGTH_SHORT)
+                                    .show()
                             } else {
                                 onPlaySongs(favorites, favorites.indexOfFirst { it.key == song.key }.coerceAtLeast(0))
                             }
@@ -155,7 +157,9 @@ fun LibraryScreen(
                         enabled = can,
                         onTap = {
                             if (!can) {
-                                android.widget.Toast.makeText(ctx, Copy.OFFLINE, android.widget.Toast.LENGTH_SHORT).show()
+                                android.widget.Toast
+                                    .makeText(ctx, Copy.OFFLINE, android.widget.Toast.LENGTH_SHORT)
+                                    .show()
                             } else {
                                 onPlaySongs(listOf(song), 0)
                             }

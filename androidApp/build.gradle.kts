@@ -23,7 +23,10 @@ if (keystorePropsFile.exists()) {
 }
 
 // ── Semver: source of truth root/VERSION (e.g. 0.1.0) ─────────────────────
-// Every commit auto-bumps versionCode; VERSION file bump = semantic release.
+// version.yml auto-bumps VERSION on every main push (conventional commits:
+// feat: → minor, "!:"/BREAKING CHANGE → major, else patch) and tags v<ver>.
+// versionCode advances every commit (count-based); versionName is unique per
+// commit, so each main push yields distinct, installable versioned artifacts.
 // versionCode = MAJOR*1_000_000 + MINOR*10_000 + PATCH*100 + (commitCount %100)  (Play limit 2.1B)
 // versionName = 0.1.0 (tag) / 0.1.0+42 (CI) / 0.1.0-dev.42+abc123 (local)
 fun semver(): Triple<String, Int, String> {

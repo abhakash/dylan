@@ -326,9 +326,10 @@ class DownloadEngine(
                 when (step) {
                     Step.HYDRATE -> {
                         states.update { it + (key to JobState.Queued) }
-                        songRow = withContext(disp.dbLane) {
-                            db.dylanQueries.selectSong(key.provider, key.songId).executeAsOneOrNull()
-                        }
+                        songRow =
+                            withContext(disp.dbLane) {
+                                db.dylanQueries.selectSong(key.provider, key.songId).executeAsOneOrNull()
+                            }
                         val hydrated = songRow
                         if (hydrated == null) {
                             return fail(key, DylanFailure(ErrorCode.NO_SOURCE, key))

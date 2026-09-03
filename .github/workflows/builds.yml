@@ -1,0 +1,270 @@
+name: builds
+
+# Debug vs prod build lanes for Android + iOS.
+# - debug: no secrets, runs anywhere (PRs, forks, manual, presubmit-safe).
+# - prod:  Android release (R8 + signed APK + AAB) needs keystore secrets and
+#          skips gracefully when they are absent; iOS prod is the unsigned
+#          Release IPA (sign it locally via `tools/dylan-sign` or Xcode).
+#          Signed-device iOS stays in `ios-release.yml` (paid cert flow).
+#
+# Triggers: manual (flavor/platform pickers) + version tags `v*` (prod, all
+# platforms). Presubmit/CI (`ci.yml`) stays debug-only so forks never fail
+# on missing secrets.
+
+# Action pinning policy: pinned to major tags (v4/v1); see ci.yml for SHA-pinning note.
+
+on:
+  workflow_dispatch:
+    inputs:
+      flavor:
+        description: "Build flavor"
+        required: true
+        default: "all"
+        type: choice
+        options: [all, debug, prod]
+      platform:
+        description: "Platform"
+        required: true
+        default: "all"
+        type: choice
+        options: [all, android, ios]
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: builds-${{ github.ref }}
+  cancel-in-progress: false # prod artifacts must never cancel each other
+
+jobs:
+  android-debug:
+    name: android/debug
+    if: github.event_name == 'push' || inputs.flavor == 'all' || inputs.flavor == 'debug'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # VERSION → versionCode
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+      - name: Assemble debug
+        run: ./gradlew :androidApp:assembleDebug --no-configuration-cache
+      - name: Version stamp + checksums
+        id: ver
+        run: |
+          VER=$(cat VERSION)
+          SHA=$(git rev-parse --short HEAD)
+          echo "ver=$VER" >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          APK=$(ls androidApp/build/outputs/apk/debug/*.apk | head -n1)
+          cp "$APK" "dylan-debug-$VER-$SHA.apk"
+          sha256sum "dylan-debug-$VER-$SHA.apk" | tee debug.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dylan-android-debug-${{ steps.ver.outputs.ver }}-${{ steps.ver.outputs.sha }}
+          path: |
+            dylan-debug-*.apk
+            debug.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+  android-prod:
+    name: android/prod
+    if: github.event_name == 'push' || inputs.flavor == 'all' || inputs.flavor == 'prod'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # VERSION → versionCode
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+      - name: Keystore check (graceful skip without secrets)
+        id: keys
+        env:
+          ANDROID_KEYSTORE_PROPERTIES: ${{ secrets.ANDROID_KEYSTORE_PROPERTIES }}
+          ANDROID_KEYSTORE_FILE: ${{ secrets.ANDROID_KEYSTORE_FILE }}
+        run: |
+          if [ ! -f keystore.properties ] && [ -z "$ANDROID_KEYSTORE_PROPERTIES" ]; then
+            echo "No keystore secrets — skipping signed prod build (debug lane covers presubmit)."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ ! -f keystore.properties ]; then
+            echo "$ANDROID_KEYSTORE_PROPERTIES" | base64 --decode > keystore.properties
+            if [ -n "$ANDROID_KEYSTORE_FILE" ]; then
+              echo "$ANDROID_KEYSTORE_FILE" | base64 --decode > dylan-release.keystore
+            fi
+          fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+      - name: Assemble release (R8) + bundle (AAB)
+        if: steps.keys.outputs.skip != 'true'
+        run: ./gradlew :androidApp:assembleRelease :androidApp:bundleRelease --no-configuration-cache
+      - name: Refuse silent debug signature
+        # build.gradle.kts falls back to the debug key when no release keystore
+        # is configured — the artifacts below must never be debug-signed.
+        if: steps.keys.outputs.skip != 'true'
+        run: |
+          APK=$(ls androidApp/build/outputs/apk/release/*.apk | head -n1)
+          APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | head -n1)
+          "$APKSIGNER" verify --print-certs "$APK"
+          if "$APKSIGNER" verify --print-certs "$APK" | grep -qi 'Android Debug'; then
+            echo "ERROR: release APK is debug-signed — release keystore was not applied."
+            exit 1
+          fi
+      - name: Version stamp + checksums
+        id: ver
+        if: steps.keys.outputs.skip != 'true'
+        run: |
+          VER=$(cat VERSION)
+          SHA=$(git rev-parse --short HEAD)
+          echo "ver=$VER" >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          cp androidApp/build/outputs/apk/release/*.apk "dylan-prod-$VER-$SHA.apk"
+          cp androidApp/build/outputs/bundle/release/*.aab "dylan-prod-$VER-$SHA.aab" || true
+          sha256sum dylan-prod-* | tee prod.sha256
+      - uses: actions/upload-artifact@v4
+        if: steps.keys.outputs.skip != 'true'
+        with:
+          name: dylan-android-prod-${{ steps.ver.outputs.ver }}-${{ steps.ver.outputs.sha }}
+          path: |
+            dylan-prod-*.apk
+            dylan-prod-*.aab
+            androidApp/build/outputs/mapping/release/mapping.txt
+            prod.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+  ios-debug:
+    name: ios/debug
+    if: github.event_name == 'push' || inputs.flavor == 'all' || inputs.flavor == 'debug'
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+      - name: Select Xcode 16.2
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: "16.2"
+      - name: Build shared frameworks
+        run: ./gradlew :shared:assemble --no-configuration-cache
+      - name: xcodebuild simulator (Debug, CODE_SIGNING_ALLOWED=NO)
+        run: |
+          set -o pipefail
+          xcodebuild -project iosApp/iosApp.xcodeproj \
+            -scheme iosApp \
+            -sdk iphonesimulator \
+            -destination 'platform=iOS Simulator,name=iPhone 16,OS=18.2' \
+            -configuration Debug \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build 2>&1 | tee /tmp/xcode-sim-debug.log
+          EXIT=${PIPESTATUS[0]}
+          if [ $EXIT -ne 0 ]; then cat /tmp/xcode-sim-debug.log; exit $EXIT; fi
+      - name: Upload Xcode logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcode-debug-log
+          path: /tmp/xcode-*.log
+          if-no-files-found: warn
+          retention-days: 14
+
+  ios-prod:
+    name: ios/prod-unsigned
+    if: github.event_name == 'push' || inputs.flavor == 'all' || inputs.flavor == 'prod'
+    runs-on: macos-14
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+      - name: Select Xcode 16.2
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: "16.2"
+      - name: Build shared frameworks (release)
+        run: ./gradlew :shared:assemble --no-configuration-cache
+      - name: Build unsigned .app (iphoneos Release, no signing)
+        run: |
+          set -o pipefail
+          xcodebuild -project iosApp/iosApp.xcodeproj \
+            -scheme iosApp \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build 2>&1 | tee /tmp/xcode-prod.log
+          EXIT=${PIPESTATUS[0]}
+          if [ $EXIT -ne 0 ]; then cat /tmp/xcode-prod.log | tail -n 100; exit $EXIT; fi
+      - name: Package version-stamped unsigned IPA
+        id: ver
+        run: |
+          set -e
+          VER=$(cat VERSION)
+          SHA=$(git rev-parse --short HEAD)
+          echo "ver=$VER" >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          APP=$(find ~/Library/Developer/Xcode/DerivedData -name "iosApp.app" -path "*/Build/Products/Release-iphoneos/*" | head -n1)
+          if [ -z "$APP" ]; then APP=$(find . -path "*/Build/Products/Release-iphoneos/iosApp.app" | head -n1); fi
+          echo "Found .app: $APP"
+          test -f "$APP/iosApp" || (echo "ERROR: iosApp binary missing — empty stub"; exit 1)
+          rm -rf /tmp/Payload "/tmp/Dylan-unsigned-$VER-$SHA.ipa"
+          mkdir -p /tmp/Payload
+          cp -R "$APP" /tmp/Payload/
+          cd /tmp && zip -r "Dylan-unsigned-$VER-$SHA.ipa" Payload > /dev/null
+          shasum -a 256 "/tmp/Dylan-unsigned-$VER-$SHA.ipa" | tee /tmp/prod-unsigned.sha256
+      - name: Assert still unsigned
+        run: |
+          if codesign -d --verbose=2 "/tmp/Payload/iosApp.app" 2>&1 | grep -qi 'Authority='; then
+            echo "ERROR: prod IPA is signed — expected unsigned (sign via tools/dylan-sign)."
+            exit 1
+          fi
+          echo "Confirmed unsigned."
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dylan-ios-prod-unsigned-${{ steps.ver.outputs.ver }}-${{ steps.ver.outputs.sha }}
+          path: |
+            /tmp/Dylan-unsigned-*.ipa
+            /tmp/prod-unsigned.sha256
+          if-no-files-found: error
+          retention-days: 30
+      - name: Upload Xcode build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcode-prod-log
+          path: /tmp/xcode-*.log
+          if-no-files-found: warn
+          retention-days: 14

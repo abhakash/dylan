@@ -113,7 +113,7 @@ dylan/
 │   └── iosMain/         # DriverFactory, IosGraph, IosPlayerEngine
 ├── fixtures/            # sanitized API responses
 ├── gradle/              # libs.versions.toml (single version source)
-├── .github/workflows/   # ci.yml (lint/test/android/ios) + ios-release.yml
+├── .github/workflows/   # ci.yml (presubmit: lint/test/debug) + builds.yml (debug/prod lanes) + ios-free/release.yml
 └── config/detekt.yml
 ```
 
@@ -123,14 +123,18 @@ dylan/
 
 `ci.yml` (presubmit, `concurrency: cancel-in-progress`):
 
-- `wrapper-validation` → `lint` (ktlint+detekt+Android lint) → `test/jvm` (jvmTest+probeCi) → `android` (debug+release R8+AAB) + `ios/klib` + `ios/simulator` (`:shared:assemble` + `xcodebuild CODE_SIGNING_ALLOWED=NO`) + `gosign` (dylan-sign build/vet/test on macOS+Linux)
+- `wrapper-validation` → `lint` (ktlint+detekt+Android lint) → `test/jvm` (jvmTest+probeCi) → `android/debug` (debug APK) + `ios/klib` + `ios/simulator` (`:shared:assemble` + `xcodebuild CODE_SIGNING_ALLOWED=NO`) + `gosign` (dylan-sign build/vet/test on macOS+Linux)
 - Cache: `gradle/actions/setup-gradle` (`cache-read-only` on PRs; `GRADLE_ENCRYPTION_KEY` is set on the `lint` job cache) + `~/.konan`/DerivedData (`shared/build` intentionally uncached)
-- Artifacts: `apks` (+AAB) + `mapping.txt` + `lint-reports` + `xcode-logs` (14d)
+- Artifacts: `apks-debug` + `lint-reports` + `xcode-logs` (14d)
 - Nightly (`schedule` / manual): `nightly/probe` (probeLocal) + `nightly/contract-drift` (live vs fixtures)
 
-`ios-release.yml` (`workflow_dispatch: testflight/adhoc/simulator`) → archive → templated `exportOptions.plist` (teamID from `APPLE_TEAM_ID` secret) → TestFlight via `fastlane pilot` (fails clearly without API-key secrets); signing material trap-cleaned.
+`builds.yml` (manual `flavor: debug/prod/all` × `platform: android/ios/all`, plus auto on `v*` tags): `android/debug` (debug APK, no secrets) + `android/prod` (R8 + signed APK + AAB, keystore secrets, graceful skip when absent, apksigner guard refuses debug-signed output) + `ios/debug` (sim Debug) + `ios/prod-unsigned` (Release unsigned IPA with version stamp + sha256, asserted unsigned — sign via `tools/dylan-sign`). Prod artifacts kept 30d.
 
-Branch protection on `main`: require `lint`, `test/jvm`, `android`, `ios/klib`, `ios/simulator` (+ `gosign`) + CODEOWNERS review; release pushes need bypass allowance (see `release.yml`).
+`version.yml` (each `main` push, except bot pushes): bumps VERSION from the HEAD message (`feat:` → minor, `!:`/`BREAKING CHANGE` → major, else patch) via `tools/bump-version.sh`, syncs iOS `MARKETING_VERSION`/`CURRENT_PROJECT_VERSION`, commits `chore(version): vX.Y.Z [skip ci]`, and pushes tag `vX.Y.Z` — which triggers `builds.yml` prod lanes. Loop-safe (actor guard + `[skip ci]` + rebase-retry, serialized via concurrency group).
+
+`ios-free.yml` (manual unsigned Release IPA, same as `builds.yml: ios/prod-unsigned` standalone) and `ios-release.yml` (`workflow_dispatch: testflight/adhoc/simulator`) → archive → templated `exportOptions.plist` (teamID from `APPLE_TEAM_ID` secret) → TestFlight via `fastlane pilot` (fails clearly without API-key secrets); signing material trap-cleaned.
+
+Branch protection on `main`: require `lint`, `test/jvm`, `android/debug`, `ios/klib`, `ios/simulator` (+ `gosign`) + CODEOWNERS review; release pushes need bypass allowance (see `release.yml`).
 
 Dependabot weekly groups `ktor/compose/kotlin/sqldelight`.
 

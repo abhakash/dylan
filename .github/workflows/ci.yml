@@ -96,9 +96,11 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
-  # ── Android (debug + release R8) ──────────────────────────────────────────
-  android:
-    name: android
+  # ── Android debug (presubmit-safe: no signing secrets) ─────────────────
+  # Signed prod (R8 APK + AAB) lives in builds.yml (manual / tags), which
+  # skips gracefully without keystore secrets instead of failing presubmit.
+  android-debug:
+    name: android/debug
     needs: [lint, test]
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -113,38 +115,18 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           cache-read-only: ${{ github.ref != 'refs/heads/main' }}
-      - name: Require release keystore (fail, never silent debug fallback)
-        env:
-          ANDROID_KEYSTORE_PROPERTIES: ${{ secrets.ANDROID_KEYSTORE_PROPERTIES }}
-          ANDROID_KEYSTORE_FILE: ${{ secrets.ANDROID_KEYSTORE_FILE }}
-        run: |
-          if [ ! -f keystore.properties ]; then
-            if [ -n "$ANDROID_KEYSTORE_PROPERTIES" ]; then
-              echo "$ANDROID_KEYSTORE_PROPERTIES" | base64 --decode > keystore.properties
-              if [ -n "$ANDROID_KEYSTORE_FILE" ]; then
-                echo "$ANDROID_KEYSTORE_FILE" | base64 --decode > dylan-release.keystore
-              fi
-            else
-              echo "ERROR: keystore.properties absent and ANDROID_KEYSTORE_PROPERTIES secret unset."
-              echo "Refusing to assembleRelease with a silent debug fallback signature."
-              exit 1
-            fi
-          fi
-      - name: Assemble debug + release (R8, mapping) + bundle (AAB)
-        run: ./gradlew :androidApp:assembleDebug :androidApp:assembleRelease :androidApp:bundleRelease --no-configuration-cache
+      - name: Assemble debug
+        run: ./gradlew :androidApp:assembleDebug --no-configuration-cache
       - name: Version + checksums
         run: |
           echo "VERSION=$(cat VERSION)"
-          ls -lh androidApp/build/outputs/apk/debug/*.apk androidApp/build/outputs/apk/release/*.apk || true
-          sha256sum androidApp/build/outputs/apk/debug/*.apk androidApp/build/outputs/apk/release/*.apk 2>/dev/null || shasum -a 256 androidApp/build/outputs/apk/debug/*.apk 2>/dev/null || true
+          ls -lh androidApp/build/outputs/apk/debug/*.apk || true
+          sha256sum androidApp/build/outputs/apk/debug/*.apk 2>/dev/null || shasum -a 256 androidApp/build/outputs/apk/debug/*.apk 2>/dev/null || true
       - uses: actions/upload-artifact@v4
         with:
-          name: apks
+          name: apks-debug
           path: |
             androidApp/build/outputs/apk/debug/*.apk
-            androidApp/build/outputs/apk/release/*.apk
-            androidApp/build/outputs/mapping/release/mapping.txt
-            androidApp/build/outputs/bundle/release/*.aab
           if-no-files-found: ignore
           retention-days: 14
 

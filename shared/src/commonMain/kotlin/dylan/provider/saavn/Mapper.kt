@@ -23,9 +23,9 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.doubleOrNull
-import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
 
 private val json =
     Json {
@@ -67,7 +67,10 @@ internal fun coerceHas320(el: JsonElement?): Boolean {
 internal fun normalizePermaToken(permaUrl: String?): String? {
     val u = permaUrl?.trim()?.takeIf { it.isNotBlank() } ?: return null
     if ('/' !in u) return u
-    return u.substringAfterLast('/').substringBefore('?').substringBefore('#')
+    return u
+        .substringAfterLast('/')
+        .substringBefore('?')
+        .substringBefore('#')
         .takeIf { it.isNotBlank() } ?: u
 }
 
@@ -78,7 +81,11 @@ fun mapSong(d: SongDto): Song? {
     // mapped: post-cacheable-removal every mapped song is treated as downloadable, and
     // resolveRef presence (not rights) decides NO_SOURCE vs resolvable downstream. The
     // DTO keeps the `rights` field so lenient parsing of live payloads is unaffected.
-    val img150 = d.image.str()?.takeIf { it.isNotBlank() }.orEmpty()
+    val img150 =
+        d.image
+            .str()
+            ?.takeIf { it.isNotBlank() }
+            .orEmpty()
     val primary = primaryArtist(mi.artistMap)
     return Song(
         key = SongKey("saavn", Paths.sanitizeId(d.id)),

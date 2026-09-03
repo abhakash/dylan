@@ -1,0 +1,85 @@
+name: version
+
+# Proper semver on every commit to main.
+# - Derives the bump from the HEAD message (conventional commits):
+#     major: "BREAKING CHANGE" in body or "<type>!:" suffix (e.g. "feat!: …")
+#     minor: "feat:" / "feat(" prefix
+#     patch: everything else (fix:, chore:, docs:, …)
+# - Runs tools/bump-version.sh (bumps VERSION + syncs iOS MARKETING_VERSION /
+#   CURRENT_PROJECT_VERSION), commits as github-actions[bot] with [skip ci],
+#   and pushes an annotated tag v<ver>.
+# - The tag push triggers builds.yml prod lanes (signed Android + unsigned
+#   iOS IPA), so every main commit yields versioned prod artifacts.
+#
+# Loop safety (triple-guarded):
+#   1. job-level `if` skips bot-authored pushes,
+#   2. version commits carry `[skip ci]` (skips all workflows for that push),
+#   3. push-with-retry rebases onto concurrent version commits instead of
+#      force-pushing.
+
+# Action pinning policy: pinned to major tags (v4); see ci.yml for SHA-pinning note.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: version-main
+  cancel-in-progress: false # version bumps must serialize, never cancel
+
+jobs:
+  bump:
+    name: semver/bump
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+      - name: Decide bump from HEAD message
+        id: bump
+        run: |
+          MSG=$(git log -1 --format='%B')
+          echo "$MSG" | head -n 3
+          if echo "$MSG" | grep -qiE 'BREAKING CHANGE|^[^:]+!:'; then
+            MODE=major
+          elif echo "$MSG" | grep -qiE '^feat(\(|:)'; then
+            MODE=minor
+          else
+            MODE=patch
+          fi
+          # Never re-bump a version commit (paranoia alongside [skip ci] + actor guard).
+          if echo "$MSG" | grep -q '^chore(version):'; then
+            echo "Version commit — nothing to do."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=$MODE" >> "$GITHUB_OUTPUT"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Bump VERSION + sync iOS
+        if: steps.bump.outputs.skip != 'true'
+        run: |
+          ./tools/bump-version.sh ${{ steps.bump.outputs.mode }}
+          cat VERSION
+      - name: Commit, tag, push (retry on races)
+        if: steps.bump.outputs.skip != 'true'
+        run: |
+          VER=$(cat VERSION)
+          git add VERSION iosApp/iosApp.xcodeproj/project.pbxproj
+          git commit -m "chore(version): v$VER [skip ci]"
+          git tag -a "v$VER" -m "v$VER"
+          for i in 1 2 3; do
+            git pull --rebase origin main && git push origin HEAD:main && git push origin "v$VER" && break
+            echo "Push race (attempt $i) — rebasing and retrying…"
+            sleep 5
+          done
+          git status -sb
