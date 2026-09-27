@@ -1,6 +1,8 @@
 package dylan.config
 
 import dylan.model.Quality
+import dylan.util.Clock
+import dylan.util.SystemClock
 
 data class AppConfig(
     val apiBaseUrl: String = "https://www.jiosaavn.com/api.php",
@@ -57,4 +59,10 @@ data class AppConfig(
     val historyLimit: Int = 500,
     val searchHistoryLimit: Int = 20,
     val songsGcAgeDays: Int = 60,
+    /**
+     * Wall-clock source for every "now" comparison against a stored timestamp (LRU ordering,
+     * the reconciler grace windows, cache TTLs). Injected so those windows are deterministic in
+     * tests; production graphs leave it at [SystemClock].
+     */
+    val clock: Clock = SystemClock,
 )

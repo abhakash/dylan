@@ -30,7 +30,6 @@ import dylan.provider.SignedStream
 import dylan.repo.SettingsStore
 import dylan.util.AppDispatchers
 import dylan.util.NetClass
-import dylan.util.NetMonitor
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
 import io.ktor.client.engine.mock.respond
@@ -132,6 +131,7 @@ class OrchestratorEdgeTest {
     private var mockBody: ByteArray = ByteArray(0)
     private var mockStatus: HttpStatusCode = HttpStatusCode.OK
     private var cfg = AppConfig()
+    private val fakeNet = dylan.support.FakeNetMonitor(online = true, netClass = dylan.util.NetClass.UNMETERED)
     private val testLog =
         dylan.diag.LogBuffer(minLevel = dylan.diag.LogLevel.DEBUG).also { buf ->
             buf.bindSink { e -> println("[${e.level}] Dylan:${e.tag} ${e.msg}") }
@@ -142,7 +142,7 @@ class OrchestratorEdgeTest {
         tmp = FileSystem.SYSTEM_TEMPORARY_DIRECTORY.toString() + "/dylan-orch-${System.nanoTime()}"
         val fs = FileSystem.SYSTEM
         fs.createDirectories(tmp.toPath())
-        db = Dylan(DriverFactory("$tmp/dylan.db").createDriver())
+        db = Dylan(DriverFactory("$tmp/dylan.db", testLog).createDriver())
         disp = AppDispatchers(Dispatchers.Main, Dispatchers.Default, Dispatchers.Default, Dispatchers.Default)
         scope =
             CoroutineScope(
@@ -173,7 +173,7 @@ class OrchestratorEdgeTest {
         val fs = FileSystem.SYSTEM
         val paths = Paths(tmp.toPath() / "audio", fs)
         this.paths = paths
-        val cacheManager = CacheManager(db, fs, paths, protectedKeys, cfg, disp)
+        val cacheManager = CacheManager(db, fs, paths, protectedKeys, cfg, disp, testLog)
         downloadEngine =
             DownloadEngine(
                 db = db,
@@ -185,8 +185,8 @@ class OrchestratorEdgeTest {
                 bulk = bulk,
                 breakers = Breakers(),
                 cacheManager = cacheManager,
-                netClass = { NetClass.UNMETERED },
-                qualityPref = { Quality.BITRATE_128 },
+                netClass = { fakeNet.current() },
+                qualityPref = { cfg.defaultQuality },
                 log = testLog,
             )
         settings = SettingsStore(db, disp, cfg)
@@ -201,8 +201,9 @@ class OrchestratorEdgeTest {
                 downloads = downloadEngine,
                 cacheManager = cacheManager,
                 settings = settings,
-                net = NetMonitor(),
+                net = fakeNet,
                 protectedKeys = protectedKeys,
+                log = testLog,
             )
     }
 
@@ -229,20 +230,22 @@ class OrchestratorEdgeTest {
         return b
     }
 
-    private fun song(id: String) =
-        Song(
-            key = SongKey("saavn", id),
-            title = id,
-            subtitle = "",
-            albumId = null,
-            albumName = null,
-            artUrl150 = "",
-            artUrl500 = "",
-            durationS = 100,
-            has320 = false,
-            resolveRef = "enc-$id",
-            permaToken = null,
-        )
+    private fun song(
+        id: String,
+        has320: Boolean = false,
+    ) = Song(
+        key = SongKey("saavn", id),
+        title = id,
+        subtitle = "",
+        albumId = null,
+        albumName = null,
+        artUrl150 = "",
+        artUrl500 = "",
+        durationS = 100,
+        has320 = has320,
+        resolveRef = "enc-$id",
+        permaToken = null,
+    )
 
     private fun seedCached(id: String) {
         val key = SongKey("saavn", id)
@@ -442,6 +445,58 @@ class OrchestratorEdgeTest {
                 advanced.phase is dylan.model.Phase.Playing || advanced.phase is dylan.model.Phase.Downloading || advanced.phase is dylan.model.Phase.Resolving,
                 "natural end with uncached next must pull it down and continue",
             )
+        }
+
+    @Test
+    fun offlineNetworkSurfacesOfflineFastPathWithoutWaitingForTheDownload() =
+        runBlocking {
+            rebuildGraph(AppConfig(readyTimeoutMs = 30_000))
+            fakeNet.pushOnline(false)
+            val t0 = System.nanoTime()
+            orchestrator.submit(PlayNow(listOf(song("a")), 0))
+            val errored = awaitPhase { it.phase is dylan.model.Phase.Error }
+            val elapsedMs = (System.nanoTime() - t0) / 1_000_000
+            assertEquals(
+                dylan.model.ErrorCode.OFFLINE,
+                (errored.phase as dylan.model.Phase.Error).failure.code,
+                "an uncached track with no network must surface OFFLINE, not spin the ready timeout",
+            )
+            assertTrue(elapsedMs < 5_000, "OFFLINE must be immediate, took ${elapsedMs}ms")
+            assertTrue(
+                downloadEngine.states.value.isEmpty(),
+                "the offline fast path must not enqueue a download: ${downloadEngine.states.value}",
+            )
+        }
+
+    @Test
+    fun meteredNetworkPinsTheDownloadToTheMeteredQuality() =
+        runBlocking {
+            fakeNet.pushMetered(true)
+            orchestrator.submit(PlayNow(listOf(song("hi", has320 = true)), 0))
+            awaitPhase { it.phase is dylan.model.Phase.Playing }
+            val row = awaitCached("hi")
+            assertEquals(128L, row.bitrate, "metered must never spend cellular on a 320 kbps fetch")
+        }
+
+    @Test
+    fun unmeteredNetworkUsesThePreferredQuality() =
+        runBlocking {
+            fakeNet.pushMetered(false)
+            orchestrator.submit(PlayNow(listOf(song("hi", has320 = true)), 0))
+            awaitPhase { it.phase is dylan.model.Phase.Playing }
+            val row = awaitCached("hi")
+            assertEquals(320L, row.bitrate, "unmetered must honour the 320 kbps preference")
+        }
+
+    private suspend fun awaitCached(id: String): dylan.db.Cached_files =
+        withTimeout(20_000) {
+            while (true) {
+                val row = db.dylanQueries.selectCached("saavn", id).executeAsOneOrNull()
+                if (row != null) return@withTimeout row
+                delay(25)
+            }
+            @Suppress("UNREACHABLE_CODE")
+            error("unreachable")
         }
 
     @Test

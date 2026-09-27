@@ -134,14 +134,28 @@ object Probe {
         mode: String,
         fast: Boolean,
     ): Int {
-        cfg = AppConfig()
+        // DYLAN_PROBE_API_BASE / DYLAN_PROBE_WS_URL let the gate be pointed at a
+        // dead endpoint on purpose — that is the only way to prove probeCi is
+        // capable of returning non-zero.
+        val defaults = AppConfig()
+        cfg =
+            defaults.copy(
+                apiBaseUrl = System.getenv("DYLAN_PROBE_API_BASE") ?: defaults.apiBaseUrl,
+                wsSearchUrl = System.getenv("DYLAN_PROBE_WS_URL") ?: defaults.wsSearchUrl,
+            )
         api = apiClient(CIO.create(), cfg)
         bulk = bulkClient(CIO.create(), cfg)
         provider = SaavnProvider(api, cfg)
 
-        val songs = seedSongs()
+        // S1-S3 need no catalog seed; skipping it also keeps the nightly off the
+        // three extra search+home round trips the local mode uses.
         if (mode == "ci") return structural()
 
+        val songs =
+            runCatching { seedSongs() }.getOrElse {
+                rows += Row("P0", "M0", "FAIL", "catalog seed failed: ${it::class.simpleName}: ${it.message}")
+                return report(mode, gates = true)
+            }
         val sample = songs.filter { it.resolveRef != null && it.durationS > 0 }
 
         check("P5", "M1", "resolveRef coverage over ${songs.size} sampled songs (warn-only)") {
@@ -376,13 +390,13 @@ object Probe {
     }
 
     private suspend fun structural(): Int {
-        check("S1", "CI", "api.php returns JSON (search.getResults live shape)") {
+        check("S1", "M0", "api.php returns JSON (search.getResults live shape)") {
             val paged = provider.search("arijit", 1)
             require(paged.items.isNotEmpty(), "live search mapped zero songs")
             "mapped ${paged.items.size} songs, first='${paged.items.first().title}'"
         }
 
-        check("S2", "CI", "autocomplete reachable over plain HTTP") {
+        check("S2", "M0", "autocomplete reachable over plain HTTP") {
             val text =
                 api
                     .get(cfg.apiBaseUrl) {
@@ -393,13 +407,13 @@ object Probe {
             require(text.trimStart().startsWith("{"), "not JSON")
             "ok"
         }
-        check("S3", "CI", "WS handshake reachable") {
+        check("S3", "M0", "WS handshake reachable") {
             val s = withTimeoutOrNull(8_000) { api.wsClientForProbe(cfg).webSocketSession(cfg.wsSearchUrl) }
             requireNotNull(s) { "handshake failed" }
             s.close()
             "reachable"
         }
-        return report("ci", gates = false)
+        return report("ci", gates = true)
     }
 
     private fun report(
@@ -421,9 +435,10 @@ object Probe {
         println("---\n${rows.size - failed}/${rows.size} checks passed")
         val blocking = if (gates) rows.filter { it.status == "FAIL" && it.gate == "M0" } else emptyList()
         if (blocking.isNotEmpty()) println("GATING FAILURES: ${blocking.joinToString { it.id }}")
-        val file = File("tools/probe-results.md")
-        file.appendText(
-            "\n## $stamp mode=$mode\n" +
+        // Notes carry live API response bodies — never write them to a tracked file.
+        val dir = File("build/reports/probe").also { it.mkdirs() }
+        File(dir, "probe-results.md").appendText(
+            "\n## $stamp mode=$mode gates=$gates\n" +
                 rows.joinToString("\n") { "| ${it.id} | ${it.gate} | ${it.status} | ${it.note.replace("|", "/")} |" } +
                 "\n",
         )

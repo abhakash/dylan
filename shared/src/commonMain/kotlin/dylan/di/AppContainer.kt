@@ -8,6 +8,7 @@ import dylan.db.DriverFactory
 import dylan.db.Dylan
 import dylan.db.RecentAlbums
 import dylan.diag.LogBuffer
+import dylan.diag.LogLevel
 import dylan.download.Breakers
 import dylan.download.DownloadEngine
 import dylan.model.Song
@@ -48,11 +49,16 @@ class AppContainer(
     val netMonitor: NetMonitor,
     httpEngine: HttpClientEngine,
     private val engineFactory: () -> dylan.playback.PlayerEngine,
-    logMinLevel: dylan.diag.LogLevel = dylan.diag.LogLevel.INFO,
+    /**
+     * The shared ring. A platform graph can pass its own [log] instead so it can bind a console
+     * mirror, wire its CoroutineExceptionHandler and hand the same buffer to DriverFactory
+     * before the SQLite open — a schema wipe used to land in a dead 8-entry ring nobody read.
+     */
+    logMinLevel: LogLevel = LogLevel.INFO,
+    val log: LogBuffer = LogBuffer(minLevel = logMinLevel),
     /** App version for the boot log line — keep in sync with root VERSION. */
     val version: String = APP_VERSION,
 ) {
-    val log = LogBuffer(minLevel = logMinLevel)
     val protectedKeys = MutableStateFlow<Set<SongKey>>(emptySet())
     val fs: FileSystem = FileSystem.SYSTEM
     val paths = Paths((baseDir.toPath() / "audio"), fs)
@@ -67,7 +73,7 @@ class AppContainer(
         )
 
     init {
-        log.bindSink(fileLog::accept)
+        log.bindSink("file", fileLog::accept)
     }
 
     val db = Dylan(driverFactory.createDriver())
@@ -86,7 +92,7 @@ class AppContainer(
         }
 
     val provider = SaavnProvider(api, cfg)
-    val searchChannel = SaavnSearchChannel(api, ws, cfg, scope, log)
+    val searchChannel = SaavnSearchChannel(api, ws, cfg, scope, disp, log)
 
     val cacheManager = CacheManager(db, fs, paths, protectedKeys, cfg, disp, log)
     val downloads =
@@ -119,7 +125,7 @@ class AppContainer(
             protectedKeys = protectedKeys,
             log = log,
         )
-    val favorites = Favorites(db, disp, cacheManager)
+    val favorites = Favorites(db, disp, cacheManager, cfg.clock)
     val history = History(db, disp)
     val searchHistory = SearchHistoryRepo(db, disp, cfg)
     val homeCache = HomeCacheRepo(db, disp, cfg)
@@ -166,16 +172,16 @@ class AppContainer(
             }
         bgJobs +=
             scope.launch(disp.io) {
-                val t0 = dylan.util.nowMs()
+                val t0 = cfg.clock.nowMs()
                 runCatching { reconciler.run() }
-                    .onSuccess { log.i("reconciler", "boot sweep done in ${dylan.util.nowMs() - t0}ms") }
+                    .onSuccess { log.i("reconciler", "boot sweep done in ${cfg.clock.nowMs() - t0}ms") }
                     .onFailure { log.e("reconciler", it.message ?: "failed") }
                 orchestrator.restoreFromSnapshot()
             }
         bgJobs +=
             scope.launch(disp.io) {
                 while (true) {
-                    val now = dylan.util.nowMs()
+                    val now = cfg.clock.nowMs()
                     val last = runCatching { settings.get("gc_last_ms")?.toLongOrNull() ?: 0L }.getOrDefault(0L)
                     val weekMs = 7L * 24 * 60 * 60 * 1000
                     if (now - last >= weekMs) {
@@ -189,7 +195,7 @@ class AppContainer(
                         runCatching { settings.put("gc_last_ms", now.toString()) }
                     }
                     val nextLast = runCatching { settings.get("gc_last_ms")?.toLongOrNull() ?: now }.getOrDefault(now)
-                    val delayMs = (nextLast + weekMs - dylan.util.nowMs()).coerceAtLeast(60_000L)
+                    val delayMs = (nextLast + weekMs - cfg.clock.nowMs()).coerceAtLeast(60_000L)
                     kotlinx.coroutines.delay(delayMs)
                 }
             }
@@ -230,7 +236,7 @@ class AppContainer(
         for ((key, row) in candidates) {
             if (key in cacheManager.inFlightJobKeys.value) continue
             // Dedupe: if already at 320 or upgrade intent pending, DownloadEngine will no-op.
-            downloads.enqueue(dylan.download.DownloadJob(key, dylan.download.Priority.QUALITY_UPGRADE, 320, dylan.util.nowMs()))
+            downloads.enqueue(dylan.download.DownloadJob(key, dylan.download.Priority.QUALITY_UPGRADE, 320, cfg.clock.nowMs()))
         }
         return candidates.size
     }

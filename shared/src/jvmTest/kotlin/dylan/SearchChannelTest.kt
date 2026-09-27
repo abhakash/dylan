@@ -1,19 +1,23 @@
 package dylan
 
 import dylan.config.AppConfig
+import dylan.diag.LogBuffer
 import dylan.search.CorrelationMode
 import dylan.search.SaavnSearchChannel
 import dylan.search.WsSessionLike
+import dylan.util.AppDispatchers
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
 import io.ktor.client.engine.mock.respondOk
 import io.ktor.websocket.Frame
 import io.ktor.websocket.readText
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runTest
+import kotlin.coroutines.ContinuationInterceptor
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -53,6 +57,16 @@ class SearchChannelTest {
 
     private val noopHttp = HttpClient(MockEngine { _ -> respondOk("{}") }) { }
 
+    // onBackground() must land on the same lane the WS engine runs on, or the channel's own
+    // state is racy in the test exactly as it was on device.
+    private fun TestScope.stateLane(): AppDispatchers =
+        AppDispatchers(
+            Dispatchers.Default,
+            Dispatchers.Default,
+            Dispatchers.Default,
+            coroutineContext[ContinuationInterceptor] as? kotlinx.coroutines.CoroutineDispatcher ?: Dispatchers.Default,
+        )
+
     private fun TestScope.newChannel(
         cfg: AppConfig = AppConfig(),
         replyDelayMs: Long = 50,
@@ -64,6 +78,8 @@ class SearchChannelTest {
                 wsClient = HttpClient(MockEngine { _ -> error("ws engine unused: connectBlock is faked") }) { },
                 cfg = cfg,
                 scope = backgroundScope,
+                disp = stateLane(),
+                log = LogBuffer(),
             )
         ch.connectBlock = { FakeSession(backgroundScope, replyDelayMs).apply(sessionInit) }
         return ch

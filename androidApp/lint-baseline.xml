@@ -1,5 +1,27 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<issues format="6" by="lint 8.13.2" type="baseline" client="gradle" dependencies="false" name="AGP (8.13.2)" variant="all" version="8.13.2">
+<issues format="6" by="lint 8.13.2" type="baseline" client="gradle" dependencies="true" name="AGP (8.13.2)" variant="all" version="8.13.2">
+
+    <issue
+        id="UnknownIssueId"
+        message="Unknown issue id &quot;MissingPreview&quot;"
+        errorLine1="        disable += &quot;MissingPreview&quot;"
+        errorLine2="                    ~~~~~~~~~~~~~~">
+        <location
+            file="build.gradle.kts"
+            line="130"
+            column="21"/>
+    </issue>
+
+    <issue
+        id="UnknownIssueId"
+        message="Unknown issue id &quot;MissingPreview&quot;"
+        errorLine1="        disable += &quot;MissingPreview&quot;"
+        errorLine2="                    ~~~~~~~~~~~~~~">
+        <location
+            file="build.gradle.kts"
+            line="130"
+            column="21"/>
+    </issue>
 
     <issue
         id="OldTargetApi"
@@ -8,8 +30,404 @@
         errorLine2="        ~~~~~~~~~~~~~~">
         <location
             file="build.gradle.kts"
-            line="72"
+            line="89"
             column="9"/>
+    </issue>
+
+    <issue
+        id="AndroidGradlePluginVersion"
+        message="A newer version of com.android.application than 8.13.2 is available: 9.4.1"
+        errorLine1="agp = &quot;8.13.2&quot;"
+        errorLine2="      ~~~~~~~~">
+        <location
+            file="../gradle/libs.versions.toml"
+            line="3"
+            column="7"/>
+    </issue>
+
+    <issue
+        id="AndroidGradlePluginVersion"
+        message="A newer version of com.android.library than 8.13.2 is available: 9.4.1"
+        errorLine1="agp = &quot;8.13.2&quot;"
+        errorLine2="      ~~~~~~~~">
+        <location
+            file="../gradle/libs.versions.toml"
+            line="3"
+            column="7"/>
+    </issue>
+
+    <issue
+        id="GradleDependency"
+        message="A newer version of `compileSdkVersion` than 34 is available: 36"
+        errorLine1="    compileSdk = 34"
+        errorLine2="    ~~~~~~~~~~~~~~~">
+        <location
+            file="build.gradle.kts"
+            line="90"
+            column="5"/>
+    </issue>
+
+    <issue
+        id="GradleDependency"
+        message="A newer version of androidx.media3:media3-exoplayer than 1.11.0 is available: 1.11.1"
+        errorLine1="media3 = &quot;1.11.0&quot;"
+        errorLine2="         ~~~~~~~~">
+        <location
+            file="../gradle/libs.versions.toml"
+            line="10"
+            column="10"/>
+    </issue>
+
+    <issue
+        id="GradleDependency"
+        message="A newer version of androidx.media3:media3-session than 1.11.0 is available: 1.11.1"
+        errorLine1="media3 = &quot;1.11.0&quot;"
+        errorLine2="         ~~~~~~~~">
+        <location
+            file="../gradle/libs.versions.toml"
+            line="10"
+            column="10"/>
+    </issue>
+
+    <issue
+        id="GradleDependency"
+        message="A newer version of androidx.compose:compose-bom than 2025.12.01 is available: 2026.09.00"
+        errorLine1="composeBom = &quot;2025.12.01&quot;"
+        errorLine2="             ~~~~~~~~~~~~">
+        <location
+            file="../gradle/libs.versions.toml"
+            line="12"
+            column="14"/>
+    </issue>
+
+    <issue
+        id="GradleDependency"
+        message="A newer version of androidx.lifecycle:lifecycle-runtime-compose than 2.10.0 is available: 2.11.0"
+        errorLine1="lifecycle = &quot;2.10.0&quot;"
+        errorLine2="            ~~~~~~~~">
+        <location
+            file="../gradle/libs.versions.toml"
+            line="13"
+            column="13"/>
+    </issue>
+
+    <issue
+        id="GradleDependency"
+        message="A newer version of androidx.activity:activity-compose than 1.12.4 is available: 1.13.0"
+        errorLine1="activityCompose = &quot;1.12.4&quot;"
+        errorLine2="                  ~~~~~~~~">
+        <location
+            file="../gradle/libs.versions.toml"
+            line="14"
+            column="19"/>
+    </issue>
+
+    <issue
+        id="GradleDependency"
+        message="A newer version of androidx.core:core-ktx than 1.18.0 is available: 1.19.1"
+        errorLine1="coreKtx = &quot;1.18.0&quot;"
+        errorLine2="          ~~~~~~~~">
+        <location
+            file="../gradle/libs.versions.toml"
+            line="15"
+            column="11"/>
+    </issue>
+
+    <issue
+        id="GradleDependency"
+        message="A newer version of androidx.concurrent:concurrent-futures-ktx than 1.2.0 is available: 1.3.0"
+        errorLine1="concurrentFutures = &quot;1.2.0&quot;"
+        errorLine2="                    ~~~~~~~">
+        <location
+            file="../gradle/libs.versions.toml"
+            line="16"
+            column="21"/>
+    </issue>
+
+    <issue
+        id="NewerVersionAvailable"
+        message="A newer version of org.jetbrains.kotlin.android than 2.4.10 is available: 2.4.20"
+        errorLine1="kotlin = &quot;2.4.10&quot;"
+        errorLine2="         ~~~~~~~~">
+        <location
+            file="../gradle/libs.versions.toml"
+            line="2"
+            column="10"/>
+    </issue>
+
+    <issue
+        id="NewerVersionAvailable"
+        message="A newer version of org.jetbrains.kotlin.multiplatform than 2.4.10 is available: 2.4.20"
+        errorLine1="kotlin = &quot;2.4.10&quot;"
+        errorLine2="         ~~~~~~~~">
+        <location
+            file="../gradle/libs.versions.toml"
+            line="2"
+            column="10"/>
+    </issue>
+
+    <issue
+        id="NewerVersionAvailable"
+        message="A newer version of org.jetbrains.kotlin.plugin.compose than 2.4.10 is available: 2.4.20"
+        errorLine1="kotlin = &quot;2.4.10&quot;"
+        errorLine2="         ~~~~~~~~">
+        <location
+            file="../gradle/libs.versions.toml"
+            line="2"
+            column="10"/>
+    </issue>
+
+    <issue
+        id="NewerVersionAvailable"
+        message="A newer version of org.jetbrains.kotlin.plugin.serialization than 2.4.10 is available: 2.4.20"
+        errorLine1="kotlin = &quot;2.4.10&quot;"
+        errorLine2="         ~~~~~~~~">
+        <location
+            file="../gradle/libs.versions.toml"
+            line="2"
+            column="10"/>
+    </issue>
+
+    <issue
+        id="NewerVersionAvailable"
+        message="A newer version of io.ktor:ktor-client-cio than 3.5.2 is available: 3.6.0"
+        errorLine1="ktor = &quot;3.5.2&quot;"
+        errorLine2="       ~~~~~~~">
+        <location
+            file="../gradle/libs.versions.toml"
+            line="6"
+            column="8"/>
+    </issue>
+
+    <issue
+        id="NewerVersionAvailable"
+        message="A newer version of io.ktor:ktor-client-content-negotiation than 3.5.2 is available: 3.6.0"
+        errorLine1="ktor = &quot;3.5.2&quot;"
+        errorLine2="       ~~~~~~~">
+        <location
+            file="../gradle/libs.versions.toml"
+            line="6"
+            column="8"/>
+    </issue>
+
+    <issue
+        id="NewerVersionAvailable"
+        message="A newer version of io.ktor:ktor-client-core than 3.5.2 is available: 3.6.0"
+        errorLine1="ktor = &quot;3.5.2&quot;"
+        errorLine2="       ~~~~~~~">
+        <location
+            file="../gradle/libs.versions.toml"
+            line="6"
+            column="8"/>
+    </issue>
+
+    <issue
+        id="NewerVersionAvailable"
+        message="A newer version of io.ktor:ktor-client-darwin than 3.5.2 is available: 3.6.0"
+        errorLine1="ktor = &quot;3.5.2&quot;"
+        errorLine2="       ~~~~~~~">
+        <location
+            file="../gradle/libs.versions.toml"
+            line="6"
+            column="8"/>
+    </issue>
+
+    <issue
+        id="NewerVersionAvailable"
+        message="A newer version of io.ktor:ktor-client-mock than 3.5.2 is available: 3.6.0"
+        errorLine1="ktor = &quot;3.5.2&quot;"
+        errorLine2="       ~~~~~~~">
+        <location
+            file="../gradle/libs.versions.toml"
+            line="6"
+            column="8"/>
+    </issue>
+
+    <issue
+        id="NewerVersionAvailable"
+        message="A newer version of io.ktor:ktor-client-okhttp than 3.5.2 is available: 3.6.0"
+        errorLine1="ktor = &quot;3.5.2&quot;"
+        errorLine2="       ~~~~~~~">
+        <location
+            file="../gradle/libs.versions.toml"
+            line="6"
+            column="8"/>
+    </issue>
+
+    <issue
+        id="NewerVersionAvailable"
+        message="A newer version of io.ktor:ktor-client-websockets than 3.5.2 is available: 3.6.0"
+        errorLine1="ktor = &quot;3.5.2&quot;"
+        errorLine2="       ~~~~~~~">
+        <location
+            file="../gradle/libs.versions.toml"
+            line="6"
+            column="8"/>
+    </issue>
+
+    <issue
+        id="NewerVersionAvailable"
+        message="A newer version of io.ktor:ktor-serialization-kotlinx-json than 3.5.2 is available: 3.6.0"
+        errorLine1="ktor = &quot;3.5.2&quot;"
+        errorLine2="       ~~~~~~~">
+        <location
+            file="../gradle/libs.versions.toml"
+            line="6"
+            column="8"/>
+    </issue>
+
+    <issue
+        id="NewerVersionAvailable"
+        message="A newer version of app.cash.sqldelight than 2.0.2 is available: 2.4.0"
+        errorLine1="sqldelight = &quot;2.0.2&quot;"
+        errorLine2="             ~~~~~~~">
+        <location
+            file="../gradle/libs.versions.toml"
+            line="7"
+            column="14"/>
+    </issue>
+
+    <issue
+        id="NewerVersionAvailable"
+        message="A newer version of app.cash.sqldelight:android-driver than 2.0.2 is available: 2.4.0"
+        errorLine1="sqldelight = &quot;2.0.2&quot;"
+        errorLine2="             ~~~~~~~">
+        <location
+            file="../gradle/libs.versions.toml"
+            line="7"
+            column="14"/>
+    </issue>
+
+    <issue
+        id="NewerVersionAvailable"
+        message="A newer version of app.cash.sqldelight:coroutines-extensions than 2.0.2 is available: 2.4.0"
+        errorLine1="sqldelight = &quot;2.0.2&quot;"
+        errorLine2="             ~~~~~~~">
+        <location
+            file="../gradle/libs.versions.toml"
+            line="7"
+            column="14"/>
+    </issue>
+
+    <issue
+        id="NewerVersionAvailable"
+        message="A newer version of app.cash.sqldelight:native-driver than 2.0.2 is available: 2.4.0"
+        errorLine1="sqldelight = &quot;2.0.2&quot;"
+        errorLine2="             ~~~~~~~">
+        <location
+            file="../gradle/libs.versions.toml"
+            line="7"
+            column="14"/>
+    </issue>
+
+    <issue
+        id="NewerVersionAvailable"
+        message="A newer version of app.cash.sqldelight:runtime than 2.0.2 is available: 2.4.0"
+        errorLine1="sqldelight = &quot;2.0.2&quot;"
+        errorLine2="             ~~~~~~~">
+        <location
+            file="../gradle/libs.versions.toml"
+            line="7"
+            column="14"/>
+    </issue>
+
+    <issue
+        id="NewerVersionAvailable"
+        message="A newer version of app.cash.sqldelight:sqlite-driver than 2.0.2 is available: 2.4.0"
+        errorLine1="sqldelight = &quot;2.0.2&quot;"
+        errorLine2="             ~~~~~~~">
+        <location
+            file="../gradle/libs.versions.toml"
+            line="7"
+            column="14"/>
+    </issue>
+
+    <issue
+        id="NewerVersionAvailable"
+        message="A newer version of com.squareup.okio:okio than 3.18.1 is available: 3.18.2"
+        errorLine1="okio = &quot;3.18.1&quot;"
+        errorLine2="       ~~~~~~~~">
+        <location
+            file="../gradle/libs.versions.toml"
+            line="8"
+            column="8"/>
+    </issue>
+
+    <issue
+        id="NewerVersionAvailable"
+        message="A newer version of io.coil-kt.coil3:coil-compose than 3.5.0 is available: 3.6.3"
+        errorLine1="coil = &quot;3.5.0&quot;"
+        errorLine2="       ~~~~~~~">
+        <location
+            file="../gradle/libs.versions.toml"
+            line="9"
+            column="8"/>
+    </issue>
+
+    <issue
+        id="NewerVersionAvailable"
+        message="A newer version of io.coil-kt.coil3:coil-network-okhttp than 3.5.0 is available: 3.6.3"
+        errorLine1="coil = &quot;3.5.0&quot;"
+        errorLine2="       ~~~~~~~">
+        <location
+            file="../gradle/libs.versions.toml"
+            line="9"
+            column="8"/>
+    </issue>
+
+    <issue
+        id="NewerVersionAvailable"
+        message="A newer version of org.jetbrains.kotlinx:kotlinx-datetime than 0.6.1 is available: 0.8.0"
+        errorLine1="datetime = &quot;0.6.1&quot;"
+        errorLine2="           ~~~~~~~">
+        <location
+            file="../gradle/libs.versions.toml"
+            line="11"
+            column="12"/>
+    </issue>
+
+    <issue
+        id="NewerVersionAvailable"
+        message="A newer version of org.jetbrains.kotlinx:kotlinx-collections-immutable than 0.5.1 is available: 0.5.2"
+        errorLine1="collectionsImmutable = &quot;0.5.1&quot;"
+        errorLine2="                       ~~~~~~~">
+        <location
+            file="../gradle/libs.versions.toml"
+            line="17"
+            column="24"/>
+    </issue>
+
+    <issue
+        id="RestrictedApi"
+        message="ResolvableFuture.create can only be called from within the same library group prefix (referenced groupId=`androidx.concurrent` with prefix androidx from groupId=`dylan`)"
+        errorLine1="                                    .create&lt;MediaSession.MediaItemsWithStartPosition>()"
+        errorLine2="                                     ~~~~~~">
+        <location
+            file="src/main/kotlin/dylan/android/media/DylanMediaService.kt"
+            line="195"
+            column="38"/>
+    </issue>
+
+    <issue
+        id="RestrictedApi"
+        message="ResolvableFuture.set can only be called from within the same library group prefix (referenced groupId=`androidx.concurrent` with prefix androidx from groupId=`dylan`)"
+        errorLine1="                            c.scope.launch { f.set(computeResumptionItems()) }"
+        errorLine2="                                               ~~~">
+        <location
+            file="src/main/kotlin/dylan/android/media/DylanMediaService.kt"
+            line="196"
+            column="48"/>
+    </issue>
+
+    <issue
+        id="RestrictedApi"
+        message="ResolvableFuture.set can only be called from within the same library group prefix (referenced groupId=`androidx.concurrent` with prefix androidx from groupId=`dylan`)"
+        errorLine1="                            c.scope.launch { f.set(computeResumptionItems()) }"
+        errorLine2="                                                   ~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/kotlin/dylan/android/media/DylanMediaService.kt"
+            line="196"
+            column="52"/>
     </issue>
 
     <issue
@@ -19,19 +437,41 @@
         errorLine2="             ~~~~~~~~~">
         <location
             file="src/main/kotlin/dylan/android/media/ExoPlayerEngine.kt"
-            line="54"
+            line="124"
             column="14"/>
     </issue>
 
     <issue
-        id="ExportedService"
-        message="Exported service does not require permission"
-        errorLine1="        &lt;service"
-        errorLine2="         ~~~~~~~">
+        id="AutoboxingStateCreation"
+        message="Prefer `mutableIntStateOf` instead of `mutableStateOf`"
+        errorLine1="    var songPage by remember { mutableStateOf(1) }"
+        errorLine2="                               ~~~~~~~~~~~~~~">
         <location
-            file="src/main/AndroidManifest.xml"
-            line="33"
-            column="10"/>
+            file="src/main/kotlin/dylan/android/ui/screens/SearchScreen.kt"
+            line="76"
+            column="32"/>
+    </issue>
+
+    <issue
+        id="AutoboxingStateCreation"
+        message="Prefer `mutableIntStateOf` instead of `mutableStateOf`"
+        errorLine1="    var albumPage by remember { mutableStateOf(1) }"
+        errorLine2="                                ~~~~~~~~~~~~~~">
+        <location
+            file="src/main/kotlin/dylan/android/ui/screens/SearchScreen.kt"
+            line="79"
+            column="33"/>
+    </issue>
+
+    <issue
+        id="AutoboxingStateCreation"
+        message="Prefer `mutableIntStateOf` instead of `mutableStateOf`"
+        errorLine1="    var artistPage by remember { mutableStateOf(1) }"
+        errorLine2="                                 ~~~~~~~~~~~~~~">
+        <location
+            file="src/main/kotlin/dylan/android/ui/screens/SearchScreen.kt"
+            line="82"
+            column="34"/>
     </issue>
 
 </issues>

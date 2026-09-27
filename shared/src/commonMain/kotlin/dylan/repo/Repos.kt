@@ -8,7 +8,8 @@ import dylan.model.Song
 import dylan.model.SongKey
 import dylan.playback.decodeSnapshot
 import dylan.util.AppDispatchers
-import dylan.util.nowMs
+import dylan.util.Clock
+import dylan.util.SystemClock
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.withContext
 
@@ -24,9 +25,10 @@ import kotlinx.coroutines.withContext
 suspend fun Dylan.admitSongs(
     disp: AppDispatchers,
     songs: List<Song>,
+    clock: Clock = SystemClock,
 ) = withContext(disp.dbLane) {
     if (songs.isEmpty()) return@withContext
-    val now = nowMs()
+    val now = clock.nowMs()
     transaction {
         songs.forEach { song ->
             val r = song.toRow(now)
@@ -68,11 +70,12 @@ class Favorites(
     private val db: Dylan,
     private val disp: AppDispatchers,
     private val cacheManager: CacheManager,
+    private val clock: Clock = SystemClock,
 ) {
     val version = MutableStateFlow(0)
 
     suspend fun add(song: Song) {
-        val now = nowMs()
+        val now = clock.nowMs()
         withContext(disp.dbLane) {
             db.transaction {
                 // Guard like admitSong — with FK=ON a plain INSERT OR REPLACE on songs would
@@ -156,7 +159,7 @@ class SearchHistoryRepo(
             val key = display.trim().lowercase()
             if (key.isNotEmpty()) {
                 db.transaction {
-                    db.dylanQueries.upsertSearchHistory(key, display.trim(), nowMs())
+                    db.dylanQueries.upsertSearchHistory(key, display.trim(), cfg.clock.nowMs())
                     db.dylanQueries.trimSearchHistory(cfg.searchHistoryLimit.toLong())
                 }
             }
@@ -184,19 +187,19 @@ class HomeCacheRepo(
     suspend fun getJson(key: String): String? =
         withContext(disp.dbLane) {
             val row = db.dylanQueries.getHomeCache(key).executeAsOneOrNull() ?: return@withContext null
-            if (nowMs() - row.fetched_at_ms > cfg.homeCacheTtlMs) null else row.json
+            if (cfg.clock.nowMs() - row.fetched_at_ms > cfg.homeCacheTtlMs) null else row.json
         }
 
     suspend fun putJson(
         key: String,
         json: String,
     ) = withContext(disp.dbLane) {
-        db.dylanQueries.putHomeCache(key, json, nowMs())
+        db.dylanQueries.putHomeCache(key, json, cfg.clock.nowMs())
     }
 
     suspend fun evictWeekly() =
         withContext(disp.dbLane) {
-            db.dylanQueries.evictStaleHomeCache(nowMs() - cfg.homeCacheTtlMs)
+            db.dylanQueries.evictStaleHomeCache(cfg.clock.nowMs() - cfg.homeCacheTtlMs)
             val keepKeys = db.dylanQueries.newestHomeKeys(cfg.homeCacheRowCap.toLong()).executeAsList()
             if (keepKeys.isNotEmpty()) db.dylanQueries.evictHomeCacheNotIn(keepKeys)
         }
@@ -206,7 +209,7 @@ suspend fun Dylan.weeklyGc(
     disp: AppDispatchers,
     cfg: AppConfig,
 ) = withContext(disp.dbLane) {
-    val cutoff = nowMs() - cfg.songsGcAgeDays * 24L * 60 * 60 * 1000
+    val cutoff = cfg.clock.nowMs() - cfg.songsGcAgeDays * 24L * 60 * 60 * 1000
     val rawResume = dylanQueries.getSetting("resume").executeAsOneOrNull()
     val protect = rawResume?.let { decodeSnapshot(it)?.items?.map { r -> "${r.provider}:${r.songId}" } } ?: emptyList<String>()
     dylanQueries.gcSongs(cutoff, protect.ifEmpty { listOf("::") })

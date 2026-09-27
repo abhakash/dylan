@@ -18,7 +18,7 @@ import dylan.model.SongKey
 import dylan.model.message
 import dylan.repo.SettingsStore
 import dylan.util.AppDispatchers
-import dylan.util.nowMs
+import dylan.util.NetMonitor
 import kotlinx.collections.immutable.PersistentList
 import kotlinx.collections.immutable.toPersistentList
 import kotlinx.coroutines.CoroutineScope
@@ -46,10 +46,11 @@ class Orchestrator(
     private val downloads: DownloadEngine,
     private val cacheManager: CacheManager,
     private val settings: SettingsStore,
-    private val net: dylan.util.NetMonitor,
+    private val net: NetMonitor,
     private val protectedKeys: kotlinx.coroutines.flow.MutableStateFlow<Set<SongKey>>,
-    private val log: dylan.diag.LogBuffer = dylan.diag.LogBuffer.SILENT,
+    private val log: dylan.diag.LogBuffer,
 ) {
+    private val clock = cfg.clock
     private val inbox = Channel<Msg>(Channel.UNLIMITED)
     private val _state = MutableStateFlow(PlayerState())
     val state: kotlinx.coroutines.flow.StateFlow<PlayerState> = _state
@@ -414,7 +415,7 @@ class Orchestrator(
                 val cachedBits = cur?.let { c -> cachedRow(c.key)?.bitrate?.toInt() } ?: 0
                 if (cur != null && s.phase is Phase.Playing && i.q.bits > cachedBits) {
                     downloads.enqueue(
-                        DownloadJob(cur.key, Priority.QUALITY_UPGRADE, i.q.bits, nowMs()),
+                        DownloadJob(cur.key, Priority.QUALITY_UPGRADE, i.q.bits, clock.nowMs()),
                     )
                 }
             }
@@ -424,7 +425,7 @@ class Orchestrator(
     private fun transportable(p: Phase) = QueueStateMachine.transportable(p)
 
     private fun debounceNav(): Boolean {
-        val now = nowMs()
+        val now = clock.nowMs()
         if (now - lastNavMs < cfg.navDebounceMs) return true
         lastNavMs = now
         return false
@@ -559,7 +560,7 @@ class Orchestrator(
             }
             val metered = net.current() == dylan.util.NetClass.METERED
             val bits = if (metered) cfg.meteredQuality.bits else settings.qualityPref().bits
-            downloads.enqueue(DownloadJob(song.key, Priority.USER_NOW, bits, nowMs()))
+            downloads.enqueue(DownloadJob(song.key, Priority.USER_NOW, bits, clock.nowMs()))
             if (gen != playGeneration) return
             _state.value = _state.value.copy(phase = Phase.Downloading(song.key))
             log.d("play", "downloading gen=$gen idx=$index key=${song.key.provider}:${song.key.songId} bits=$bits")
@@ -688,7 +689,7 @@ class Orchestrator(
             val metered = net.current() == dylan.util.NetClass.METERED
             if (metered && cfg.prefetchCellularTracks == 0) return@launch
             val bits = if (metered) cfg.meteredQuality.bits else settings.qualityPref().bits
-            downloads.enqueue(DownloadJob(next.key, Priority.PREFETCH_NEXT, bits, nowMs()))
+            downloads.enqueue(DownloadJob(next.key, Priority.PREFETCH_NEXT, bits, clock.nowMs()))
         }
     }
 
@@ -821,7 +822,7 @@ class Orchestrator(
     }
 
     private suspend fun onTrackStarted(song: Song) {
-        val now = nowMs()
+        val now = clock.nowMs()
         publishProtected()
         if (!(lastHistoryKey == song.key && now - lastHistoryAt < 30 * 60_000L)) {
             withContext(disp.dbLane) {
@@ -862,7 +863,7 @@ class Orchestrator(
                 var lastWall = 0L
                 var listened = 0L
                 e.positionFlow.collect { pos ->
-                    val wall = nowMs()
+                    val wall = clock.nowMs()
                     if (_state.value.phase is Phase.Playing && _state.value.current?.key == song.key && lastWall > 0) {
                         val dPos = pos - lastPos
                         val dWall = wall - lastWall
@@ -983,7 +984,7 @@ class Orchestrator(
                     if (song.has320) 1L else 0L,
                     song.resolveRef,
                     song.permaToken,
-                    nowMs(),
+                    clock.nowMs(),
                 )
             }
         }

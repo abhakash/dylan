@@ -15,7 +15,18 @@ ktlint {
 }
 
 detekt {
+    buildUponDefaultConfig = true
+    allRules = false
     config.setFrom(rootProject.files("config/detekt.yml"))
+    source.setFrom(
+        "src/commonMain/kotlin",
+        "src/jvmMain/kotlin",
+        "src/androidMain/kotlin",
+        "src/iosMain/kotlin",
+        "src/commonTest/kotlin",
+        "src/jvmTest/kotlin",
+    )
+    baseline = rootProject.file("config/detekt-baseline.xml")
 }
 
 kotlin {
@@ -111,7 +122,7 @@ tasks.register<JavaExec>("probeLocal") {
 
 tasks.register<JavaExec>("probeCi") {
     group = "probe"
-    description = "Structural-only probe for hosted nightly (D21)"
+    description = "Live-network structural probe (S1-S3) with M0 gating — nightly only, never presubmit"
     classpath = files(layout.buildDirectory.dir("classes/kotlin/jvm/main"), jvmCompilation.runtimeDependencyFiles)
     mainClass.set("dylan.probe.ProbeMainKt")
     args("ci")
@@ -123,7 +134,7 @@ val jvmTestCompilation = kotlin.targets["jvm"].compilations["test"]
 
 tasks.register<JavaExec>("contractDrift") {
     group = "probe"
-    description = "Live-vs-fixture contract drift report over search/album/topSearches/trending"
+    description = "Live-vs-fixture contract drift gate over 8 endpoints — nightly/manual only, never presubmit"
     classpath =
         files(
             layout.buildDirectory.dir("classes/kotlin/jvm/main"),
@@ -131,6 +142,7 @@ tasks.register<JavaExec>("contractDrift") {
             jvmTestCompilation.runtimeDependencyFiles,
         )
     mainClass.set("dylan.tools.ContractDriftKt")
+    systemProperty("dylan.fixturesDir", rootProject.file("fixtures").absolutePath)
     workingDir = rootDir
     dependsOn(jvmTestCompilation.compileTaskProvider)
 }

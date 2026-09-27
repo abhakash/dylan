@@ -175,7 +175,7 @@ class DownloadEngineTest {
         tmp = FileSystem.SYSTEM_TEMPORARY_DIRECTORY.toString() + "/dylan-eng-${System.nanoTime()}"
         val fs = FileSystem.SYSTEM
         fs.createDirectories(tmp.toPath())
-        db = Dylan(DriverFactory("$tmp/dylan.db").createDriver())
+        db = Dylan(DriverFactory("$tmp/dylan.db", testLog).createDriver())
         val key = SongKey("saavn", "s1")
         db.dylanQueries.insertSong(key.provider, key.songId, "s1", "", null, null, "", "", 100L, 1L, "enc-ref", null, 0L)
         provider = FakeProvider(ArrayDeque(listOf(200)))
@@ -205,7 +205,7 @@ class DownloadEngineTest {
 
     private fun buildEngine() {
         val fs = FileSystem.SYSTEM
-        val cacheManager = CacheManager(db, fs, Paths(audioDir, fs), protectedKeys, cfg, disp)
+        val cacheManager = CacheManager(db, fs, Paths(audioDir, fs), protectedKeys, cfg, disp, testLog)
         engine =
             DownloadEngine(
                 db = db,

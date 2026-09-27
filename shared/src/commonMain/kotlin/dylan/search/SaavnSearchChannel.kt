@@ -4,6 +4,7 @@ import dylan.config.AppConfig
 import dylan.model.MiniEntity
 import dylan.provider.saavn.mapSuggestionPayload
 import dylan.provider.saavn.mapSuggestions
+import dylan.util.AppDispatchers
 import io.ktor.client.HttpClient
 import io.ktor.client.plugins.websocket.DefaultClientWebSocketSession
 import io.ktor.client.plugins.websocket.webSocketSession
@@ -44,7 +45,8 @@ class SaavnSearchChannel(
     private val wsClient: HttpClient,
     private val cfg: AppConfig,
     private val scope: CoroutineScope,
-    private val log: dylan.diag.LogBuffer = dylan.diag.LogBuffer.SILENT,
+    private val disp: AppDispatchers,
+    private val log: dylan.diag.LogBuffer,
 ) : SearchChannel {
     var correlationMode = CorrelationMode.ORDERED
 
@@ -80,11 +82,16 @@ class SaavnSearchChannel(
             override suspend fun close() = this@toLike.close(CloseReason(CloseReason.Codes.NORMAL, "cycle"))
         }
 
+    /**
+     * iOS calls this from `.inactive`, so it runs on the caller's (main) thread while the WS
+     * engine keeps mutating `session` / `sentQueries` on the state lane. The whole body has to
+     * land on that lane — clearing `session` from the caller was the DI-2 race.
+     */
     fun onBackground() {
-        scope.launch {
+        scope.launch(disp.state) {
             runCatching { session?.close() }
+            session = null
         }
-        session = null
     }
 
     override suspend fun suggest(query: String): List<MiniEntity> {

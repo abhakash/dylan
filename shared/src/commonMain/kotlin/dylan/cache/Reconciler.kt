@@ -7,7 +7,6 @@ import dylan.download.DownloadJob
 import dylan.download.Priority
 import dylan.model.SongKey
 import dylan.util.AppDispatchers
-import dylan.util.nowMs
 import kotlinx.coroutines.withContext
 import okio.FileSystem
 
@@ -19,11 +18,13 @@ class Reconciler(
     private val disp: AppDispatchers,
     private val engine: DownloadEngine,
     private val cacheManager: CacheManager,
-    private val log: dylan.diag.LogBuffer = dylan.diag.LogBuffer.SILENT,
+    private val log: dylan.diag.LogBuffer,
 ) {
+    private val clock = cfg.clock
+
     suspend fun run() =
         withContext(disp.io) {
-            val t0 = nowMs()
+            val t0 = clock.nowMs()
             val now = t0
             val rows = withContext(disp.dbLane) { db.dylanQueries.selectAllCached().executeAsList() }
             val knownFinals = rows.map { paths.final(SongKey(it.provider, it.song_id), it.bitrate.toInt(), it.ext) }.toSet()
@@ -86,6 +87,6 @@ class Reconciler(
             }
 
             cacheManager.enforceBudget(netNewBytes = 0)
-            log.i("reconciler", "sweep: files=${survivingFinals.size} parts=${parts.size} intents=${intents.size} resumed=${intents.count { SongKey(it.provider, it.song_id) !in cachedKeys }} ms=${nowMs() - t0}")
+            log.i("reconciler", "sweep: files=${survivingFinals.size} parts=${parts.size} intents=${intents.size} resumed=${intents.count { SongKey(it.provider, it.song_id) !in cachedKeys }} ms=${clock.nowMs() - t0}")
         }
 }

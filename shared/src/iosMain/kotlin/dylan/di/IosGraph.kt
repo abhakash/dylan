@@ -6,6 +6,9 @@ import dylan.bridge.PlayerStateAdapter
 import dylan.bridge.PositionAdapter
 import dylan.config.AppConfig
 import dylan.db.DriverFactory
+import dylan.diag.LogBuffer
+import dylan.diag.LogLevel
+import dylan.diag.logBufferExceptionHandler
 import dylan.download.DownloadJob
 import dylan.download.Priority
 import dylan.model.DylanFailure
@@ -22,8 +25,7 @@ import dylan.playback.NativeAudioOutput
 import dylan.repo.toSong
 import dylan.search.SaavnSearchChannel
 import dylan.util.AppDispatchers
-import dylan.util.NetMonitor
-import dylan.util.nowMs
+import dylan.util.IosNetMonitor
 import io.ktor.client.engine.darwin.Darwin
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -53,6 +55,7 @@ data class CachedSongInfo(
 class IosSearchBridge internal constructor(
     private val channel: SaavnSearchChannel,
     private val scope: CoroutineScope,
+    private val log: LogBuffer,
 ) {
     fun warmUp() {
         channel.warmUp()
@@ -69,7 +72,10 @@ class IosSearchBridge internal constructor(
     /** Latest answered query with its suggestions; empty pair until the first answer lands. */
     fun subscribeSuggestions(onEach: (String, List<MiniEntity>) -> Unit): KotlinSubscription =
         FlowAdapter(channel.suggestions.map { it ?: ("" to emptyList()) }, scope)
-            .subscribe(onEach = { p -> onEach(p.first, p.second) })
+            .subscribe(
+                onEach = { p -> onEach(p.first, p.second) },
+                onError = { t -> log.e("bridge", "suggestions collect failed: ${t.message}") },
+            )
 }
 
 /**
@@ -92,11 +98,12 @@ class IosGraph private constructor(
     private val disp: AppDispatchers,
     private val scope: CoroutineScope,
     val container: AppContainer,
+    private val net: IosNetMonitor,
 ) {
     private var engine: IosPlayerEngine? = null
 
     /** Search-tab entry point: WS warm-up + render-on-arrival suggestions (§6.4). */
-    val search: IosSearchBridge = IosSearchBridge(container.searchChannel, scope)
+    val search: IosSearchBridge = IosSearchBridge(container.searchChannel, scope, container.log)
 
     /** Toast surface for Swift; every toast is also mirrored into the LogBuffer. */
     var onToast: ((String) -> Unit)? = null
@@ -107,7 +114,7 @@ class IosGraph private constructor(
     fun attachAudio(output: NativeAudioOutput) {
         detachEngine()
         val e =
-            IosPlayerEngine(output, scope, disp.main).also { engine = it }
+            IosPlayerEngine(output, scope, disp.main, container.log).also { engine = it }
         container.orchestrator.attachEngine(e)
     }
 
@@ -120,12 +127,12 @@ class IosGraph private constructor(
 
     /** NWPathMonitor pushes here from Swift (D14: isExpensive || isConstrained). */
     fun pushMetered(isMetered: Boolean) {
-        container.netMonitor.pushMetered(isMetered)
+        net.pushMetered(isMetered)
     }
 
     /** NWPathMonitor pushes here from Swift (path.status == .satisfied). */
     fun pushOnline(isOnline: Boolean) {
-        container.netMonitor.pushOnline(isOnline)
+        net.pushOnline(isOnline)
     }
 
     fun onBackground() {
@@ -232,7 +239,7 @@ class IosGraph private constructor(
     suspend fun enqueueBulkDownloads(songs: List<Song>) {
         if (songs.isEmpty()) return
         val bits = container.settings.qualityPref().bits
-        val now = nowMs()
+        val now = cfg.clock.nowMs()
         songs.forEach { container.downloads.enqueue(DownloadJob(it.key, Priority.USER_BULK, bits, now)) }
         container.cacheManager.enforceBudget(netNewBytes = 0)
     }
@@ -241,7 +248,7 @@ class IosGraph private constructor(
     suspend fun enqueueDownloadNow(song: Song) {
         val metered = container.netMonitor.current() == dylan.util.NetClass.METERED
         val bits = if (metered) cfg.meteredQuality.bits else container.settings.qualityPref().bits
-        container.downloads.enqueue(DownloadJob(song.key, Priority.USER_NOW, bits, nowMs()))
+        container.downloads.enqueue(DownloadJob(song.key, Priority.USER_NOW, bits, cfg.clock.nowMs()))
     }
 
     suspend fun clearCacheExcludingProtected(): Long = container.cacheManager.clearCacheExcludingProtected()
@@ -279,39 +286,51 @@ class IosGraph private constructor(
          * SupervisorJob shared between graph and container so a reconciler throw cannot kill one
          * half of the graph while leaving the other alive.
          */
-        fun create(baseDir: String): IosGraph {
+        fun create(
+            baseDir: String,
+            logMinLevel: LogLevel = LogLevel.INFO,
+        ): IosGraph {
             val cfg = AppConfig()
-            // Dispatchers.IO does not exist on Native — the Default worker pool backs io/dbLane/state.
+            // `Dispatchers.IO` is declared in kotlinx-coroutines' concurrent+native source set,
+            // but on Native its Dispatchers member is `internal` (DefaultIoScheduler) and the
+            // member shadows the public extension property, so user code cannot reach it — see
+            // kotlin/native/src/Dispatchers.kt in kotlinx.coroutines. The shared worker pool is
+            // therefore what backs `io` here, as on the JVM test target. The lane views are named
+            // so a thread dump says which lane a thread belongs to.
             val disp =
                 AppDispatchers(
                     main = Dispatchers.Main,
                     io = Dispatchers.Default,
-                    dbLane = Dispatchers.Default.limitedParallelism(1),
-                    state = Dispatchers.Default.limitedParallelism(1),
+                    dbLane = Dispatchers.Default.limitedParallelism(1, "dbLane"),
+                    state = Dispatchers.Default.limitedParallelism(1, "state"),
                 )
+            // Built before the graph so the DB open, the CEH and the console mirror all share
+            // one buffer — the file trail is the record, NSLog is only a mirror.
+            val log = LogBuffer(minLevel = logMinLevel)
+            log.bindSink { e -> platform.Foundation.NSLog("Dylan:%@ %@", e.tag, e.msg) }
             val stateJob = kotlinx.coroutines.SupervisorJob()
-            val ceh =
-                kotlinx.coroutines.CoroutineExceptionHandler { _, t ->
-                    platform.Foundation.NSLog("dylan:scope %@", t.message ?: t.toString())
-                }
+            val ceh = logBufferExceptionHandler(log, "scope") { m, _ -> platform.Foundation.NSLog("dylan:scope %@", m) }
             val sharedScope = CoroutineScope(stateJob + disp.state + ceh)
+            val net = IosNetMonitor()
             val graph =
                 IosGraph(
                     cfg = cfg,
                     disp = disp,
                     scope = sharedScope,
+                    net = net,
                     container =
                         AppContainer(
                             cfg = cfg,
                             disp = disp,
                             scope = sharedScope,
                             baseDir = baseDir,
-                            driverFactory = DriverFactory(baseDir),
-                            netMonitor = NetMonitor(),
+                            driverFactory = DriverFactory(baseDir, log),
+                            netMonitor = net,
                             httpEngine = Darwin.create(),
                             engineFactory = {
                                 throw IllegalStateException("iOS engines are built by IosGraph.attachAudio")
                             },
+                            log = log,
                         ),
                 )
             graph.container.orchestrator.toast =

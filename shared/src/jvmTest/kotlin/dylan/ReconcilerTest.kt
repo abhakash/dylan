@@ -6,6 +6,8 @@ import dylan.cache.Reconciler
 import dylan.config.AppConfig
 import dylan.db.DriverFactory
 import dylan.db.Dylan
+import dylan.diag.LogBuffer
+import dylan.diag.LogLevel
 import dylan.download.Breakers
 import dylan.download.DownloadEngine
 import dylan.model.Quality
@@ -31,13 +33,14 @@ class ReconcilerTest {
     private lateinit var reconciler: Reconciler
     private val disp = AppDispatchers(Dispatchers.Main, Dispatchers.Default, Dispatchers.Default, Dispatchers.Default)
     private val cfg = AppConfig()
+    private val testLog = LogBuffer(minLevel = LogLevel.DEBUG)
 
     @BeforeTest
     fun setup() {
         tmp = FileSystem.SYSTEM_TEMPORARY_DIRECTORY.toString() + "/dylan-rec-${System.nanoTime()}"
         val fs = FileSystem.SYSTEM
         fs.createDirectories(tmp.toPath())
-        db = Dylan(DriverFactory("$tmp/dylan.db").createDriver())
+        db = Dylan(DriverFactory("$tmp/dylan.db", testLog).createDriver())
         val provider =
             object : MusicProvider {
                 override suspend fun search(
@@ -59,7 +62,7 @@ class ReconcilerTest {
                 ) = null
             }
         val paths = Paths(tmp.toPath() / "audio", fs)
-        val cm = CacheManager(db, fs, paths, MutableStateFlow(emptySet()), cfg, disp)
+        val cm = CacheManager(db, fs, paths, MutableStateFlow(emptySet()), cfg, disp, testLog)
         engine =
             DownloadEngine(
                 db = db,
@@ -77,8 +80,9 @@ class ReconcilerTest {
                 cacheManager = cm,
                 netClass = { dylan.util.NetClass.UNMETERED },
                 qualityPref = { Quality.BITRATE_128 },
+                log = testLog,
             )
-        reconciler = Reconciler(db, fs, paths, cfg, disp, engine, cm)
+        reconciler = Reconciler(db, fs, paths, cfg, disp, engine, cm, testLog)
     }
 
     @AfterTest

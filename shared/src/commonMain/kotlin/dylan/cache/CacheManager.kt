@@ -21,7 +21,7 @@ class CacheManager(
     val protectedKeys: StateFlow<Set<SongKey>>,
     private val cfg: AppConfig,
     private val disp: AppDispatchers,
-    private val log: dylan.diag.LogBuffer = dylan.diag.LogBuffer.SILENT,
+    private val log: dylan.diag.LogBuffer,
 ) {
     val inFlightJobKeys = MutableStateFlow<Set<SongKey>>(emptySet())
     val upgradeSourceKeys = MutableStateFlow<Set<SongKey>>(emptySet())

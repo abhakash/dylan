@@ -11,7 +11,7 @@ import platform.Foundation.NSUserDomainMask
 
 actual class DriverFactory(
     private val dbPath: String,
-    private val log: LogBuffer = LogBuffer.SILENT,
+    private val log: LogBuffer,
 ) {
     actual fun createDriver(): SqlDriver {
         try {

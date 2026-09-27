@@ -1,32 +1,71 @@
+# Dylan detekt profile.
+#
+# This is a DELTA on top of the packaged defaults: the build sets
+# `buildUponDefaultConfig = true`, so every rule not named here keeps its
+# detekt default (`active: true`, default thresholds). Do not re-declare a rule
+# as `active: false` to silence a finding — add it to config/detekt-baseline.xml
+# so the debt is visible and the rule stays armed for new code.
+
 build:
   maxIssues: 0
 
-complexity:
-  TooManyFunctions:
-    active: false
-  LongMethod:
-    active: false
-  LongParameterList:
-    active: false
-  CyclomaticComplexMethod:
-    active: false
+config:
+  validation: true
 
+# ── complexity ───────────────────────────────────────────────────────────
+complexity:
+  # Thresholds are set above the detekt defaults (60/15) on purpose: the shared
+  # module already has ~9k LOC of long, branch-heavy provider/repo code. These
+  # numbers stop *new* growth without flagging the whole existing surface.
+  LongMethod:
+    active: true
+    threshold: 80
+  CyclomaticComplexMethod:
+    active: true
+    threshold: 20
+    ignoreSingleWhenExpression: true
+    ignoreSimpleWhenEntries: true
+  LongParameterList:
+    active: true
+    functionThreshold: 12
+    constructorThreshold: 12
+    ignoreDefaultParameters: true
+  TooManyFunctions:
+    active: true
+    thresholdInFiles: 25
+    thresholdInClasses: 25
+    thresholdInObjects: 25
+    thresholdInInterfaces: 15
+    thresholdInEnums: 15
+    ignoreOverridden: true
+
+# ── style ────────────────────────────────────────────────────────────────
 style:
   MagicNumber:
-    active: false
+    active: true
+    # Named arguments, annotations (@Composable and friends), ranges, enums and
+    # `const val` are the legitimate uses in this codebase.
+    ignoreAnnotation: true
+    ignoreNamedArgument: true
+    ignoreRanges: true
+    ignoreEnums: true
+    ignoreConstantDeclaration: true
+    ignoreCompanionObjectPropertyDeclaration: true
   ReturnCount:
-    active: false
-  UnusedPrivateMember:
-    ignoreAnnotated:
-      - 'Preview'
+    active: true
+    max: 4
+    excludeGuardClauses: true
 
 naming:
+  # Composable factories are PascalCase by language contract.
   FunctionNaming:
     ignoreAnnotated:
       - 'Composable'
   TopLevelPropertyNaming:
     active: false
 
+# ── exceptions ───────────────────────────────────────────────────────────
 exceptions:
   TooGenericExceptionCaught:
-    active: false
+    active: true
+    allowedExceptionNameRegex: '_|(ignore|expected|catchAll|swallow).*'

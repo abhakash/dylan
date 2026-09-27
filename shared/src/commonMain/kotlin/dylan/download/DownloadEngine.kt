@@ -14,9 +14,9 @@ import dylan.model.SongKey
 import dylan.provider.MusicProvider
 import dylan.provider.SignedStream
 import dylan.util.AppDispatchers
+import dylan.util.DISK_UNKNOWN
 import dylan.util.NetClass
 import dylan.util.freeDiskBytes
-import dylan.util.nowMs
 import io.ktor.client.HttpClient
 import io.ktor.client.request.header
 import io.ktor.client.request.prepareGet
@@ -117,7 +117,7 @@ class DownloadEngine(
     private val netClass: () -> NetClass,
     private val qualityPref: suspend () -> Quality,
     private val otherEndpointsHealthy: () -> Boolean = { true },
-    private val log: dylan.diag.LogBuffer = dylan.diag.LogBuffer.SILENT,
+    private val log: dylan.diag.LogBuffer,
 ) {
     private val supervisor = SupervisorJob()
     private val scope =
@@ -128,6 +128,7 @@ class DownloadEngine(
                     dylan.util.logErr("dylan-engine: ${t.message ?: t::class.simpleName}")
                 },
         )
+    private val clock = cfg.clock
     private val mutex = Mutex()
     private val wake = Channel<Unit>(Channel.CONFLATED)
     private val queue = mutableListOf<DownloadJob>()
@@ -171,7 +172,7 @@ class DownloadEngine(
                     victim = execJob
                     preemptedKey.store(execKey)
                     queue.removeAll { it.key == execKey }
-                    queue.add(execJob.copy(enqueuedAtMs = nowMs()))
+                    queue.add(execJob.copy(enqueuedAtMs = clock.nowMs()))
                     queue.sortWith(compareBy({ it.reason.ordinal }, { it.enqueuedAtMs }))
                 }
             }
@@ -301,7 +302,7 @@ class DownloadEngine(
 
     private suspend fun runJob(job: DownloadJob) {
         val key = job.key
-        val t0 = nowMs()
+        val t0 = clock.nowMs()
         log.d("dl", "exec ${key.provider}:${key.songId} prio=${job.reason} bits=${job.bitrate}")
         cacheManager.inFlightJobKeys.update { it + key }
         var resolveCount = 0
@@ -356,7 +357,7 @@ class DownloadEngine(
                             }
                         if (entry != null && (entry.bitrate >= q.bits.toLong() || netClass() == NetClass.METERED)) {
                             log.i("dl", "dedupe-hit ${key.provider}:${key.songId} cached=${entry.bitrate} wanted=${q.bits}")
-                            cacheManager.touch(key, nowMs())
+                            cacheManager.touch(key, clock.nowMs())
                             states.update { it + (key to JobState.Done(entry.bytes, entry.bitrate.toInt())) }
                             progress.update { it - key }
                             dropIntent(key)
@@ -372,7 +373,7 @@ class DownloadEngine(
                         val netNew = max(0L, (expectedB * cfg.estimatePadding).toLong() - partB)
                         cacheManager.enforceBudget(netNewBytes = netNew)
                         val free = freeDiskBytes(paths.audioDir.toString())
-                        if (free >= 0 && free < max(cfg.diskFloorBytes, 2 * netNew)) {
+                        if (free != DISK_UNKNOWN && free < max(cfg.diskFloorBytes, 2 * netNew)) {
                             return fail(key, DylanFailure(ErrorCode.STORAGE, key))
                         }
                         step = Step.RESOLVE
@@ -404,7 +405,7 @@ class DownloadEngine(
                     Step.REQUEST -> {
                         val s = signed ?: return fail(key, DylanFailure(ErrorCode.NO_SOURCE, key))
                         val breaker = breakers.forHost(Url(s.url).host)
-                        val now = nowMs()
+                        val now = clock.nowMs()
                         if (breaker.paused(now)) {
                             delay(min(breaker.pausedUntilMs - now, 5_000))
                             continue
@@ -476,7 +477,7 @@ class DownloadEngine(
                                 when (val o = outcome) {
                                     is HttpOutcome.RateLimited -> {
                                         log.w("dl", "429/503 ${key.provider}:${key.songId} retryAfter=${o.retryAfterMs ?: 5_000}ms")
-                                        breaker.pauseUntil(nowMs() + (o.retryAfterMs ?: 5_000))
+                                        breaker.pauseUntil(clock.nowMs() + (o.retryAfterMs ?: 5_000))
                                         if (job.reason == Priority.USER_NOW) return fail(key, DylanFailure(ErrorCode.RATE_LIMITED, key))
                                         requeueLater(job, o.retryAfterMs ?: 5_000)
                                         return
@@ -558,7 +559,7 @@ class DownloadEngine(
                         val tmp = paths.part(key, q.bits)
                         val finalPath = paths.final(key, q.bits, ext)
                         val finalSize = sizeOf(tmp)
-                        val now = nowMs()
+                        val now = clock.nowMs()
                         val favorited =
                             withContext(disp.dbLane) {
                                 db.dylanQueries.isFavorite(key.provider, key.songId).executeAsOne()
@@ -570,7 +571,7 @@ class DownloadEngine(
                         if (prev != null && prev.bitrate == q.bits.toLong() && prev.ext == ext && prev.bytes == finalSize) {
                             dylan.util.fsRename(tmp.toString(), finalPath.toString())
                             dropIntent(key)
-                            log.i("dl", "done(refetch) ${key.provider}:${key.songId} bytes=$finalSize ms=${nowMs() - t0}")
+                            log.i("dl", "done(refetch) ${key.provider}:${key.songId} bytes=$finalSize ms=${clock.nowMs() - t0}")
                             states.update { it + (key to JobState.Done(finalSize, q.bits)) }
                             progress.update { it - key }
                             return
@@ -605,7 +606,7 @@ class DownloadEngine(
                         }
                         cacheManager.enforceBudget(netNewBytes = 0, exemptKeys = setOf(key))
                         dropIntent(key)
-                        log.i("dl", "done ${key.provider}:${key.songId} bits=${q.bits} ext=$ext bytes=$finalSize ms=${nowMs() - t0}")
+                        log.i("dl", "done ${key.provider}:${key.songId} bits=${q.bits} ext=$ext bytes=$finalSize ms=${clock.nowMs() - t0}")
                         states.update { it + (key to JobState.Done(finalSize, q.bits)) }
                         progress.update { it - key }
                         return
@@ -738,7 +739,7 @@ class DownloadEngine(
         loaded: Long,
         denom: Long,
     ) {
-        val n = nowMs()
+        val n = clock.nowMs()
         val last = lastProgressEmit[key] ?: 0L
         if (n - last < 250 && loaded < denom) return
         lastProgressEmit[key] = n

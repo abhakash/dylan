@@ -1,14 +1,29 @@
 package dylan.db
 
 import android.content.Context
+import android.util.Log
 import app.cash.sqldelight.db.SqlDriver
 import app.cash.sqldelight.driver.android.AndroidSqliteDriver
 import dylan.diag.LogBuffer
+import dylan.diag.LogLevel
 import java.io.File
+
+private const val DRIVER_LOG_CAPACITY = 64
+
+/**
+ * The DB is opened from `Application.onCreate`, i.e. before any shared LogBuffer exists, so
+ * unlike every other component this one still needs a default. It is a real (if small) ring
+ * with a logcat mirror, not a silently-discarding buffer: "open failed, wiping dev DB" has to
+ * be visible even while the app graph is still building.
+ */
+private fun bootLog(): LogBuffer =
+    LogBuffer(capacity = DRIVER_LOG_CAPACITY, minLevel = LogLevel.WARN).also { buf ->
+        buf.bindSink { e -> Log.e("Dylan:${e.tag}", e.msg) }
+    }
 
 actual class DriverFactory(
     private val ctx: Context,
-    private val log: LogBuffer = LogBuffer.SILENT,
+    private val log: LogBuffer = bootLog(),
 ) {
     actual fun createDriver(): SqlDriver {
         try {

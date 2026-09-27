@@ -51,7 +51,7 @@ jobs:
           cache-encryption-key: ${{ secrets.GRADLE_ENCRYPTION_KEY }}
           gradle-home-cache-cleanup: true
       - name: ktlint + detekt + Android lint
-        run: ./gradlew ktlintCheck detekt :androidApp:lintDebug --continue
+        run: ./gradlew ktlintCheck detekt :androidApp:lintDebug
       - name: Upload lint reports
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -80,9 +80,13 @@ jobs:
       - uses: gradle/actions/setup-gradle@0b6dd653ba04f4f93bf581ec31e66cbd7dcb644d # v4
         with:
           cache-read-only: ${{ github.ref != 'refs/heads/main' }}
-      - name: JVM tests + probeCi (hermetic, rerun)
-        # contractDrift is nightly-only (live catalog) — see nightly/contract-drift.
-        run: ./gradlew :shared:jvmTest --rerun-tasks :shared:probeCi
+      - name: JVM tests (hermetic)
+        # --rerun re-executes ONLY the test task, so results are never stale while
+        # the Kotlin compilation stays cached. --rerun-tasks would force a full
+        # main+test recompile on every run for no correctness gain.
+        # contractDrift + probeCi are nightly-only (live catalog) — see
+        # nightly/contract-drift and nightly/probe.
+        run: ./gradlew :shared:jvmTest --rerun
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -117,9 +121,13 @@ jobs:
         run: ./gradlew :androidApp:assembleDebug
       - name: Version + checksums
         run: |
+          set -euo pipefail
           echo "VERSION=$(cat VERSION)"
-          ls -lh androidApp/build/outputs/apk/debug/*.apk || true
-          sha256sum androidApp/build/outputs/apk/debug/*.apk 2>/dev/null || shasum -a 256 androidApp/build/outputs/apk/debug/*.apk 2>/dev/null || true
+          shopt -s nullglob
+          apks=(androidApp/build/outputs/apk/debug/*.apk)
+          if [ "${#apks[@]}" -eq 0 ]; then echo "MISSING ARTIFACT: no debug APK produced"; exit 1; fi
+          ls -lh "${apks[@]}"
+          sha256sum "${apks[@]}"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: apks-debug
@@ -185,6 +193,10 @@ jobs:
           restore-keys: ios-${{ runner.os }}-
       - name: Build shared frameworks
         run: ./gradlew :shared:assemble
+      - name: Kotlin/Native simulator unit tests
+        # iosSimulatorArm64Test executes shared's commonTest on the simulator —
+        # without it the whole commonTest source set is compile-only on iOS.
+        run: ./gradlew :shared:iosSimulatorArm64Test
       - name: xcodebuild simulator (CODE_SIGNING_ALLOWED=NO)
         run: |
           set -o pipefail
@@ -248,6 +260,11 @@ jobs:
           cache-read-only: ${{ github.ref != 'refs/heads/main' }}
       - name: Fast live probe (catalog sanity)
         run: ./gradlew :shared:probeLocal -PprobeFast
+      - name: Live structural probe (S1-S3, M0-gated)
+        # S1-S3 hit api.php, the plain-HTTP autocomplete fallback and the WS
+        # handshake, so this is nightly/manual only — never a presubmit gate.
+        # probeCi exits non-zero when any M0 check fails.
+        run: ./gradlew :shared:probeCi
 
   # ── Nightly contract drift (live vs fixtures; NOT presubmit) ────────────
   nightly-contract-drift:
@@ -264,5 +281,7 @@ jobs:
       - uses: gradle/actions/setup-gradle@0b6dd653ba04f4f93bf581ec31e66cbd7dcb644d # v4
         with:
           cache-read-only: ${{ github.ref != 'refs/heads/main' }}
-      - name: Live contract drift (nightly-only)
+      - name: Live contract drift (nightly-only, gating)
+        # Non-zero on NEW_FIELD / TYPE_DRIFT / MISSING_FIELD / MAPPING_LOSS or on
+        # any unreachable endpoint. Not presubmit: it hits the live JioSaavn API.
         run: ./gradlew :shared:contractDrift

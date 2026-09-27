@@ -16,7 +16,6 @@ import dylan.provider.saavn.dto.ArtistDto
 import dylan.provider.saavn.dto.AuthDto
 import dylan.provider.saavn.dto.ResultsDto
 import dylan.provider.saavn.dto.SongDto
-import dylan.util.nowMs
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.request.get
@@ -52,7 +51,7 @@ class SaavnProvider(
         ttlMs: Long,
     ): T? {
         val e = mem[key] ?: return null
-        if (nowMs() - e.at > ttlMs) {
+        if (cfg.clock.nowMs() - e.at > ttlMs) {
             mem.remove(key)
             return null
         }
@@ -65,7 +64,7 @@ class SaavnProvider(
         key: String,
         value: Any,
     ) {
-        mem[key] = Entry(value, nowMs())
+        mem[key] = Entry(value, cfg.clock.nowMs())
         if (mem.size > memCap) {
             val it = mem.entries.iterator()
             if (it.hasNext()) {

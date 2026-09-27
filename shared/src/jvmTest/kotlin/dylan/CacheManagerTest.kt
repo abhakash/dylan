@@ -5,6 +5,8 @@ import dylan.cache.Paths
 import dylan.config.AppConfig
 import dylan.db.DriverFactory
 import dylan.db.Dylan
+import dylan.diag.LogBuffer
+import dylan.diag.LogLevel
 import dylan.model.SongKey
 import dylan.util.AppDispatchers
 import kotlinx.coroutines.Dispatchers
@@ -26,14 +28,15 @@ class CacheManagerTest {
     private val protectedKeys = MutableStateFlow<Set<SongKey>>(emptySet())
     private val disp = AppDispatchers(Dispatchers.Main, Dispatchers.Default, Dispatchers.Default, Dispatchers.Default)
     private val cfg = AppConfig(cacheMaxBytes = 25L * 1024 * 1024)
+    private val log = LogBuffer(minLevel = LogLevel.DEBUG)
 
     @BeforeTest
     fun setup() {
         tmp = okio.FileSystem.SYSTEM_TEMPORARY_DIRECTORY.toString() + "/dylan-test-${System.nanoTime()}"
         val fs = FileSystem.SYSTEM
         fs.createDirectories(tmp.toPath())
-        db = Dylan(DriverFactory("$tmp/dylan.db").createDriver())
-        cacheManager = CacheManager(db, fs, Paths(tmp.toPath() / "audio", fs), protectedKeys, cfg, disp)
+        db = Dylan(DriverFactory("$tmp/dylan.db", log).createDriver())
+        cacheManager = CacheManager(db, fs, Paths(tmp.toPath() / "audio", fs), protectedKeys, cfg, disp, log)
         var i = 0
 
         fun song(id: String) =

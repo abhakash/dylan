@@ -15,8 +15,10 @@ import okio.buffer
  * Persistent, size-rotated log file appender — the "diagnose a week later" trail.
  *
  * Design:
- *  - Async: entries land in a DROP_OLDEST channel; a single writer drains + batches.
- *    Logging never blocks or backpressures a hot path.
+ *  - Async: [LogBuffer.Entry]s land in a DROP_OLDEST channel; a single writer drains + batches.
+ *    [accept] is a `trySend` of an already-immutable entry — line formatting, the UTC instant
+ *    and the UTF-8 byte accounting all happen on the writer coroutine, never on whichever lane
+ *    logged. That matters because the busiest producer is the single-threaded `state` lane.
  *  - Rotation: current file [dir/dylan.log.0] rolls to .1, .2 … up to [filesToKeep];
  *    oldest deleted. On disk at most (filesToKeep + 1) files ≈
  *    (filesToKeep + 1) × maxBytesPerFile.
@@ -36,9 +38,14 @@ class FileLogSink(
     private val maxBytesPerFile: Long = FILE_BYTES_DEFAULT,
     private val filesToKeep: Int = 2,
 ) {
-    private val queue = Channel<String>(capacity = 1_024, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+    private val queue = Channel<LogBuffer.Entry>(capacity = 1_024, onBufferOverflow = BufferOverflow.DROP_OLDEST)
     private var out: okio.BufferedSink? = null
     private var written = 0L
+
+    // Reused staging buffer: exact UTF-8 byte accounting with no per-line ByteArray. okio's
+    // fluent writeUtf8 returns the sink, not the byte count, so this is the allocation-free
+    // replacement for `line.encodeToByteArray().size`.
+    private val staging = okio.Buffer()
 
     // Serializes drainLoop writes vs explicit flush() so background/stop flushes
     // can never interleave bytes with the writer coroutine on the shared sink.
@@ -49,9 +56,12 @@ class FileLogSink(
         scope.launch { drainLoop() }
     }
 
-    /** Called by LogBuffer for every entry that passed minLevel. Never throws. */
+    /**
+     * Called by LogBuffer for every entry that passed minLevel. Never throws, never formats,
+     * never allocates more than the channel slot: this runs on the logging lane.
+     */
     fun accept(e: LogBuffer.Entry) {
-        queue.trySend(format(e))
+        queue.trySend(e)
     }
 
     /**
@@ -65,7 +75,7 @@ class FileLogSink(
             writeMutex.withLock {
                 while (true) {
                     val next = queue.tryReceive().getOrNull() ?: break
-                    writeLineLocked(next)
+                    writeEntryLocked(next)
                 }
                 runCatching { out?.flush() }
             }
@@ -82,18 +92,18 @@ class FileLogSink(
         while (true) {
             val first = queue.receive()
             writeMutex.withLock {
-                writeLineLocked(first)
+                writeEntryLocked(first)
                 // Batch drain: swallow whatever piled up within the window, then flush once.
                 while (true) {
                     val next = withTimeoutOrNull(FLUSH_IDLE_MS) { queue.receive() } ?: break
-                    writeLineLocked(next)
+                    writeEntryLocked(next)
                 }
                 runCatching { out?.flush() }
             }
         }
     }
 
-    private fun writeLineLocked(line: String) {
+    private fun writeEntryLocked(e: LogBuffer.Entry) {
         val s =
             out ?: runCatching {
                 fs.appendingSink(currentFile()).buffer().also {
@@ -102,8 +112,11 @@ class FileLogSink(
                 }
             }.getOrNull() ?: return
         runCatching {
-            s.writeUtf8(line)
-            written += line.encodeToByteArray().size
+            val line = format(e)
+            staging.writeUtf8(line)
+            written += staging.size
+            s.write(staging, staging.size)
+            staging.clear()
             if (written >= maxBytesPerFile) rotate()
         }.onFailure {
             runCatching { out?.close() }
