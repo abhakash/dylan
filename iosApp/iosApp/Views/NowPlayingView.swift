@@ -42,8 +42,35 @@ struct NowPlayingSheet: View {
         let transportable = ["playing", "paused", "ready"].contains(env.player.phaseKind)
         // Resume position is preserved: while loading we keep showing pos (never snap to 0).
         let shown: Double = dragging ? dragPos : Double(env.player.positionMs)
-        ScrollView(showsIndicators: false) {
-            VStack(spacing: 0) {
+        // Centering contract (mirrors Android NowPlayingSheet): the sheet is .large
+        // while the content is a fixed stack. Anchor top while it scrolls; center
+        // it in the leftover space when it fits — no dead gap below.
+        GeometryReader { geo in
+            ScrollView(showsIndicators: false) {
+                VStack(spacing: 0) {
+                    Spacer(minLength: 0)
+                    contentStack(song, durMs: durMs, isLoading: isLoading, transportable: transportable, shown: shown)
+                    Spacer(minLength: 0)
+                }
+                .frame(maxWidth: .infinity, minHeight: geo.size.height)
+            }
+            .task(id: song.key.token) {
+                loadedSongToken = song.key.token
+                async let f: Void = refreshFavorite(song)
+                async let b: Void = refreshBits(song)
+                _ = await (f, b)
+            }
+        }
+    }
+
+    @ViewBuilder private func contentStack(
+        _ song: KSong,
+        durMs: Int64,
+        isLoading: Bool,
+        transportable: Bool,
+        shown: Double
+    ) -> some View {
+        VStack(spacing: 0) {
             HStack {
                 Button {
                     onDismiss?()
@@ -89,6 +116,8 @@ struct NowPlayingSheet: View {
                 .foregroundStyle(DylanTokens.textSecondary)
                 .lineLimit(1)
                 .padding(.horizontal, DylanTokens.s24)
+
+            // (Album jump removed: the subtitle line already carries the album info.)
 
             if isLoading {
                 // Mirrors Android: when Resolving/Downloading show LinearProgressIndicator
@@ -196,13 +225,6 @@ struct NowPlayingSheet: View {
             .padding(.horizontal, DylanTokens.s24 + DylanTokens.s8)
             .padding(.top, DylanTokens.s8)
             .padding(.bottom, DylanTokens.s12)
-            }
-        }
-        .task(id: song.key.token) {
-            loadedSongToken = song.key.token
-            async let f: Void = refreshFavorite(song)
-            async let b: Void = refreshBits(song)
-            _ = await (f, b)
         }
     }
 
@@ -259,11 +281,12 @@ struct QueueSheet: View {
             }
             .padding(.horizontal, DylanTokens.s16)
             .padding(.top, DylanTokens.s16)
+            .padding(.bottom, DylanTokens.s8)
 
             List {
                 ForEach(Array(env.player.queueSongs.enumerated()), id: \.offset) { i, song in
                     queueRow(i, song)
-                        .listRowInsets(EdgeInsets(top: 2, leading: DylanTokens.s8, bottom: 2, trailing: DylanTokens.s8))
+                        .listRowInsets(EdgeInsets(top: 6, leading: DylanTokens.s16, bottom: 6, trailing: DylanTokens.s16))
                         .listRowSeparator(.hidden)
                 }
             }

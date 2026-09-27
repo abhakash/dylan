@@ -128,5 +128,8 @@ dependencies {
     implementation(libs.ktor.client.okhttp)
     implementation(libs.media3.exoplayer)
     implementation(libs.media3.session)
+    // Media3-documented resumption pattern: suspend resume-table bridged via
+    // ResolvableFuture (no runBlocking on the session thread, bounded timeout).
+    implementation(libs.concurrent.futures.ktx)
     debugImplementation(libs.compose.ui.tooling)
 }

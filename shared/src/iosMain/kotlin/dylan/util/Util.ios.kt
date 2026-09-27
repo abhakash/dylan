@@ -15,14 +15,22 @@ actual fun nowMs(): Long = (NSDate().timeIntervalSince1970 * 1000).toLong()
  */
 actual class NetMonitor {
     private val state = MutableStateFlow(NetClass.UNMETERED)
+    private var online = true
 
     actual fun current(): NetClass = state.value
+
+    actual fun isOnline(): Boolean = online
 
     actual fun changes(): Flow<NetClass> = state
 
     /** Called by the Swift app whenever NWPathMonitor reports a change. */
     fun pushMetered(isMetered: Boolean) {
         state.value = if (isMetered) NetClass.METERED else NetClass.UNMETERED
+    }
+
+    /** Called by the Swift app with NWPathMonitor path.status == .satisfied. */
+    fun pushOnline(isOnline: Boolean) {
+        online = isOnline
     }
 }
 

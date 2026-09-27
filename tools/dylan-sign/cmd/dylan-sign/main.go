@@ -304,7 +304,7 @@ Input must be unsigned (no _CodeSignature) per docs.
 							}
 						}
 					}
-					fmt.Printf("provision: team %s (%s)\n", team.Name, team.Identifier)
+					fmt.Printf("provision: team %s (%s) [offline fixture — Developer Portal not yet wired]\n", team.Name, team.Identifier)
 					_, _ = api.FetchDevices(team)
 					if udid != "" {
 						_, _ = api.RegisterDevice(team, "Dylan MacBook", udid)
@@ -417,11 +417,12 @@ func newRefreshCmd() *cobra.Command {
 	var appleID, udid string
 	cmd := &cobra.Command{
 		Use:   "refresh",
-		Short: "Refresh provisioning profile before 7-day expiry (AltStore-style)",
-		Long: `Re-signs before 7-day expiry. Reuses cached session (no 2FA).
+		Short: "Check provisioning profile expiry (AltStore-style)",
+		Long: `Checks the cached session and reports stub profile expiry.
 
   Ideal: run via launchd daily: dylan-sign refresh --apple-id ... --udid ...
-  If profile expires <24h, re-fetches via Developer Portal and re-signs cached IPA.`,
+  Portal re-fetch + automatic re-sign when <24h is NOT yet wired (prints
+  "would re-fetch and re-sign now" instead) — re-run sign manually for now.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, _, _ := config.Load()
 			if appleID == "" {

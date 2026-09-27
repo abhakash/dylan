@@ -22,16 +22,23 @@ class FlowAdapter<T : Any>(
     private val flow: Flow<T>,
     private val scope: CoroutineScope,
 ) {
+    /**
+     * @param conflate drop intermediate emissions under backpressure. Correct
+     * for hot high-rate flows (positionMs) but WRONG for state: it collapses
+     * Resolving→Ready→Playing into a single stale frame. StateFlows are
+     * already conflated — pass false for them.
+     */
     fun subscribe(
         onEach: (T) -> Unit,
         onError: (Throwable) -> Unit = { dylan.util.logErr("dylan-bridge: ${it.message}") },
         onComplete: () -> Unit = {},
+        conflate: Boolean = true,
     ): KotlinSubscription =
         KotlinSubscription(
             scope.launch(Dispatchers.Main.immediate) {
                 try {
-                    flow
-                        .conflate()
+                    val piped = if (conflate) flow.conflate() else flow
+                    piped
                         .flowOn(Dispatchers.Default)
                         .collect { onEach(it) }
                     onComplete()
@@ -51,7 +58,7 @@ class PlayerStateAdapter(
 ) {
     private val inner = FlowAdapter(flow, scope)
 
-    fun subscribe(onEach: (PlayerState) -> Unit): KotlinSubscription = inner.subscribe(onEach)
+    fun subscribe(onEach: (PlayerState) -> Unit): KotlinSubscription = inner.subscribe(onEach, conflate = false)
 }
 
 class PositionAdapter(

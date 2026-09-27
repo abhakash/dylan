@@ -10,16 +10,16 @@ echo "VERSION=$(cat VERSION)  versionCode via git rev-list --count HEAD"
 
 echo ""
 echo "→ ktlintCheck + detekt + Android lint"
-./gradlew ktlintCheck detekt :androidApp:lintDebug --no-configuration-cache --continue
+./gradlew ktlintCheck detekt :androidApp:lintDebug --continue
 
 echo ""
 echo "→ jvmTest --rerun-tasks + probeCi + contractDrift"
-./gradlew :shared:jvmTest --rerun-tasks :shared:probeCi :shared:contractDrift --no-configuration-cache
+./gradlew :shared:jvmTest --rerun-tasks :shared:probeCi :shared:contractDrift
 
 echo ""
 echo "→ assembleDebug + assembleRelease (R8) + iOS klibs"
-./gradlew :androidApp:assembleDebug :androidApp:assembleRelease --no-configuration-cache
-./gradlew :shared:compileKotlinIosSimulatorArm64 :shared:compileKotlinIosArm64 --no-configuration-cache
+./gradlew :androidApp:assembleDebug :androidApp:assembleRelease
+./gradlew :shared:compileKotlinIosSimulatorArm64 :shared:compileKotlinIosArm64
 
 echo ""
 echo "→ artifacts"

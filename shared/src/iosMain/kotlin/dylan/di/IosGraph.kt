@@ -123,6 +123,11 @@ class IosGraph private constructor(
         container.netMonitor.pushMetered(isMetered)
     }
 
+    /** NWPathMonitor pushes here from Swift (path.status == .satisfied). */
+    fun pushOnline(isOnline: Boolean) {
+        container.netMonitor.pushOnline(isOnline)
+    }
+
     fun onBackground() {
         // Delegates to container: snapshot write + WS close + fire-and-forget
         // FileLogSink.flush(2s) so background lines reach disk.
@@ -177,8 +182,13 @@ class IosGraph private constructor(
             else -> "off"
         }
 
-    /** Audible-or-about-to-be: matches Android's PlayPauseIcon condition exactly. */
-    fun playPauseShowsPause(state: PlayerState?): Boolean = state?.phase is Phase.Playing || state?.phase is Phase.Ready
+    /**
+     * Transport truth: pause glyph (and lock-screen 1.0 rate) ONLY while actually
+     * Playing. Ready is transient prepared-not-audible — showing pause there lied
+     * on every track change until the first engine event. Converges within one
+     * TrackChanged; mirrors Android AppRoot's `phase is Playing`.
+     */
+    fun playPauseShowsPause(state: PlayerState?): Boolean = state?.phase is Phase.Playing
 
     fun failureMessage(failure: DylanFailure): String = failure.message()
 

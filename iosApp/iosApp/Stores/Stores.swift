@@ -52,7 +52,13 @@ final class PlayerStore {
 
     private func apply(_ st: KPlayerState?) {
         guard let g = graph else { return }
-        let queue = ((st.flatMap { g.queueAsList(state: $0) }) as? [KSong]) ?? []
+        let rawQueue = st.flatMap { g.queueAsList(state: $0) }
+        // Bridge contract (R4-F14): PersistentList crosses as NSArray of KSong.
+        // A shape change must fail loudly in debug, never as an empty queue.
+        if rawQueue != nil && !((rawQueue as? [Any])?.allSatisfy { $0 is KSong } ?? true) {
+            assertionFailure("bridge contract: queueAsList returned non-KSong elements")
+        }
+        let queue = (rawQueue as? [KSong]) ?? []
         let sig = [
             g.phaseKind(state: st),
             st?.current?.key.token ?? "-",
@@ -94,6 +100,33 @@ final class SearchStore {
     private(set) var submitted: String?
     private(set) var results: [KSong] = []
     private(set) var total: Int64 = 0
+    private(set) var songPage: Int = 1
+    private(set) var loadingMore: Bool = false
+    private(set) var albumResults: [KMiniEntity] = []
+    private(set) var albumTotal: Int64 = 0
+    private(set) var albumPage: Int = 1
+    private(set) var artistResults: [KMiniEntity] = []
+    private(set) var artistTotal: Int64 = 0
+    private(set) var artistPage: Int = 1
+
+    /// One mixed, cross-type ranked list (mirrors Android Hit): songs + albums +
+    /// artists share relevance bands so an album never hides below its songs.
+    var mergedHits: [SearchHit] {
+        let q = (submitted ?? "").lowercased()
+        var all: [(band: Int, order: Int, hit: SearchHit)] = []
+        var order = 0
+        for s in results { all.append((rankBand(q, s.title), order, .song(s))); order += 1 }
+        for m in albumResults { all.append((rankBand(q, m.title), order, .album(m))); order += 1 }
+        for m in artistResults { all.append((rankBand(q, m.title), order, .artist(m))); order += 1 }
+        return all.sorted {
+            if $0.band != $1.band { return $0.band < $1.band }
+            return $0.order < $1.order
+        }.map(\.hit)
+    }
+
+    var hasMore: Bool {
+        Int64(results.count) < total || Int64(albumResults.count) < albumTotal || Int64(artistResults.count) < artistTotal
+    }
     private(set) var suggestions: [KMiniEntity] = []
     private(set) var recent: [String] = []
     private(set) var topSearches: [KMiniEntity] = []
@@ -109,19 +142,29 @@ final class SearchStore {
         // Render-on-arrival (D9): the WS answer lands here whenever it lands; typing never blocks.
         suggestionsHandle = g.search.subscribeSuggestions { [weak self] answered, items in
             guard let self else { return }
+            if !(items is [KMiniEntity]) {
+                assertionFailure("bridge contract: suggestions delivered non-KMiniEntity items")
+            }
             let list = (items as? [KMiniEntity]) ?? []
             self.latestAnswered = answered
             guard self.submitted == nil,
                   answered == self.query.trimmingCharacters(in: .whitespaces),
                   answered.count >= 2 else { return }
             // Server repeats entries across buckets/keystrokes [verified: 7.har] — dedupe (D7).
+            // Ranked like submit sections: exact/prefix title matches float above fuzzy ones.
             var seen = Set<String>()
+            let q = answered.lowercased()
             self.suggestions = list.filter { entry -> Bool in
                 let id = entry.title + (entry.songKey?.songId ?? entry.albumId ?? "")
                 if seen.contains(id) { return false }
                 seen.insert(id)
                 return true
-            }
+            }.enumerated().sorted { lhs, rhs in
+                let bl = rankBand(q, lhs.element.title)
+                let br = rankBand(q, rhs.element.title)
+                if bl != br { return bl < br }
+                return lhs.offset < rhs.offset // stable: server order survives within a band
+            }.map(\.element)
         }
     }
 
@@ -172,12 +215,64 @@ final class SearchStore {
         guard let g = graph, !text.trimmingCharacters(in: .whitespaces).isEmpty else { return }
         submitted = text
         suggestions = []
+        songPage = 1
+        albumPage = 1
+        artistPage = 1
+        loadingMore = false
+        results = []
+        albumResults = []
+        artistResults = []
+        total = 0
+        albumTotal = 0
+        artistTotal = 0
         await g.recordSearch(text)
-        let (songs, serverTotal) = await g.searchSongsPaged(q: text, page: 1)
+        async let songs = g.searchSongsPaged(q: text, page: 1)
+        async let albums = g.searchAlbumsPaged(q: text, page: 1)
+        async let artists = g.searchArtistsPaged(q: text, page: 1)
+        let (fetched, serverTotal) = await songs
         var seen = Set<String>()
-        results = songs.filter { seen.insert($0.key.token).inserted }
+        results = fetched.filter { seen.insert($0.key.token).inserted }
         total = serverTotal
+        let (albumsFetched, albumServerTotal) = await albums
+        albumResults = albumsFetched
+        albumTotal = albumServerTotal
+        let (artistsFetched, artistServerTotal) = await artists
+        artistResults = artistsFetched
+        artistTotal = artistServerTotal
         await loadRecent(g)
+    }
+
+    func loadMoreSongs() async {
+        guard let g = graph, let q = submitted, !loadingMore, hasMore else { return }
+        loadingMore = true
+        defer { loadingMore = false }
+        let nextSong = songPage + 1
+        let nextAlbum = albumPage + 1
+        let nextArtist = artistPage + 1
+        async let songs = (Int64(results.count) < total) ? g.searchSongsPaged(q: q, page: nextSong) : ([], total)
+        async let albums = (Int64(albumResults.count) < albumTotal) ? g.searchAlbumsPaged(q: q, page: nextAlbum) : ([], albumTotal)
+        async let artists = (Int64(artistResults.count) < artistTotal) ? g.searchArtistsPaged(q: q, page: nextArtist) : ([], artistTotal)
+        let (fetched, serverTotal) = await songs
+        if Int64(results.count) < total {
+            var seen = Set(results.map(\.key.token))
+            results += fetched.filter { seen.insert($0.key.token).inserted }
+            total = serverTotal
+            songPage = nextSong
+        }
+        let (albumsFetched, albumServerTotal) = await albums
+        if Int64(albumResults.count) < albumTotal {
+            var seen = Set(albumResults.map { $0.title + ($0.albumId ?? "") })
+            albumResults += albumsFetched.filter { seen.insert($0.title + ($0.albumId ?? "")).inserted }
+            albumTotal = albumServerTotal
+            albumPage = nextAlbum
+        }
+        let (artistsFetched, artistServerTotal) = await artists
+        if Int64(artistResults.count) < artistTotal {
+            var seen = Set(artistResults.map { $0.title + ($0.artistId ?? "") })
+            artistResults += artistsFetched.filter { seen.insert($0.title + ($0.artistId ?? "")).inserted }
+            artistTotal = artistServerTotal
+            artistPage = nextArtist
+        }
     }
 
     /// Mini-entity tap on the typing path jumps through full-results (§9.6).
@@ -190,8 +285,35 @@ final class SearchStore {
         submitted = nil
         results = []
         total = 0
+        songPage = 1
+        loadingMore = false
+        albumResults = []
+        albumTotal = 0
+        albumPage = 1
+        artistResults = []
+        artistTotal = 0
+        artistPage = 1
         suggestions = []
     }
+}
+
+/// One row of the mixed submit list (mirrors Android Hit).
+enum SearchHit {
+    case song(KSong)
+    case album(KMiniEntity)
+    case artist(KMiniEntity)
+}
+
+/// Mirrors shared SearchRank.band: exact (0) → prefix (1) → contains (2) → other (3).
+/// Swift stdlib sort is stable in practice for this size; ties keep server order.
+func rankBand(_ query: String, _ title: String) -> Int {
+    let q = query.trimmingCharacters(in: .whitespaces).lowercased()
+    let t = title.trimmingCharacters(in: .whitespaces).lowercased()
+    if q.isEmpty || t.isEmpty { return 3 }
+    if t == q { return 0 }
+    if t.hasPrefix(q) { return 1 }
+    if t.contains(q) { return 2 }
+    return 3
 }
 
 @MainActor
@@ -210,6 +332,9 @@ final class HomeStore {
         jumpBack = await g.historyRecent(5)
         let sections = await g.homeSections()
         // Android takes feed.sections.first — trending albums rail (plan §11.4).
+        if let items = sections.first?.items, !(items is [KMiniEntity]) {
+            assertionFailure("bridge contract: home section items are non-KMiniEntity")
+        }
         trending = ((sections.first?.items as? [KMiniEntity]) ?? [])
         // homeSections() degrades to [] on any provider failure → same banner trigger
         // as Android's `feed == null` (empty-but-successful feeds don't occur in practice).

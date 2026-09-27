@@ -14,10 +14,23 @@ data class SignedStream(
 )
 
 interface MusicProvider {
+    /** Song results for a submitted query (paged). */
     suspend fun search(
         query: String,
         page: Int,
     ): Paged<Song>
+
+    /** Album results for a submitted query (paged). Default: unsupported. */
+    suspend fun searchAlbums(
+        query: String,
+        page: Int,
+    ): Paged<MiniEntity> = Paged(emptyList(), 0, page)
+
+    /** Artist results for a submitted query (paged). Default: unsupported. */
+    suspend fun searchArtists(
+        query: String,
+        page: Int,
+    ): Paged<MiniEntity> = Paged(emptyList(), 0, page)
 
     suspend fun album(id: String): Album?
 

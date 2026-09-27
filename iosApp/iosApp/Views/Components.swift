@@ -250,6 +250,7 @@ struct SongRowView: View {
 struct MiniRowView: View {
     let mini: KMiniEntity
     var greyed: Bool = false
+    var badge: String? = nil
     let onTap: () -> Void
 
     var body: some View {
@@ -268,6 +269,14 @@ struct MiniRowView: View {
                         .lineLimit(1)
                 }
                 Spacer(minLength: 0)
+                if let badge {
+                    Text(badge.uppercased())
+                        .font(.dylLabelSmall)
+                        .foregroundStyle(DylanTokens.primary)
+                        .padding(.horizontal, DylanTokens.s8)
+                        .padding(.vertical, DylanTokens.s4)
+                        .background(Capsule().fill(DylanTokens.surfaceVariant))
+                }
             }
             .padding(.horizontal, DylanTokens.s16)
             .padding(.vertical, DylanTokens.s8)

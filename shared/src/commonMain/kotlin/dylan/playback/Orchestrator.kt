@@ -77,6 +77,8 @@ class Orchestrator(
     private var doneJoinedKey: SongKey? = null
     private var playGeneration = 0L
     private var lastNavMs = 0L
+    private var resyncStrikes = 0
+    private var lastResyncItem: String? = null
     private val transientFailCounts = mutableMapOf<SongKey, Int>()
     private val windowPreparer = WindowPreparer(db, fs, paths, disp)
 
@@ -546,6 +548,15 @@ class Orchestrator(
 
         var row = cachedRow(song.key)
         if (row == null || !sniffOk(row)) {
+            // Offline fast-path: never spin the 120s download wait without a
+            // network — surface OFFLINE immediately (cached rows play above).
+            if (!net.isOnline()) {
+                val failure = DylanFailure(ErrorCode.OFFLINE, song.key)
+                log.w("play", "ensureReady offline gen=$gen idx=$index key=${song.key.provider}:${song.key.songId}")
+                _state.value = _state.value.copy(phase = Phase.Error(failure))
+                toast?.invoke(failureText(failure))
+                return
+            }
             val metered = net.current() == dylan.util.NetClass.METERED
             val bits = if (metered) cfg.meteredQuality.bits else settings.qualityPref().bits
             downloads.enqueue(DownloadJob(song.key, Priority.USER_NOW, bits, nowMs()))
@@ -714,6 +725,8 @@ class Orchestrator(
                 val song = s.queue[idx]
                 _state.value = s.copy(index = idx, current = song, phase = Phase.Playing(song.key))
                 consecutiveErrors = 0
+                resyncStrikes = 0
+                lastResyncItem = null
                 pushedUpNextId = null
                 doneJoinedKey = null
                 onTrackStarted(song)
@@ -921,7 +934,25 @@ class Orchestrator(
             )
     }
 
+    /**
+     * Engine reported an itemId the queue can't map. Re-preparing the same
+     * window is correct once (transient event reorder), but unbounded repeats
+     * loop forever — after 3 strikes for the same itemId, escalate to skipping
+     * forward like any other unplayable track. Counter resets on any mapped
+     * TrackChanged (see handleEvent) and on track change.
+     */
     private fun resyncFault(itemId: String) {
+        resyncStrikes = if (lastResyncItem == itemId) resyncStrikes + 1 else 1
+        lastResyncItem = itemId
+        if (resyncStrikes >= 3) {
+            log.w("play", "resyncFault escalating, skipping item=$itemId strikes=$resyncStrikes")
+            resyncStrikes = 0
+            lastResyncItem = null
+            toast?.invoke("Skipping unplayable track")
+            advanceOptimistic(+1)
+            return
+        }
+        log.w("play", "resyncFault item=$itemId strike=$resyncStrikes")
         scope.launch(disp.state) { prepareWindow(_state.value.index) }
     }
 

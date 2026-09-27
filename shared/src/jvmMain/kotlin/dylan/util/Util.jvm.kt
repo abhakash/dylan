@@ -9,6 +9,8 @@ actual fun nowMs(): Long = System.currentTimeMillis()
 actual class NetMonitor {
     actual fun current(): NetClass = NetClass.UNMETERED
 
+    actual fun isOnline(): Boolean = true
+
     actual fun changes(): Flow<NetClass> = emptyFlow()
 }
 

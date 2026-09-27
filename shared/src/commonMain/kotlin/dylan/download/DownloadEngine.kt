@@ -30,19 +30,18 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.update
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import okio.FileSystem
 import okio.Path
-import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.AtomicReference
 import kotlin.math.ceil
 import kotlin.math.max
@@ -50,9 +49,10 @@ import kotlin.math.min
 import kotlin.random.Random
 import kotlin.time.TimeSource
 
-private class StallSignal : Exception()
-
 private class PreemptSignal : CancellationException("preempted")
+
+/** Watchdog-to-copy stall signal: distinct from external cancellation by type. */
+private class StallSignal : CancellationException("stall")
 
 // Wall cap = time-to-download at a conservative 8 KB/s (expectedB/8 ms), floored.
 // Rate-based — a flowing-but-slow link is never killed; only a trickle below that
@@ -630,6 +630,13 @@ class DownloadEngine(
         }
     }
 
+    /**
+     * Structured copy + watchdog: the copy child returns its own [StreamErr],
+     * the watchdog child cancels it with [StallSignal] on stall, and external
+     * cancellation propagates untouched (caller maps it to Cancelled/preempt).
+     * No shared result var, no `delay(10)` read-spin — [awaitContent] suspends
+     * until bytes arrive or the channel closes.
+     */
     private suspend fun streamInto(
         r: HttpResponse,
         partPath: okio.Path,
@@ -640,24 +647,21 @@ class DownloadEngine(
         lastMark: AtomicReference<TimeSource.Monotonic.ValueTimeMark>,
         key: SongKey,
     ): StreamErr =
-        coroutineScope {
+        supervisorScope {
             val ch: ByteReadChannel = r.bodyAsChannel()
-            var result = StreamErr.Ok
-            val stalled = AtomicInt(0)
-            val copy =
-                launch {
+            val copyDone =
+                async {
                     try {
                         val h = fs.openReadWrite(partPath, mustCreate = false, mustExist = false)
                         try {
                             var pos = startOffset
                             val buf = ByteArray(64 * 1024)
-                            while (true) {
+                            while (!ch.isClosedForRead) {
+                                // Suspends until bytes arrive or EOF — no read-spin.
+                                if (!ch.awaitContent()) break
                                 val n = ch.readAvailable(buf, 0, buf.size)
                                 if (n == -1) break
-                                if (n == 0) {
-                                    delay(10)
-                                    continue
-                                }
+                                if (n == 0) continue
                                 h.write(pos, buf, 0, n)
                                 pos += n
                                 lastMark.store(TimeSource.Monotonic.markNow())
@@ -667,31 +671,35 @@ class DownloadEngine(
                             runCatching { h.flush() }
                             runCatching { h.close() }
                         }
+                        StreamErr.Ok
+                    } catch (e: StallSignal) {
+                        StreamErr.Stall
                     } catch (e: CancellationException) {
-                        result = if (stalled.load() == 1) StreamErr.Stall else StreamErr.Cancelled
+                        throw e
                     } catch (e: Exception) {
-                        result = StreamErr.Storage
+                        StreamErr.Storage
                     }
                 }
-            val watchdog =
-                launch {
-                    while (isActive && copy.isActive) {
+            val watchDone =
+                async {
+                    while (true) {
                         delay(cfg.stallWatchdogTickMs)
-                        if (!copy.isActive) break
+                        if (copyDone.isCompleted) return@async
                         val sinceChunk = lastMark.load().elapsedNow().inWholeMilliseconds
                         val totalElapsed = startedAt.elapsedNow().inWholeMilliseconds
                         val wallCapMs = stallWallCapMs(cfg.stallWallFloorMs, expectedB)
                         if (stallTripped(sinceChunk, totalElapsed, wallCapMs, cfg.stallTimeoutMs)) {
                             log.w("dl", "stall ${key.provider}:${key.songId} sinceChunk=${sinceChunk}ms wall=${totalElapsed}ms cap=${wallCapMs}ms")
-                            stalled.store(1)
-                            copy.cancel(CancellationException("stall"))
-                            break
+                            copyDone.cancel(StallSignal())
+                            return@async
                         }
                     }
                 }
-            copy.join()
-            watchdog.cancel()
-            result
+            try {
+                copyDone.await()
+            } finally {
+                watchDone.cancel()
+            }
         }
 
     private fun classify(r: HttpResponse): HttpOutcome =

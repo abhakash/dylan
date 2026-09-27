@@ -1,8 +1,9 @@
 name: ci
 
-# Action pinning policy: pinned to major tags (v4/v1). For stronger supply-chain
-# guarantees, pin each `uses:` to its commit SHA with the major tag as comment.
-# renovate/dependabot tracks major-tag updates weekly.
+# Action pinning policy: every `uses:` is pinned to its commit SHA with the
+# major tag as trailing comment (supply-chain: tags are mutable, SHAs are not).
+# Bump via: gh api repos/<owner>/<repo>/commits/<tag> --jq .sha (dependabot
+# understands SHA+tag-comment pins and proposes updates weekly).
 
 on:
   push:
@@ -29,8 +30,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-      - uses: gradle/actions/wrapper-validation@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: gradle/actions/wrapper-validation@0b6dd653ba04f4f93bf581ec31e66cbd7dcb644d # v4
 
   # ── Static analysis (ktlint + detekt + Android Lint + SQLDelight) ─────────
   lint:
@@ -39,24 +40,21 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
         with:
           distribution: temurin
           java-version: "17"
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@0b6dd653ba04f4f93bf581ec31e66cbd7dcb644d # v4
         with:
           cache-read-only: ${{ github.ref != 'refs/heads/main' }}
           cache-encryption-key: ${{ secrets.GRADLE_ENCRYPTION_KEY }}
           gradle-home-cache-cleanup: true
-      # NOTE: gradle.properties sets org.gradle.configuration-cache=true, but the
-      # build is not yet configuration-cache compatible — every invocation below
-      # intentionally passes --no-configuration-cache until that is fixed.
       - name: ktlint + detekt + Android lint
-        run: ./gradlew ktlintCheck detekt :androidApp:lintDebug --no-configuration-cache --continue
+        run: ./gradlew ktlintCheck detekt :androidApp:lintDebug --continue
       - name: Upload lint reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: lint-reports
           path: |
@@ -74,20 +72,20 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
         with:
           distribution: temurin
           java-version: "17"
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@0b6dd653ba04f4f93bf581ec31e66cbd7dcb644d # v4
         with:
           cache-read-only: ${{ github.ref != 'refs/heads/main' }}
       - name: JVM tests + probeCi (hermetic, rerun)
         # contractDrift is nightly-only (live catalog) — see nightly/contract-drift.
-        run: ./gradlew :shared:jvmTest --rerun-tasks :shared:probeCi --no-configuration-cache
+        run: ./gradlew :shared:jvmTest --rerun-tasks :shared:probeCi
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: jvmTest-results
           path: |
@@ -105,24 +103,24 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0 # VERSION → versionCode
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
         with:
           distribution: temurin
           java-version: "17"
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@0b6dd653ba04f4f93bf581ec31e66cbd7dcb644d # v4
         with:
           cache-read-only: ${{ github.ref != 'refs/heads/main' }}
       - name: Assemble debug
-        run: ./gradlew :androidApp:assembleDebug --no-configuration-cache
+        run: ./gradlew :androidApp:assembleDebug
       - name: Version + checksums
         run: |
           echo "VERSION=$(cat VERSION)"
           ls -lh androidApp/build/outputs/apk/debug/*.apk || true
           sha256sum androidApp/build/outputs/apk/debug/*.apk 2>/dev/null || shasum -a 256 androidApp/build/outputs/apk/debug/*.apk 2>/dev/null || true
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: apks-debug
           path: |
@@ -137,22 +135,22 @@ jobs:
     runs-on: macos-14
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
         with:
           distribution: temurin
           java-version: "17"
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@0b6dd653ba04f4f93bf581ec31e66cbd7dcb644d # v4
         with:
           cache-read-only: ${{ github.ref != 'refs/heads/main' }}
       - name: Select Xcode 16.2 (pin — FAANG hermetic)
-        uses: maxim-lobanov/setup-xcode@v1
+        uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1
         with:
           xcode-version: "16.2"
       - name: Compile iOS klibs
-        run: ./gradlew :shared:compileKotlinIosSimulatorArm64 :shared:compileKotlinIosArm64 --no-configuration-cache
+        run: ./gradlew :shared:compileKotlinIosSimulatorArm64 :shared:compileKotlinIosArm64
 
   # ── iOS simulator (full Xcode link — FAANG presubmit for Swift) ──────────
   ios:
@@ -161,24 +159,24 @@ jobs:
     runs-on: macos-14
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
         with:
           distribution: temurin
           java-version: "17"
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@0b6dd653ba04f4f93bf581ec31e66cbd7dcb644d # v4
         with:
           cache-read-only: ${{ github.ref != 'refs/heads/main' }}
       - name: Select Xcode 16.2
-        uses: maxim-lobanov/setup-xcode@v1
+        uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1
         with:
           xcode-version: "16.2"
       - name: Cache Kotlin/Native + DerivedData
         # NOTE: shared/build is intentionally NOT cached (stale klibs caused
         # phantom-green simulator links); only konan + DerivedData persist.
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.konan
@@ -186,7 +184,7 @@ jobs:
           key: ios-${{ runner.os }}-${{ hashFiles('gradle/libs.versions.toml', 'shared/build.gradle.kts', 'shared/src/**/*.kt') }}
           restore-keys: ios-${{ runner.os }}-
       - name: Build shared frameworks
-        run: ./gradlew :shared:assemble --no-configuration-cache
+        run: ./gradlew :shared:assemble
       - name: xcodebuild simulator (CODE_SIGNING_ALLOWED=NO)
         run: |
           set -o pipefail
@@ -202,7 +200,7 @@ jobs:
           if [ $EXIT -ne 0 ]; then cat /tmp/xcode-sim.log; exit $EXIT; fi
       - name: Upload Xcode logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: xcode-logs
           path: |
@@ -221,8 +219,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: "1.22"
           cache-dependency-path: tools/dylan-sign/go.sum
@@ -240,16 +238,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
         with:
           distribution: temurin
           java-version: "17"
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@0b6dd653ba04f4f93bf581ec31e66cbd7dcb644d # v4
         with:
           cache-read-only: ${{ github.ref != 'refs/heads/main' }}
       - name: Fast live probe (catalog sanity)
-        run: ./gradlew :shared:probeLocal -PprobeFast --no-configuration-cache
+        run: ./gradlew :shared:probeLocal -PprobeFast
 
   # ── Nightly contract drift (live vs fixtures; NOT presubmit) ────────────
   nightly-contract-drift:
@@ -258,13 +256,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
         with:
           distribution: temurin
           java-version: "17"
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@0b6dd653ba04f4f93bf581ec31e66cbd7dcb644d # v4
         with:
           cache-read-only: ${{ github.ref != 'refs/heads/main' }}
       - name: Live contract drift (nightly-only)
-        run: ./gradlew :shared:contractDrift --no-configuration-cache
+        run: ./gradlew :shared:contractDrift

@@ -46,6 +46,7 @@ import dylan.di.AppContainer
 import dylan.model.MiniEntity
 import dylan.model.Song
 import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -72,6 +73,27 @@ fun SearchScreen(
     var topSearches by remember { mutableStateOf<List<MiniEntity>>(emptyList()) }
     var results by remember { mutableStateOf<List<Song>>(emptyList()) }
     var total by remember { mutableLongStateOf(0L) }
+    var songPage by remember { mutableStateOf(1) }
+    var albums by remember { mutableStateOf<List<MiniEntity>>(emptyList()) }
+    var albumTotal by remember { mutableLongStateOf(0L) }
+    var albumPage by remember { mutableStateOf(1) }
+    var artists by remember { mutableStateOf<List<MiniEntity>>(emptyList()) }
+    var artistTotal by remember { mutableLongStateOf(0L) }
+    var artistPage by remember { mutableStateOf(1) }
+    var loadingMore by remember { mutableStateOf(false) }
+    // One mixed, cross-type ranked list: songs + albums + artists share relevance
+    // bands (exact → prefix → contains), so an album never hides below its songs.
+    val mergedHits =
+        remember(results, albums, artists, submitted) {
+            val q = submitted ?: return@remember emptyList<Hit>()
+            val all = ArrayList<Triple<Int, Int, Hit>>()
+            var order = 0
+            results.forEach { all += Triple(dylan.search.relevanceBand(q, it.title), order++, Hit.SongHit(it)) }
+            albums.forEach { all += Triple(dylan.search.relevanceBand(q, it.title), order++, Hit.AlbumHit(it)) }
+            artists.forEach { all += Triple(dylan.search.relevanceBand(q, it.title), order++, Hit.ArtistHit(it)) }
+            all.sortedWith(compareBy({ it.first }, { it.second })).map { it.third }
+        }
+    val hasMore = results.size < total || albums.size < albumTotal || artists.size < artistTotal
     val ctx = LocalContext.current
     val isOnline = rememberIsOnline(container)
     val cachedKeys = rememberCachedKeys(container)
@@ -97,15 +119,76 @@ fun SearchScreen(
             val (q, list) = ans ?: return@collect
             if (submitted != null || q != demand.value || q.length < 2) return@collect
             // Server repeats entries across buckets/keystrokes [verified: 7.har] — dedupe or LazyColumn keys collide.
+            // Ranked like submit sections: exact/prefix matches float above fuzzy ones.
             suggestions =
-                list.distinctBy { it.title to (it.songKey?.songId ?: it.albumId.orEmpty()) }
+                dylan.search.rankMinis(q, list.distinctBy { it.title to (it.songKey?.songId ?: it.albumId.orEmpty()) })
         }
     }
     LaunchedEffect(submitted) {
         val q = submitted ?: return@LaunchedEffect
-        val paged = runCatching { container.provider.search(q, 1) }.getOrNull()
-        results = paged?.items.orEmpty().distinctBy { it.key }
+        songPage = 1
+        albumPage = 1
+        artistPage = 1
+        loadingMore = false
+        // Clear first so every submit path (keyboard, chips, suggestions) drops stale hits.
+        results = emptyList()
+        albums = emptyList()
+        artists = emptyList()
+        total = 0
+        albumTotal = 0
+        artistTotal = 0
+        // LaunchedEffect is already a CoroutineScope: fetch sections concurrently.
+        val songsDef = async { runCatching { container.provider.search(q, 1) }.getOrNull() }
+        val albumsDef = async { runCatching { container.provider.searchAlbums(q, 1) }.getOrNull() }
+        val artistsDef = async { runCatching { container.provider.searchArtists(q, 1) }.getOrNull() }
+        val paged = songsDef.await()
+        val seen = HashSet<dylan.model.SongKey>()
+        results = paged?.items.orEmpty().filter { seen.add(it.key) }
         total = paged?.total ?: 0L
+        val ap = albumsDef.await()
+        albums = ap?.items.orEmpty()
+        albumTotal = ap?.total ?: 0L
+        val rp = artistsDef.await()
+        artists = rp?.items.orEmpty()
+        artistTotal = rp?.total ?: 0L
+    }
+
+    // Show more extends EVERY section with a remainder (not just songs), then
+    // the merged list re-ranks so newcomers slot into their relevance band.
+    fun loadMore() {
+        val q = submitted ?: return
+        if (loadingMore || !hasMore) return
+        loadingMore = true
+        scope.launch {
+            val nextSong = songPage + 1
+            val nextAlbum = albumPage + 1
+            val nextArtist = artistPage + 1
+            val wantSongs = results.size < total
+            val wantAlbums = albums.size < albumTotal
+            val wantArtists = artists.size < artistTotal
+            val songsDef = async { if (wantSongs) runCatching { container.provider.search(q, nextSong) }.getOrNull() else null }
+            val albumsDef = async { if (wantAlbums) runCatching { container.provider.searchAlbums(q, nextAlbum) }.getOrNull() else null }
+            val artistsDef = async { if (wantArtists) runCatching { container.provider.searchArtists(q, nextArtist) }.getOrNull() else null }
+            songsDef.await()?.let { paged ->
+                val seen = results.map { it.key }.toHashSet()
+                results = results + paged.items.filter { seen.add(it.key) }
+                total = paged.total
+                songPage = nextSong
+            }
+            albumsDef.await()?.let { paged ->
+                val seen = albums.map { it.title to it.albumId }.toHashSet()
+                albums = albums + paged.items.filter { seen.add(it.title to it.albumId) }
+                albumTotal = paged.total
+                albumPage = nextAlbum
+            }
+            artistsDef.await()?.let { paged ->
+                val seen = artists.map { it.title to it.artistId }.toHashSet()
+                artists = artists + paged.items.filter { seen.add(it.title to it.artistId) }
+                artistTotal = paged.total
+                artistPage = nextArtist
+            }
+            loadingMore = false
+        }
     }
 
     Column(Modifier.fillMaxSize()) {
@@ -148,39 +231,67 @@ fun SearchScreen(
         when {
             submitted != null ->
                 LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 24.dp)) {
-                    items(results, key = { it.key.songId }) { song ->
-                        val can = canPlay(isOnline, cachedKeys, song.key)
-                        SongRow(
-                            song = song,
-                            isFavorite = song.key in favKeys,
-                            enabled = can,
-                            onTap = {
-                                if (!can) {
-                                    android.widget.Toast
-                                        .makeText(ctx, Copy.OFFLINE, android.widget.Toast.LENGTH_SHORT)
-                                        .show()
-                                } else {
-                                    onPlaySongs(results, results.indexOf(song))
+                    items(mergedHits, key = { hitKey(it) }) { hit ->
+                        when (hit) {
+                            is Hit.SongHit -> {
+                                val song = hit.song
+                                val can = canPlay(isOnline, cachedKeys, song.key)
+                                SongRow(
+                                    song = song,
+                                    isFavorite = song.key in favKeys,
+                                    enabled = can,
+                                    onTap = {
+                                        if (!can) {
+                                            android.widget.Toast
+                                                .makeText(ctx, Copy.OFFLINE, android.widget.Toast.LENGTH_SHORT)
+                                                .show()
+                                        } else {
+                                            // Play within the song-only order of the merged list.
+                                            val songsOnly = mergedHits.filterIsInstance<Hit.SongHit>().map { it.song }
+                                            onPlaySongs(songsOnly, songsOnly.indexOf(song))
+                                        }
+                                    },
+                                    onPlayNext = { actions.playNext(song) },
+                                    onAddLast = { actions.addToQueue(song) },
+                                    onFavorite = { actions.toggleFavorite(song) },
+                                    onGoToArtist =
+                                        if (song.artistToken != null) {
+                                            { onOpenArtist(song.toArtistEntry()) }
+                                        } else {
+                                            null
+                                        },
+                                )
+                            }
+                            is Hit.AlbumHit -> {
+                                MiniRow(hit.mini, badge = "Album") {
+                                    hit.mini.albumId?.let { onOpenAlbum(it) }
                                 }
-                            },
-                            onPlayNext = { actions.playNext(song) },
-                            onAddLast = { actions.addToQueue(song) },
-                            onFavorite = { actions.toggleFavorite(song) },
-                            onGoToArtist =
-                                if (song.artistToken != null) {
-                                    { onOpenArtist(song.toArtistEntry()) }
-                                } else {
-                                    null
-                                },
-                        )
+                            }
+                            is Hit.ArtistHit -> {
+                                MiniRow(hit.mini, badge = "Artist") { onOpenArtist(hit.mini) }
+                            }
+                        }
                     }
                     item {
                         Text(
-                            "${results.size} of $total",
+                            "Songs ${results.size} of $total" +
+                                (if (albumTotal > 0) " · Albums ${albums.size} of $albumTotal" else "") +
+                                (if (artistTotal > 0) " · Artists ${artists.size} of $artistTotal" else ""),
                             style = MaterialTheme.typography.labelSmall,
                             color = t.textSecondary,
                             modifier = Modifier.padding(16.dp),
                         )
+                    }
+                    if (hasMore) {
+                        item {
+                            androidx.compose.material3.TextButton(
+                                onClick = { loadMore() },
+                                enabled = !loadingMore,
+                                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                            ) {
+                                Text(if (loadingMore) "Loading…" else "Show more")
+                            }
+                        }
                     }
                 }
             suggestions.isNotEmpty() ->
@@ -244,3 +355,25 @@ fun SearchScreen(
         }
     }
 }
+
+/** One row of the mixed submit list: songs and albums/artists ranked together. */
+private sealed interface Hit {
+    data class SongHit(
+        val song: Song,
+    ) : Hit
+
+    data class AlbumHit(
+        val mini: MiniEntity,
+    ) : Hit
+
+    data class ArtistHit(
+        val mini: MiniEntity,
+    ) : Hit
+}
+
+private fun hitKey(hit: Hit): String =
+    when (hit) {
+        is Hit.SongHit -> "so-${hit.song.key.songId}"
+        is Hit.AlbumHit -> "al-${hit.mini.title}-${hit.mini.albumId}"
+        is Hit.ArtistHit -> "ar-${hit.mini.title}-${hit.mini.artistId}"
+    }

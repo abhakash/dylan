@@ -66,21 +66,21 @@ cd dylan
 export JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home
 
 # gates — must be green before any PR
-./gradlew ktlintCheck detekt :shared:jvmTest --rerun-tasks --no-configuration-cache
+./gradlew ktlintCheck detekt :shared:jvmTest --rerun-tasks
 
 # Android debug (sideload)
-./gradlew :androidApp:assembleDebug --no-configuration-cache
+./gradlew :androidApp:assembleDebug
 adb install -r androidApp/build/outputs/apk/debug/androidApp-debug.apk
 # appId app.dylan.player, minSdk 34 / targetSdk 36
 
 # release (R8, mapping)
-./gradlew :androidApp:assembleRelease --no-configuration-cache
+./gradlew :androidApp:assembleRelease
 
 # live probe (real network, manual gate)
-./gradlew :shared:probeLocal -PprobeFast --no-configuration-cache
+./gradlew :shared:probeLocal -PprobeFast
 
 # iOS klibs only (no Xcode)
-./gradlew :shared:compileKotlinIosSimulatorArm64 :shared:compileKotlinIosArm64 --no-configuration-cache
+./gradlew :shared:compileKotlinIosSimulatorArm64 :shared:compileKotlinIosArm64
 ```
 
 ### iOS without local Xcode
@@ -92,9 +92,9 @@ Push to GitHub — `ci` builds the XCFramework + `xcodebuild -sdk iphonesimulato
 ## Testing
 
 ```bash
-./gradlew :shared:jvmTest --rerun-tasks --no-configuration-cache
-./gradlew :shared:probeCi --no-configuration-cache                # structural contract
-./gradlew :shared:contractDrift --no-configuration-cache          # nightly-only: live vs fixtures (not presubmit)
+./gradlew :shared:jvmTest --rerun-tasks
+./gradlew :shared:probeCi                # structural contract
+./gradlew :shared:contractDrift          # nightly-only: live vs fixtures (not presubmit)
 ```
 
 Fixtures in `fixtures/` are sanitized real responses backing `Mapper` tests.

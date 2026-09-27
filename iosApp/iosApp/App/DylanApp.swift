@@ -97,6 +97,7 @@ final class AppEnvironment {
             let online = path.status == .satisfied
             DispatchQueue.main.async {
                 self?.graph.pushMetered(isMetered: metered)
+                self?.graph.pushOnline(isOnline: online)
                 self?.isOnline = online
             }
         }

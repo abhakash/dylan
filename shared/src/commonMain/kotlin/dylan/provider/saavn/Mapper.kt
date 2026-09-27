@@ -150,6 +150,20 @@ fun mapMini(d: SongDto): MiniEntity? {
 
 fun mapPaged(r: ResultsDto): Paged<Song> = Paged(r.results.mapNotNull(::mapSong), r.total.str()?.toLongOrNull() ?: 0L, r.start.str()?.toIntOrNull() ?: 1)
 
+/** Album/artist submit results share the {total,start,results} envelope; keep only the wanted type. */
+fun mapMiniPaged(
+    r: ResultsDto,
+    wantType: String,
+    fallbackPage: Int,
+): Paged<MiniEntity> {
+    val items =
+        r.results
+            .mapNotNull(::mapMini)
+            .filter { it.type == wantType }
+            .distinctBy { it.type to it.title to (it.albumId ?: it.artistId ?: it.permaToken ?: "") }
+    return Paged(items, r.total.str()?.toLongOrNull() ?: items.size.toLong(), r.start.str()?.toIntOrNull() ?: fallbackPage)
+}
+
 fun mapAlbum(a: AlbumDto): Album? {
     if (a.id.isBlank()) return null
     val songs = a.list.mapNotNull(::mapSong)

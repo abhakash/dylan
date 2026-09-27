@@ -92,30 +92,44 @@ final class NativeAudioOutputImpl: NSObject, KNativeAudioOutput {
     func prepare(items: [KLocalTrack]) {
         guard !released else { return }
         suppressCurrentItemEvents = true
-        dropStatusObservers()
-        player.removeAllItems()
-        itemIds.removeAll()
-        preparedEmittedForWindow = false
-        queueExhaustedEmitted = false
-        for t in items.prefix(2) {
-            insert(t, after: nil)
+        // Window diff: if the new head is already the audible item, keep it —
+        // removeAllItems mid-play killed audio before Prepared and swallowed the
+        // TrackChanged needed for resync. Only rebuild when the head changed.
+        if let wantHead = items.first,
+           let curHead = player.items().first,
+           itemIds[ObjectIdentifier(curHead)] == wantHead.itemId {
+            replaceTail(with: Array(items.dropFirst().prefix(1)))
+        } else {
+            dropStatusObservers()
+            player.removeAllItems()
+            itemIds.removeAll()
+            preparedEmittedForWindow = false
+            queueExhaustedEmitted = false
+            for t in items.prefix(2) {
+                insert(t, after: nil)
+            }
         }
         suppressCurrentItemEvents = false
+    }
+
+    /// Rebuilds everything after index 0 (shared by prepare-diff and replaceUpNext).
+    private func replaceTail(with tails: [KLocalTrack]) {
+        while player.items().count > 1, let last = player.items().last {
+            statusObservers.removeValue(forKey: ObjectIdentifier(last))?.invalidate()
+            itemIds.removeValue(forKey: ObjectIdentifier(last))
+            player.remove(last)
+        }
+        if let item = tails.first {
+            _ = insert(item, after: player.items().first)
+        }
+        queueExhaustedEmitted = false
     }
 
     @objc(replaceUpNextItem:)
     func replaceUpNext(item: KLocalTrack?) {
         guard !released else { return }
         // Remove ONLY queued items beyond index 0 (§9.4 iOS mapping).
-        while player.items().count > 1, let last = player.items().last {
-            statusObservers.removeValue(forKey: ObjectIdentifier(last))?.invalidate()
-            itemIds.removeValue(forKey: ObjectIdentifier(last))
-            player.remove(last)
-        }
-        if let item {
-            _ = insert(item, after: player.items().first)
-        }
-        queueExhaustedEmitted = false
+        replaceTail(with: item.map { [$0] } ?? [])
     }
 
     @objc(play)

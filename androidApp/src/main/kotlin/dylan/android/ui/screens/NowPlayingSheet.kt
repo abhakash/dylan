@@ -100,281 +100,294 @@ fun NowPlayingSheet(
     val downloadProgress by container.downloads.progress.collectAsState()
     val currentDownloadPct = downloadProgress[state.current?.key]
 
-    Column(
-        Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
+    // Centering contract (per Compose bottom-sheet guidance): the overlay box is
+    // 94% of the screen while the content is a fixed stack. Anchor top while it
+    // scrolls; center it in the leftover space when it fits — no dead gap below.
+    val scroll = rememberScrollState()
+    val centered = !scroll.canScrollForward && !scroll.canScrollBackward
+    Box(
+        Modifier.fillMaxSize(),
+        contentAlignment = if (centered) Alignment.Center else Alignment.TopCenter,
     ) {
-        Spacer(Modifier.height(12.dp))
-        // Artwork doubles as the loading surface — status rides ON the art (fixed slot,
-        // nothing below ever shifts) instead of a conditional row that pushed the seekbar.
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .height(320.dp)
-                .pointerInput(state.index) {
-                    detectHorizontalDragGestures { change, amount ->
-                        if (kotlin.math.abs(amount) > 60f) {
-                            container.orchestrator.submit(if (amount < 0) Intent.Next else Intent.Previous)
-                        }
-                    }
-                },
+        Column(
+            Modifier.fillMaxWidth().verticalScroll(scroll).padding(horizontal = 24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            AsyncImage(
-                model = song.artUrl500,
-                contentDescription = null,
-                modifier = Modifier.fillMaxSize(),
-            )
-            if (isLoading) {
-                Box(
-                    Modifier
-                        .fillMaxSize()
-                        .background(
-                            androidx.compose.ui.graphics.Color.Black
-                                .copy(alpha = 0.55f),
-                        ),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        androidx.compose.material3.CircularProgressIndicator(
-                            modifier = Modifier.size(22.dp),
-                            color = t.primary,
-                            strokeWidth = 2.dp,
-                        )
-                        Text(
-                            when (state.phase) {
-                                is dylan.model.Phase.Downloading -> "DOWNLOADING ${currentDownloadPct ?: 0}%"
-                                else -> "PREPARING"
-                            },
-                            style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 1.2.sp),
-                            color = t.textSecondary,
-                            modifier = Modifier.padding(top = 8.dp),
-                        )
-                    }
-                }
-            }
-        }
-        Spacer(Modifier.height(16.dp))
-        Text(
-            song.title.uppercase(),
-            style = MaterialTheme.typography.displayLarge,
-            color = t.textPrimary,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.basicMarquee(),
-        )
-        Text(
-            (song.subtitle.ifBlank { song.albumName.orEmpty() }).uppercase(),
-            style = MaterialTheme.typography.bodyLarge,
-            color = t.textSecondary,
-            maxLines = 1,
-            modifier =
-                when (val artistToken = song.artistToken) {
-                    null -> Modifier
-                    else -> Modifier.clickable { onOpenArtist(song.artistName ?: song.subtitle, artistToken) }
-                },
-        )
-
-        // Buffering lives INSIDE fixed-height slots (artwork overlay + slider slot) — a
-        // conditional status row here used to shift the whole layout on every track change.
-        if (isLoading) {
+            Spacer(Modifier.height(12.dp))
+            // Artwork doubles as the loading surface — status rides ON the art (fixed slot,
+            // nothing below ever shifts) instead of a conditional row that pushed the seekbar.
             Box(
                 Modifier
                     .fillMaxWidth()
-                    .height(36.dp)
-                    .padding(top = 8.dp),
-                contentAlignment = Alignment.Center,
+                    .height(320.dp)
+                    .pointerInput(state.index) {
+                        detectHorizontalDragGestures { change, amount ->
+                            if (kotlin.math.abs(amount) > 60f) {
+                                container.orchestrator.submit(if (amount < 0) Intent.Next else Intent.Previous)
+                            }
+                        }
+                    },
             ) {
-                val pct = currentDownloadPct
-                if (pct != null) {
-                    androidx.compose.material3.LinearProgressIndicator(
-                        progress = { pct / 100f },
-                        modifier = Modifier.fillMaxWidth().height(2.dp),
-                        color = t.primary,
-                        trackColor = t.divider,
-                    )
-                } else {
-                    androidx.compose.material3.LinearProgressIndicator(
-                        modifier = Modifier.fillMaxWidth().height(2.dp),
-                        color = t.primary,
-                        trackColor = t.divider,
-                    )
-                }
-            }
-        } else {
-            Slider(
-                value = shown.coerceIn(0f, durMs.toFloat()),
-                onValueChange = {
-                    dragging = true
-                    dragPos = it
-                },
-                onValueChangeFinished = {
-                    container.orchestrator.submit(Intent.Seek(dragPos.toLong()))
-                    dragging = false
-                },
-                enabled = !isLoading && transportable,
-                valueRange = 0f..durMs.toFloat(),
-                colors =
-                    SliderDefaults.colors(
-                        thumbColor = t.primary,
-                        activeTrackColor = t.primary,
-                        inactiveTrackColor = t.divider,
-                        activeTickColor = androidx.compose.ui.graphics.Color.Transparent,
-                        inactiveTickColor = androidx.compose.ui.graphics.Color.Transparent,
-                        disabledThumbColor = t.divider,
-                        disabledActiveTrackColor = t.divider,
-                        disabledInactiveTrackColor = t.divider,
-                    ),
-                thumb = {
+                AsyncImage(
+                    model = song.artUrl500,
+                    contentDescription = null,
+                    modifier = Modifier.fillMaxSize(),
+                )
+                if (isLoading) {
                     Box(
                         Modifier
-                            .size(if (dragging) 22.dp else 18.dp)
-                            .background(if (isLoading) t.divider else t.primary)
-                            .padding(3.dp)
-                            .background(androidx.compose.ui.graphics.Color.White),
-                    )
-                },
-                track = { sliderState ->
-                    val range = sliderState.valueRange
-                    val frac =
-                        if (range.endInclusive > range.start) {
-                            ((sliderState.value - range.start) / (range.endInclusive - range.start)).coerceIn(0f, 1f)
-                        } else {
-                            0f
+                            .fillMaxSize()
+                            .background(
+                                androidx.compose.ui.graphics.Color.Black
+                                    .copy(alpha = 0.55f),
+                            ),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            androidx.compose.material3.CircularProgressIndicator(
+                                modifier = Modifier.size(22.dp),
+                                color = t.primary,
+                                strokeWidth = 2.dp,
+                            )
+                            Text(
+                                when (state.phase) {
+                                    is dylan.model.Phase.Downloading -> "DOWNLOADING ${currentDownloadPct ?: 0}%"
+                                    else -> "PREPARING"
+                                },
+                                style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 1.2.sp),
+                                color = t.textSecondary,
+                                modifier = Modifier.padding(top = 8.dp),
+                            )
                         }
-                    Box(Modifier.fillMaxWidth().height(if (dragging) 6.dp else 4.dp).background(t.divider)) {
-                        Box(
-                            Modifier
-                                .fillMaxWidth(frac)
-                                .fillMaxHeight()
-                                .background(if (isLoading) t.divider else t.primary),
-                        )
-                    }
-                },
-                modifier = Modifier.fillMaxWidth().height(36.dp).padding(top = 8.dp),
-            )
-        }
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 2.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Text(
-                formatTime(shown.toLong()),
-                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold),
-                color =
-                    if (dragging) {
-                        t.primary
-                    } else if (isLoading) {
-                        t.textSecondary
-                    } else {
-                        t.textPrimary
-                    },
-            )
-            Text(
-                formatTime(durMs),
-                style = MaterialTheme.typography.bodyMedium,
-                color = t.textSecondary,
-            )
-        }
-
-        Spacer(Modifier.height(8.dp))
-        Row(
-            Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceEvenly,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            IconButton(onClick = { container.orchestrator.submit(Intent.ToggleShuffle) }) {
-                Icon(dylan.android.ui.Dyl.Shuffle, "Shuffle", tint = if (state.shuffleOn) t.primary else t.textPrimary)
-            }
-            IconButton(onClick = { container.orchestrator.submit(Intent.Previous) }) {
-                Icon(dylan.android.ui.Dyl.Prev, "Previous", tint = t.textPrimary)
-            }
-            Box(
-                Modifier
-                    .size(64.dp)
-                    .background(t.primary)
-                    .clickable {
-                        onEnsureService()
-                        container.orchestrator.submit(Intent.TogglePlayPause)
-                    },
-                contentAlignment = Alignment.Center,
-            ) {
-                PlayPauseIcon(container, size = 48, onEnsureService = onEnsureService)
-            }
-            IconButton(onClick = { container.orchestrator.submit(Intent.Next) }) {
-                Icon(dylan.android.ui.Dyl.Next, "Next", tint = t.textPrimary)
-            }
-            IconButton(onClick = { container.orchestrator.submit(Intent.CycleRepeat) }) {
-                Box(contentAlignment = Alignment.TopEnd) {
-                    Icon(dylan.android.ui.Dyl.Repeat, "Repeat", tint = if (state.repeat != Repeat.OFF) t.primary else t.textPrimary)
-                    if (state.repeat == Repeat.ONE) {
-                        Text(
-                            "1",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = t.primary,
-                            modifier = Modifier.padding(start = 10.dp),
-                        )
                     }
                 }
             }
-        }
-
-        val route = rememberAudioRoute()
-        if (route != null && route.kind != RouteKind.SPEAKER) {
-            Spacer(Modifier.height(10.dp))
+            Spacer(Modifier.height(16.dp))
             Text(
-                "PLAYING ON ${route.productName?.uppercase() ?: when (route.kind) {
-                    RouteKind.BLUETOOTH -> "BLUETOOTH"
-                    RouteKind.WIRED -> "HEADPHONES"
-                    RouteKind.SPEAKER -> ""
-                }}",
-                style = MaterialTheme.typography.labelSmall,
+                song.title.uppercase(),
+                style = MaterialTheme.typography.displayLarge,
+                color = t.textPrimary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.basicMarquee(),
+            )
+            Text(
+                (song.subtitle.ifBlank { song.albumName.orEmpty() }).uppercase(),
+                style = MaterialTheme.typography.bodyLarge,
                 color = t.textSecondary,
                 maxLines = 1,
                 modifier =
-                    Modifier
-                        .border(1.dp, t.divider)
-                        .background(t.background)
-                        .padding(horizontal = 12.dp, vertical = 4.dp),
+                    when (val artistToken = song.artistToken) {
+                        null -> Modifier
+                        else -> Modifier.clickable { onOpenArtist(song.artistName ?: song.subtitle, artistToken) }
+                    },
             )
-        }
+            // Jump to the album this track belongs to (D8): provider resolves numeric
+            // album_id and perma tokens alike, so Song.albumId works directly.
+            // (Album jump removed: the subtitle line already carries the album info.)
 
-        Spacer(Modifier.height(8.dp))
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onQueue) { Icon(dylan.android.ui.Dyl.Queue, "Queue", tint = t.textSecondary) }
-            IconButton(onClick = {
-                scope.launch {
-                    runCatching {
-                        if (container.favorites.isFavorite(song.key)) {
-                            container.favorites.remove(song.key)
-                            isFavorite = false
+            // Buffering lives INSIDE fixed-height slots (artwork overlay + slider slot) — a
+            // conditional status row here used to shift the whole layout on every track change.
+            if (isLoading) {
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(36.dp)
+                        .padding(top = 8.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    val pct = currentDownloadPct
+                    if (pct != null) {
+                        androidx.compose.material3.LinearProgressIndicator(
+                            progress = { pct / 100f },
+                            modifier = Modifier.fillMaxWidth().height(2.dp),
+                            color = t.primary,
+                            trackColor = t.divider,
+                        )
+                    } else {
+                        androidx.compose.material3.LinearProgressIndicator(
+                            modifier = Modifier.fillMaxWidth().height(2.dp),
+                            color = t.primary,
+                            trackColor = t.divider,
+                        )
+                    }
+                }
+            } else {
+                Slider(
+                    value = shown.coerceIn(0f, durMs.toFloat()),
+                    onValueChange = {
+                        dragging = true
+                        dragPos = it
+                    },
+                    onValueChangeFinished = {
+                        container.orchestrator.submit(Intent.Seek(dragPos.toLong()))
+                        dragging = false
+                    },
+                    enabled = !isLoading && transportable,
+                    valueRange = 0f..durMs.toFloat(),
+                    colors =
+                        SliderDefaults.colors(
+                            thumbColor = t.primary,
+                            activeTrackColor = t.primary,
+                            inactiveTrackColor = t.divider,
+                            activeTickColor = androidx.compose.ui.graphics.Color.Transparent,
+                            inactiveTickColor = androidx.compose.ui.graphics.Color.Transparent,
+                            disabledThumbColor = t.divider,
+                            disabledActiveTrackColor = t.divider,
+                            disabledInactiveTrackColor = t.divider,
+                        ),
+                    thumb = {
+                        Box(
+                            Modifier
+                                .size(if (dragging) 22.dp else 18.dp)
+                                .background(if (isLoading) t.divider else t.primary)
+                                .padding(3.dp)
+                                .background(androidx.compose.ui.graphics.Color.White),
+                        )
+                    },
+                    track = { sliderState ->
+                        val range = sliderState.valueRange
+                        val frac =
+                            if (range.endInclusive > range.start) {
+                                ((sliderState.value - range.start) / (range.endInclusive - range.start)).coerceIn(0f, 1f)
+                            } else {
+                                0f
+                            }
+                        Box(Modifier.fillMaxWidth().height(if (dragging) 6.dp else 4.dp).background(t.divider)) {
+                            Box(
+                                Modifier
+                                    .fillMaxWidth(frac)
+                                    .fillMaxHeight()
+                                    .background(if (isLoading) t.divider else t.primary),
+                            )
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth().height(36.dp).padding(top = 8.dp),
+                )
+            }
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 2.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text(
+                    formatTime(shown.toLong()),
+                    style = MaterialTheme.typography.bodyMedium.copy(fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold),
+                    color =
+                        if (dragging) {
+                            t.primary
+                        } else if (isLoading) {
+                            t.textSecondary
                         } else {
-                            container.favorites.add(song)
-                            isFavorite = true
+                            t.textPrimary
+                        },
+                )
+                Text(
+                    formatTime(durMs),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = t.textSecondary,
+                )
+            }
+
+            Spacer(Modifier.height(8.dp))
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                IconButton(onClick = { container.orchestrator.submit(Intent.ToggleShuffle) }) {
+                    Icon(dylan.android.ui.Dyl.Shuffle, "Shuffle", tint = if (state.shuffleOn) t.primary else t.textPrimary)
+                }
+                IconButton(onClick = { container.orchestrator.submit(Intent.Previous) }) {
+                    Icon(dylan.android.ui.Dyl.Prev, "Previous", tint = t.textPrimary)
+                }
+                Box(
+                    Modifier
+                        .size(64.dp)
+                        .background(t.primary)
+                        .clickable {
+                            onEnsureService()
+                            container.orchestrator.submit(Intent.TogglePlayPause)
+                        },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    PlayPauseIcon(container, size = 48, onEnsureService = onEnsureService)
+                }
+                IconButton(onClick = { container.orchestrator.submit(Intent.Next) }) {
+                    Icon(dylan.android.ui.Dyl.Next, "Next", tint = t.textPrimary)
+                }
+                IconButton(onClick = { container.orchestrator.submit(Intent.CycleRepeat) }) {
+                    Box(contentAlignment = Alignment.TopEnd) {
+                        Icon(dylan.android.ui.Dyl.Repeat, "Repeat", tint = if (state.repeat != Repeat.OFF) t.primary else t.textPrimary)
+                        if (state.repeat == Repeat.ONE) {
+                            Text(
+                                "1",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = t.primary,
+                                modifier = Modifier.padding(start = 10.dp),
+                            )
                         }
                     }
                 }
-            }) {
-                Icon(
-                    if (isFavorite) dylan.android.ui.Dyl.Heart else dylan.android.ui.Dyl.HeartOutline,
-                    "Favorite",
-                    tint = if (isFavorite) t.primary else t.textSecondary,
+            }
+
+            val route = rememberAudioRoute()
+            if (route != null && route.kind != RouteKind.SPEAKER) {
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    "PLAYING ON ${route.productName?.uppercase() ?: when (route.kind) {
+                        RouteKind.BLUETOOTH -> "BLUETOOTH"
+                        RouteKind.WIRED -> "HEADPHONES"
+                        RouteKind.SPEAKER -> ""
+                    }}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = t.textSecondary,
+                    maxLines = 1,
+                    modifier =
+                        Modifier
+                            .border(1.dp, t.divider)
+                            .background(t.background)
+                            .padding(horizontal = 12.dp, vertical = 4.dp),
                 )
             }
-            Text(
-                when (val p = state.phase) {
-                    is dylan.model.Phase.Downloading -> "SAVING ${p.key.songId.uppercase()}…"
-                    is dylan.model.Phase.Resolving -> "PREPARING…"
-                    is dylan.model.Phase.Error ->
-                        dylan.android.ui.Copy
-                            .forCode(p.failure.code)
-                    is dylan.model.Phase.Playing, is dylan.model.Phase.Paused -> bitsLabel.uppercase()
-                    else -> ""
-                },
-                style = MaterialTheme.typography.labelSmall,
-                color = t.textSecondary,
-            )
+
+            Spacer(Modifier.height(8.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = onQueue) { Icon(dylan.android.ui.Dyl.Queue, "Queue", tint = t.textSecondary) }
+                IconButton(onClick = {
+                    scope.launch {
+                        runCatching {
+                            if (container.favorites.isFavorite(song.key)) {
+                                container.favorites.remove(song.key)
+                                isFavorite = false
+                            } else {
+                                container.favorites.add(song)
+                                isFavorite = true
+                            }
+                        }
+                    }
+                }) {
+                    Icon(
+                        if (isFavorite) dylan.android.ui.Dyl.Heart else dylan.android.ui.Dyl.HeartOutline,
+                        "Favorite",
+                        tint = if (isFavorite) t.primary else t.textSecondary,
+                    )
+                }
+                Text(
+                    when (val p = state.phase) {
+                        is dylan.model.Phase.Downloading -> "SAVING ${p.key.songId.uppercase()}…"
+                        is dylan.model.Phase.Resolving -> "PREPARING…"
+                        is dylan.model.Phase.Error ->
+                            dylan.android.ui.Copy
+                                .forCode(p.failure.code)
+                        is dylan.model.Phase.Playing, is dylan.model.Phase.Paused -> bitsLabel.uppercase()
+                        else -> ""
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = t.textSecondary,
+                )
+            }
+            Spacer(Modifier.height(8.dp))
         }
-        Spacer(Modifier.height(8.dp))
     }
 }
 

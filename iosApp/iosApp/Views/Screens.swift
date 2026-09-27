@@ -143,35 +143,79 @@ struct SearchScreen: View {
         .task { await store.onAppear(env.graph) }
     }
 
-    /// Submitted: paginated songs list, id-deduped accumulator (§11.4 Search).
+    /// Submitted: one mixed, cross-type ranked list + Show more (§11.4 Search).
     private var submittedList: some View {
         List {
-            ForEach(Array(store.results.enumerated()), id: \.element.key.token) { idx, song in
-                SongRowView(
-                    song: song,
-                    index: nil,
-                    isPlaying: env.isPlaying(song),
-                    isCached: env.isCached(song),
-                    enabled: env.canPlay(song),
-                    onTap: { env.playOrOffline(store.results, at: idx) },
-                    onPlayNext: { env.graph.submit(Intents.playNext(song)) },
-                    onAddLast: { env.graph.submit(Intents.addLast(song)) },
-                    onDownload: { Task { await env.downloadNow(song) } }
-                )
-                .listRowInsets(EdgeInsets())
+            ForEach(Array(store.mergedHits.enumerated()), id: \.offset) { _, hit in
+                switch hit {
+                case .song(let song):
+                    songHitRow(song)
+                case .album(let m):
+                    MiniRowView(mini: m, badge: "Album") {
+                        if let albumId = m.albumId { onOpenAlbum(albumId) }
+                    }
+                    .listRowInsets(EdgeInsets())
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(DylanTokens.background)
+                case .artist(let m):
+                    // No artist pages on iOS: fall back to a full song search for the name.
+                    MiniRowView(mini: m, badge: "Artist") {
+                        store.query = m.title
+                        Task { await store.submit(m.title) }
+                    }
+                    .listRowInsets(EdgeInsets())
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(DylanTokens.background)
+                }
+            }
+            ({
+                var footer = "Songs \(store.results.count) of \(store.total)"
+                if store.albumTotal > 0 { footer += " · Albums \(store.albumResults.count) of \(store.albumTotal)" }
+                if store.artistTotal > 0 { footer += " · Artists \(store.artistResults.count) of \(store.artistTotal)" }
+                return Text(footer)
+                    .font(.dylLabelSmall)
+                    .foregroundStyle(DylanTokens.textSecondary)
+                    .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(DylanTokens.background)
+            })()
+            if store.hasMore {
+                Button(store.loadingMore ? "Loading…" : "Show more") {
+                    Task { await store.loadMoreSongs() }
+                }
+                .disabled(store.loadingMore)
+                .font(.dylBodyMedium)
+                .foregroundStyle(DylanTokens.primary)
+                .frame(maxWidth: .infinity)
                 .listRowSeparator(.hidden)
                 .listRowBackground(DylanTokens.background)
             }
-            Text("\(store.results.count) of \(store.total)")
-                .font(.dylLabelSmall)
-                .foregroundStyle(DylanTokens.textSecondary)
-                .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
-                .listRowSeparator(.hidden)
-                .listRowBackground(DylanTokens.background)
         }
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
         .background(DylanTokens.background)
+    }
+
+    /// Song row inside the merged list: tap plays within the songs-only order.
+    @ViewBuilder private func songHitRow(_ song: KSong) -> some View {
+        let songsOnly: [KSong] = store.mergedHits.compactMap {
+            if case .song(let s) = $0 { return s } else { return nil }
+        }
+        let idx = songsOnly.firstIndex { $0.key.token == song.key.token } ?? 0
+        SongRowView(
+            song: song,
+            index: nil,
+            isPlaying: env.isPlaying(song),
+            isCached: env.isCached(song),
+            enabled: env.canPlay(song),
+            onTap: { env.playOrOffline(songsOnly, at: idx) },
+            onPlayNext: { env.graph.submit(Intents.playNext(song)) },
+            onAddLast: { env.graph.submit(Intents.addLast(song)) },
+            onDownload: { Task { await env.downloadNow(song) } }
+        )
+        .listRowInsets(EdgeInsets())
+        .listRowSeparator(.hidden)
+        .listRowBackground(DylanTokens.background)
     }
 
     private var suggestionsList: some View {
@@ -179,6 +223,9 @@ struct SearchScreen: View {
             MiniRowView(mini: m) {
                 if let albumId = m.albumId {
                     onOpenAlbum(albumId)
+                } else if m.artistId != nil {
+                    store.query = m.title
+                    Task { await store.submit(m.title) }
                 } else if m.songKey != nil {
                     Task { await store.jumpThroughFullResults() }
                 }

@@ -175,6 +175,7 @@ fun SongRow(
 fun MiniRow(
     mini: MiniEntity,
     greyed: Boolean = false,
+    badge: String? = null,
     onTap: () -> Unit,
 ) {
     val t = LocalDylanTokens.current
@@ -211,6 +212,18 @@ fun MiniRow(
                 color = t.textSecondary,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
+            )
+        }
+        if (badge != null) {
+            Text(
+                badge.uppercase(),
+                style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 1.sp),
+                color = t.primary,
+                modifier =
+                    Modifier
+                        .background(t.surfaceVariant, MaterialTheme.shapes.small)
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                maxLines = 1,
             )
         }
     }

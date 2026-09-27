@@ -4,7 +4,9 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
@@ -64,9 +66,9 @@ fun QueueSheet(
         dragOffset = 0f
     }
 
-    Column(Modifier.fillMaxWidth()) {
+    Column(Modifier.fillMaxSize().padding(top = 12.dp)) {
         Row(
-            Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -85,7 +87,11 @@ fun QueueSheet(
                 }
             }
         }
-        LazyColumn(Modifier.fillMaxWidth().padding(bottom = 24.dp)) {
+        LazyColumn(
+            Modifier.fillMaxWidth().weight(1f),
+            contentPadding = PaddingValues(top = 8.dp, bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
             itemsIndexed(queue, key = { i, _ -> keys[i] }) { i, song ->
                 val key = keys[i]
                 val isCurrent = i == currentIdx
@@ -93,7 +99,7 @@ fun QueueSheet(
                 Row(
                     Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 8.dp, vertical = 2.dp)
+                        .padding(horizontal = 16.dp, vertical = 6.dp)
                         .then(if (isDragged) Modifier.zIndex(1f) else Modifier)
                         .graphicsLayer { if (isDragged) translationY = dragOffset }
                         .onSizeChanged { rowHeights[key] = it.height },

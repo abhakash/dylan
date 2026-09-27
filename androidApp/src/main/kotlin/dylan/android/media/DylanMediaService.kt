@@ -20,7 +20,6 @@ import com.google.common.util.concurrent.ListenableFuture
 import dylan.android.DylanApp
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -32,16 +31,16 @@ class DylanMediaService : MediaSessionService() {
     private var engine: ExoPlayerEngine? = null
     private var routeJob: Job? = null
     private var stateJob: Job? = null
-    private val resumptionExecutor =
-        java.util.concurrent.Executors.newSingleThreadExecutor { r ->
-            Thread(r, "dylan-resume").apply { isDaemon = true }
-        }
+    private var resumeFuture: ListenableFuture<MediaSession.MediaItemsWithStartPosition>? = null
 
     companion object {
         // Custom-layout transport commands — the queue lives in the Orchestrator, not the
         // Exo timeline, so next/prev must route here regardless of timeline state.
         private const val CMD_NEXT = "dylan.NEXT"
         private const val CMD_PREV = "dylan.PREVIOUS"
+
+        /** Resumption I/O budget: exceed it and Media3 gets empty (no resume), never a stall. */
+        private const val RESUME_TIMEOUT_MS = 1_500L
     }
 
     // (Deleted the no-op DylanNotificationProvider — it only forwarded to super.)
@@ -85,6 +84,11 @@ class DylanMediaService : MediaSessionService() {
             container.scope.launch {
                 e.audioRoute.collect { app.mediaHub.publish(it) }
             }
+        // Pre-warm the resumption table off the session looper: by the time
+        // Media3 asks, onPlaybackResumption serves an immediate future.
+        container.scope.launch {
+            resumeFuture = Futures.immediateFuture(computeResumptionItems())
+        }
         // DefaultMediaNotificationProvider uses the session activity as the notification's
         // content intent — without it, tapping the media notification does nothing.
         val sessionActivity =
@@ -180,14 +184,19 @@ class DylanMediaService : MediaSessionService() {
                         override fun onPlaybackResumption(
                             mediaSession: MediaSession,
                             controller: MediaSession.ControllerInfo,
-                        ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> =
-                            // DB reads must never block the session looper — resolve on a worker.
-                            // Explicit Callable SAM: the Runnable overload would infer Void and
-                            // discard the MediaItemsWithStartPosition.
-                            Futures.submit(
-                                java.util.concurrent.Callable<MediaSession.MediaItemsWithStartPosition> { resumptionItems() },
-                                resumptionExecutor,
-                            )
+                        ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> {
+                            // Never block: serve the pre-warmed future, or resolve
+                            // async and complete. Slow I/O degrades to empty (no
+                            // resume) instead of stalling Media3's timeout.
+                            resumeFuture?.let { return it }
+                            val c = DylanApp.of(this@DylanMediaService).container
+                            val f =
+                                androidx.concurrent.futures.ResolvableFuture
+                                    .create<MediaSession.MediaItemsWithStartPosition>()
+                            c.scope.launch { f.set(computeResumptionItems()) }
+                            resumeFuture = f
+                            return f
+                        }
                     },
                 ).build()
         addSession(session!!)
@@ -278,35 +287,48 @@ class DylanMediaService : MediaSessionService() {
         return ImmutableList.of(prev, next)
     }
 
-    private fun resumptionItems(): MediaSession.MediaItemsWithStartPosition {
+    /**
+     * Suspend resume-table builder: one settings read + one batched DB pass,
+     * bounded by [RESUME_TIMEOUT_MS]. Replaces the old nested-runBlocking
+     * resumptionItems() that serialized slow I/O on the dylan-resume thread.
+     */
+    private suspend fun computeResumptionItems(): MediaSession.MediaItemsWithStartPosition {
         val container = DylanApp.of(this).container
         val empty = MediaSession.MediaItemsWithStartPosition(ImmutableList.of<MediaItem>(), 0, 0L)
-        val json = runBlocking { runCatching { container.settings.get("resume") }.getOrNull() } ?: return empty
-        return try {
-            val root = Json.parseToJsonElement(json).jsonObject
-            val itemsJson = root["items"]?.jsonArray ?: return empty
+        return kotlinx.coroutines.withTimeoutOrNull(RESUME_TIMEOUT_MS) {
+            val json = runCatching { container.settings.get("resume") }.getOrNull() ?: return@withTimeoutOrNull empty
+            val root = runCatching { Json.parseToJsonElement(json).jsonObject }.getOrNull() ?: return@withTimeoutOrNull empty
+            val itemsJson = root["items"]?.jsonArray ?: return@withTimeoutOrNull empty
             val index = (root["index"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0)
             val posMs = (root["posMs"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L)
-            val mediaItems =
+            val keys =
                 itemsJson.mapNotNull { el ->
-                    val o = el.jsonObject
+                    val o = runCatching { el.jsonObject }.getOrNull() ?: return@mapNotNull null
                     val providerId = o["provider"]?.jsonPrimitive?.content ?: return@mapNotNull null
                     val songId = o["songId"]?.jsonPrimitive?.content ?: return@mapNotNull null
-                    val key = dylan.model.SongKey(providerId, songId)
-                    val row =
-                        runBlocking {
+                    dylan.model.SongKey(providerId, songId)
+                }
+            // Single dbLane pass for every row (was: one runBlocking per item).
+            val rows =
+                kotlinx.coroutines.withContext(container.disp.dbLane) {
+                    keys.mapNotNull { key ->
+                        val row =
                             runCatching {
                                 container.db.dylanQueries
                                     .selectCached(key.provider, key.songId)
                                     .executeAsOneOrNull()
-                            }.getOrNull()
-                        } ?: return@mapNotNull null
+                            }.getOrNull() ?: return@mapNotNull null
+                        key to row
+                    }
+                }
+            val mediaItems =
+                rows.mapNotNull { (key, row) ->
                     val path = container.paths.final(key, row.bitrate.toInt(), row.ext).toString()
                     if (!java.io.File(path).exists()) return@mapNotNull null
                     MediaItem
                         .fromUri(path)
                         .buildUpon()
-                        .setMediaId("$providerId:$songId:${row.bitrate}")
+                        .setMediaId("${key.provider}:${key.songId}:${row.bitrate}")
                         .build()
                 }
             if (mediaItems.isEmpty()) {
@@ -314,9 +336,7 @@ class DylanMediaService : MediaSessionService() {
             } else {
                 MediaSession.MediaItemsWithStartPosition(ImmutableList.copyOf(mediaItems), index.coerceIn(0, mediaItems.size - 1), posMs)
             }
-        } catch (_: Exception) {
-            empty
-        }
+        } ?: empty
     }
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = session
@@ -341,7 +361,8 @@ class DylanMediaService : MediaSessionService() {
             .of(this)
             .container.log
             .i("service", "onDestroy")
-        resumptionExecutor.shutdownNow()
+        resumeFuture?.cancel(false)
+        resumeFuture = null
         val c = DylanApp.of(this).container
         routeJob?.cancel()
         routeJob = null

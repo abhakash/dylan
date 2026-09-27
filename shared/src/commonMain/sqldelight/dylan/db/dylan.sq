@@ -11,6 +11,18 @@
 -- INSERT HYGIENE: every INSERT below names its columns explicitly (never positional
 -- VALUES without a column list), so old/new table shapes stay compatible in both
 -- directions and a re-added column can never silently shift values into the wrong slot.
+--
+-- PROD MIGRATION (DEFERRED — see docs/feedback-ledger.md D-migration): before any
+-- prod/beta, do ALL of the following and delete this note:
+--   1. Bump the SQLDelight schema version (shared/build.gradle.kts sqldelight block).
+--   2. Add shared/src/commonMain/sqldelight/dylan/db/1.sqm containing:
+--        ALTER TABLE songs DROP COLUMN cacheable;
+--      (SQLite >= 3.35; Android API 34+ and modern iOS qualify. If an older store
+--      must be supported, use the 12-step table-rebuild pattern instead.)
+--   3. Add a JVM upgrade test: create a v14 DB (raw CREATE TABLE WITH cacheable),
+--      open it through the real DriverFactory, assert insertSong arity + all
+--      13 mapped fields + user_version bump.
+-- Until then the destructive fallback above remains the ONLY upgrade path.
 
 CREATE TABLE songs (
   provider      TEXT NOT NULL DEFAULT 'saavn',

@@ -15,16 +15,84 @@ import dylan.model.SongKey
 import dylan.playback.EngineEvent
 import dylan.playback.LocalTrack
 import dylan.playback.PlayerEngine
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
 
 class ExoPlayerEngine(
     context: Context,
 ) : PlayerEngine {
-    private val log = (context.applicationContext as dylan.android.DylanApp).container.log
+    private val appContext = context.applicationContext
+    private val log = (appContext as dylan.android.DylanApp).container.log
     private val thread = HandlerThread("dylan-media").apply { start() }
+
+    /**
+     * Notification/lock-screen artwork: Media3 renders `artworkData` bitmaps but
+     * never fetches remote `artworkUri` itself. Each prepared item gets a Coil
+     * load (software bitmap, 512px); on success the item's metadata is replaced
+     * so the notification refreshes. Loads are per-itemId cancellable and die
+     * with prepare()/release().
+     */
+    private val artScope =
+        kotlinx.coroutines.CoroutineScope(
+            kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO,
+        )
+    private val artJobs = mutableMapOf<String, kotlinx.coroutines.Job>()
+
+    private fun loadArtwork(
+        itemId: String,
+        url: String?,
+    ) {
+        artJobs.remove(itemId)?.cancel()
+        if (url.isNullOrBlank()) return
+        artJobs[itemId] =
+            artScope.launch {
+                // MediaMetadata.artworkData is a byte[] — decode via Coil, ship JPEG
+                // bytes and let Media3's notification manager decode the large icon.
+                val bytes =
+                    runCatching {
+                        val loader = coil3.ImageLoader(appContext)
+                        val req =
+                            coil3.request.ImageRequest
+                                .Builder(appContext)
+                                .data(url)
+                                .size(512)
+                                .build()
+                        val raw = (loader.execute(req).image as? coil3.BitmapImage)?.bitmap ?: return@launch
+                        // compress() throws on HARDWARE-config bitmaps — copy out first.
+                        val bitmap =
+                            if (raw.config == android.graphics.Bitmap.Config.HARDWARE) {
+                                raw.copy(android.graphics.Bitmap.Config.ARGB_8888, false) ?: return@launch
+                            } else {
+                                raw
+                            }
+                        val out = java.io.ByteArrayOutputStream()
+                        bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, out)
+                        out.toByteArray()
+                    }.getOrNull() ?: return@launch
+                postToMedia {
+                    val idx = (0 until player.mediaItemCount).firstOrNull { player.getMediaItemAt(it).mediaId == itemId }
+                    if (idx != null) {
+                        val cur = player.getMediaItemAt(idx)
+                        val meta =
+                            cur.mediaMetadata
+                                .buildUpon()
+                                .setArtworkData(bytes, MediaMetadata.PICTURE_TYPE_FRONT_COVER)
+                                .build()
+                        player.replaceMediaItem(idx, cur.buildUpon().setMediaMetadata(meta).build())
+                    }
+                }
+            }
+    }
+
+    private fun cancelArtwork() {
+        artJobs.values.forEach { it.cancel() }
+        artJobs.clear()
+    }
+
     private val handler = Handler(thread.looper)
 
     /** All Media3 session/player calls must run on this looper (§9.9). */
@@ -154,9 +222,11 @@ class ExoPlayerEngine(
 
     override fun prepare(window: List<LocalTrack>) {
         handler.post {
+            cancelArtwork()
             val items = window.map(::buildMediaItem)
             if (items.isEmpty()) player.clearMediaItems() else player.setMediaItems(items)
             player.prepare()
+            window.forEach { loadArtwork(it.itemId, it.artworkUri) }
         }
     }
 
@@ -170,6 +240,7 @@ class ExoPlayerEngine(
                 count >= 2 -> player.replaceMediaItem(1, item)
                 else -> player.addMediaItem(1, item)
             }
+            track?.let { loadArtwork(it.itemId, it.artworkUri) }
         }
     }
 
@@ -187,6 +258,8 @@ class ExoPlayerEngine(
 
     override fun release() {
         handler.post {
+            cancelArtwork()
+            artScope.cancel()
             routes.release()
             player.release()
             thread.quitSafely()

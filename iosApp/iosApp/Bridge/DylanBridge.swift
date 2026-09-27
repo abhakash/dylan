@@ -179,6 +179,36 @@ extension KGraph {
             return ((paged.items.compactMap { $0 as? KSong }), paged.total)
         } catch {
             bridgeLog.error("search failed: \(error.localizedDescription)")
+            onToast?("Check your connection and try again.")
+            return ([], 0)
+        }
+    }
+
+    /// Album/artist submit sections share the {total,start,results} envelope (§11.4).
+    func searchAlbumsPaged(
+        q: String,
+        page: Int
+    ) async -> ([KMiniEntity], Int64) {
+        do {
+            let paged = try await container.provider.searchAlbums(query: q, page: Int32(page))
+            return ((paged.items.compactMap { $0 as? KMiniEntity }), paged.total)
+        } catch {
+            bridgeLog.error("album search failed: \(error.localizedDescription)")
+            onToast?("Check your connection and try again.")
+            return ([], 0)
+        }
+    }
+
+    func searchArtistsPaged(
+        q: String,
+        page: Int
+    ) async -> ([KMiniEntity], Int64) {
+        do {
+            let paged = try await container.provider.searchArtists(query: q, page: Int32(page))
+            return ((paged.items.compactMap { $0 as? KMiniEntity }), paged.total)
+        } catch {
+            bridgeLog.error("artist search failed: \(error.localizedDescription)")
+            onToast?("Check your connection and try again.")
             return ([], 0)
         }
     }
@@ -188,6 +218,7 @@ extension KGraph {
             return try await container.provider.album(id: id)
         } catch {
             bridgeLog.error("album failed: \(error.localizedDescription)")
+            onToast?("Check your connection and try again.")
             return nil
         }
     }
@@ -226,6 +257,7 @@ extension KGraph {
             try await container.favorites.add(song: song)
         } catch {
             bridgeLog.error("favorite.add failed: \(error.localizedDescription)")
+            onToast?("Check your connection and try again.")
         }
     }
 
@@ -234,6 +266,7 @@ extension KGraph {
             try await container.favorites.remove(key: song.key)
         } catch {
             bridgeLog.error("favorite.remove failed: \(error.localizedDescription)")
+            onToast?("Check your connection and try again.")
         }
     }
 
@@ -327,6 +360,7 @@ extension KGraph {
             return v?.int64Value ?? 0
         } catch {
             bridgeLog.error("clearCache failed: \(error.localizedDescription)")
+            onToast?("Check your connection and try again.")
             return 0
         }
     }
@@ -345,6 +379,7 @@ extension KGraph {
             try await enqueueBulkDownloads(songs: songs)
         } catch {
             bridgeLog.error("bulkDownload failed: \(error.localizedDescription)")
+            onToast?("Check your connection and try again.")
         }
     }
 
@@ -353,6 +388,7 @@ extension KGraph {
             try await enqueueDownloadNow(song: song)
         } catch {
             bridgeLog.error("downloadNow failed: \(error.localizedDescription)")
+            onToast?("Check your connection and try again.")
         }
     }
 
@@ -361,6 +397,7 @@ extension KGraph {
             try await removeDownload(key: info.song.key)
         } catch {
             bridgeLog.error("removeDownload failed: \(error.localizedDescription)")
+            onToast?("Check your connection and try again.")
         }
     }
 

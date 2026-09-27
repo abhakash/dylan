@@ -97,6 +97,31 @@ class SaavnProvider(
         return runCatching { mapPaged(json.decodeFromString(ResultsDto.serializer(), text)) }.getOrDefault(Paged(emptyList(), 0, page))
     }
 
+    override suspend fun searchAlbums(
+        query: String,
+        page: Int,
+    ): Paged<MiniEntity> = searchMinis("search.getAlbumResults", query, page, "album")
+
+    override suspend fun searchArtists(
+        query: String,
+        page: Int,
+    ): Paged<MiniEntity> = searchMinis("search.getArtistResults", query, page, "artist")
+
+    private suspend fun searchMinis(
+        call: String,
+        query: String,
+        page: Int,
+        wantType: String,
+    ): Paged<MiniEntity> {
+        val text =
+            get("__call" to call, "q" to query, "p" to page.toString(), "n" to cfg.submitPageSize.toString())
+                ?: return Paged(emptyList(), 0, page)
+        val dto =
+            runCatching { json.decodeFromString(ResultsDto.serializer(), text) }.getOrNull()
+                ?: return Paged(emptyList(), 0, page)
+        return mapMiniPaged(dto, wantType, page)
+    }
+
     override suspend fun album(id: String): Album? {
         memGet<Album>("album:$id", cfg.albumCacheTtlMs)?.let { return it }
         val text = get(*albumRequest(id).toTypedArray()) ?: return null
