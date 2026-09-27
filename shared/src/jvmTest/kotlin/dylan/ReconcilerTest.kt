@@ -13,8 +13,7 @@ import dylan.download.DownloadEngine
 import dylan.model.Quality
 import dylan.model.SongKey
 import dylan.provider.MusicProvider
-import dylan.util.AppDispatchers
-import kotlinx.coroutines.Dispatchers
+import dylan.support.TestLanes
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.runTest
 import okio.FileSystem
@@ -31,7 +30,7 @@ class ReconcilerTest {
     private lateinit var db: Dylan
     private lateinit var engine: DownloadEngine
     private lateinit var reconciler: Reconciler
-    private val disp = AppDispatchers(Dispatchers.Main, Dispatchers.Default, Dispatchers.Default, Dispatchers.Default)
+    private val disp = TestLanes().disp
     private val cfg = AppConfig()
     private val testLog = LogBuffer(minLevel = LogLevel.DEBUG)
 
@@ -91,7 +90,21 @@ class ReconcilerTest {
     }
 
     private fun admit(key: SongKey) {
-        db.dylanQueries.insertSong(key.provider, key.songId, key.songId, "", null, null, "", "", 100L, 1L, "ref", null, 0L)
+        db.dylanQueries.insertSong(
+            key.provider,
+            key.songId,
+            key.songId,
+            "",
+            null,
+            null,
+            "",
+            "",
+            100L,
+            1L,
+            "ref",
+            null,
+            0L,
+        )
     }
 
     @Test

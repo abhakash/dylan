@@ -1,5 +1,6 @@
 package dylan.di
 
+import dylan.bridge.BridgeLanes
 import dylan.bridge.FlowAdapter
 import dylan.bridge.KotlinSubscription
 import dylan.bridge.PlayerStateAdapter
@@ -55,7 +56,7 @@ data class CachedSongInfo(
 class IosSearchBridge internal constructor(
     private val channel: SaavnSearchChannel,
     private val scope: CoroutineScope,
-    private val log: LogBuffer,
+    private val lanes: BridgeLanes,
 ) {
     fun warmUp() {
         channel.warmUp()
@@ -71,11 +72,8 @@ class IosSearchBridge internal constructor(
 
     /** Latest answered query with its suggestions; empty pair until the first answer lands. */
     fun subscribeSuggestions(onEach: (String, List<MiniEntity>) -> Unit): KotlinSubscription =
-        FlowAdapter(channel.suggestions.map { it ?: ("" to emptyList()) }, scope)
-            .subscribe(
-                onEach = { p -> onEach(p.first, p.second) },
-                onError = { t -> log.e("bridge", "suggestions collect failed: ${t.message}") },
-            )
+        FlowAdapter(channel.suggestions.map { it ?: ("" to emptyList()) }, scope, lanes)
+            .subscribe(onEach = { p -> onEach(p.first, p.second) })
 }
 
 /**
@@ -93,6 +91,8 @@ class IosSearchBridge internal constructor(
  * at graph level. [queueAsList]/[shuffleOrderAsList] exist because PersistentList does not bridge to
  * Swift collections (R4-F14).
  */
+// A flat Swift-facing facade by design: the threshold counts the Swift API surface, not logic.
+@Suppress("TooManyFunctions")
 class IosGraph private constructor(
     val cfg: AppConfig,
     private val disp: AppDispatchers,
@@ -102,11 +102,27 @@ class IosGraph private constructor(
 ) {
     private var engine: IosPlayerEngine? = null
 
+    /** Bridge lanes come from the graph, never from a hardcoded dispatcher. */
+    private val lanes: BridgeLanes = BridgeLanes(disp, container.log)
+
     /** Search-tab entry point: WS warm-up + render-on-arrival suggestions (§6.4). */
-    val search: IosSearchBridge = IosSearchBridge(container.searchChannel, scope, container.log)
+    val search: IosSearchBridge by lazy(LazyThreadSafetyMode.PUBLICATION) {
+        IosSearchBridge(
+            container.searchChannel,
+            scope,
+            BridgeLanes(disp, container.log, "bridge/suggestions"),
+        )
+    }
 
     /** Toast surface for Swift; every toast is also mirrored into the LogBuffer. */
     var onToast: ((String) -> Unit)? = null
+
+    init {
+        // Assigned here, read on the state lane: the container owns the orchestrator's toast sink
+        // so create() never has to touch the playback graph (and therefore never has to force the
+        // SQLite open) on the main thread.
+        container.onToast = { msg -> onToast?.invoke(msg) }
+    }
 
     // ---- engine lifecycle (§4.3 attachable engine, §9.10) -------------------------------
 
@@ -141,11 +157,21 @@ class IosGraph private constructor(
         container.onBackground()
     }
 
+    /**
+     * Terminal teardown. iOS had none: `AppEnvironment` only ever cancelled the path monitor, so
+     * every Ktor client, the SQLite driver, the file-log handle and every collector the stores
+     * bound in `init` outlived the graph for the process lifetime. Call it when the last store
+     * releases the graph.
+     */
+    suspend fun dispose() {
+        container.shutdown()
+    }
+
     // ---- Flow→Swift subscriptions (§9.11) -------------------------------------------------
 
-    fun subscribePlayerState(onEach: (PlayerState) -> Unit): KotlinSubscription = PlayerStateAdapter(scope, container.orchestrator.state, {}).subscribe(onEach)
+    fun subscribePlayerState(onEach: (PlayerState) -> Unit): KotlinSubscription = PlayerStateAdapter(scope, container.orchestrator.state, lanes).subscribe(onEach)
 
-    fun subscribePosition(onEach: (Long) -> Unit): KotlinSubscription = PositionAdapter(scope, container.orchestrator.positionMs).subscribe(onEach)
+    fun subscribePosition(onEach: (Long) -> Unit): KotlinSubscription = PositionAdapter(scope, container.orchestrator.positionMs, lanes).subscribe(onEach)
 
     /** Per-key download ring (R7-P1); -1 means "no active job" so the closure stays unboxed Int. */
     fun subscribeProgress(
@@ -157,6 +183,7 @@ class IosGraph private constructor(
                 .map { it[key] ?: -1 }
                 .distinctUntilChanged(),
             scope,
+            lanes,
         ).subscribe(onEach)
 
     // ---- bridging helpers -------------------------------------------------------------------
@@ -333,11 +360,11 @@ class IosGraph private constructor(
                             log = log,
                         ),
                 )
-            graph.container.orchestrator.toast =
-                { msg ->
-                    graph.container.log.i("toast", msg)
-                    graph.onToast?.invoke(msg)
-                }
+            // Directories, the SQLite open and the Ktor clients are deferred to the io lane by
+            // start() so none of it runs inside @MainActor AppEnvironment.init, i.e. before the
+            // first frame. A platform that can await it should instead do
+            // `scope.launch { graph.container.open() }` (or call open() from its own loader) and
+            // let start() join the same one-shot open.
             graph.container.start()
             return graph
         }

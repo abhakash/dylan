@@ -5,21 +5,21 @@ import dylan.diag.LogBuffer
 import dylan.search.CorrelationMode
 import dylan.search.SaavnSearchChannel
 import dylan.search.WsSessionLike
-import dylan.util.AppDispatchers
+import dylan.support.TestLanes
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
 import io.ktor.client.engine.mock.respondOk
 import io.ktor.websocket.Frame
 import io.ktor.websocket.readText
-import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runTest
-import kotlin.coroutines.ContinuationInterceptor
+import kotlin.test.Ignore
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 class SearchChannelTest {
@@ -58,16 +58,11 @@ class SearchChannelTest {
     private val noopHttp = HttpClient(MockEngine { _ -> respondOk("{}") }) { }
 
     // onBackground() must land on the same lane the WS engine runs on, or the channel's own
-    // state is racy in the test exactly as it was on device.
-    private fun TestScope.stateLane(): AppDispatchers =
-        AppDispatchers(
-            Dispatchers.Default,
-            Dispatchers.Default,
-            Dispatchers.Default,
-            coroutineContext[ContinuationInterceptor] as? kotlinx.coroutines.CoroutineDispatcher ?: Dispatchers.Default,
-        )
+    // state is racy in the test exactly as it was on device. Production lanes, not Dispatchers.Default.
+    private val lanes = TestLanes()
 
-    private fun TestScope.newChannel(
+    private fun newChannel(
+        scope: kotlinx.coroutines.CoroutineScope,
         cfg: AppConfig = AppConfig(),
         replyDelayMs: Long = 50,
         sessionInit: (FakeSession) -> Unit = {},
@@ -77,27 +72,30 @@ class SearchChannelTest {
                 http = noopHttp,
                 wsClient = HttpClient(MockEngine { _ -> error("ws engine unused: connectBlock is faked") }) { },
                 cfg = cfg,
-                scope = backgroundScope,
-                disp = stateLane(),
+                scope = scope,
+                disp = lanes.disp,
                 log = LogBuffer(),
             )
-        ch.connectBlock = { FakeSession(backgroundScope, replyDelayMs).apply(sessionInit) }
+        ch.connectBlock = { FakeSession(scope, replyDelayMs).apply(sessionInit) }
         return ch
     }
 
     @Test
-    fun orderedModeAcceptsHeadOfQueueAndStaysOrdered() =
+    fun orderedModeAnswersTheQueryItAskedFor() =
         runTest {
             lateinit var session: FakeSession
             val ch =
-                newChannel { s ->
+                newChannel(backgroundScope) { s ->
                     session = s
-                    s.onSend { _ -> s.incoming.send(Frame.Text(suggestionsJson("pop"))) }
+                    s.onSend { q -> s.incoming.send(Frame.Text(suggestionsJson(q))) }
                 }
             ch.correlationMode = CorrelationMode.ORDERED
             val out = ch.suggest("pop")
             assertEquals(CorrelationMode.ORDERED, ch.correlationMode)
-            assertTrue(session.sent.any { it.contains("autocomplete.get&query=pop") })
+            assertTrue(
+                session.sent.any { it.contains("autocomplete.get&query=pop") },
+                "the query must actually reach the wire, sent=${session.sent}",
+            )
             assertEquals(0, out.size)
             assertEquals(0, ch.timeoutStrikesForTest())
         }
@@ -105,7 +103,7 @@ class SearchChannelTest {
     @Test
     fun silenceTimesOutCountsStrikeServesHttp() =
         runTest {
-            val ch = newChannel { }
+            val ch = newChannel(backgroundScope) { }
             val out = ch.suggest("silent")
             assertTrue(out.isEmpty())
             assertEquals(1, ch.timeoutStrikesForTest())
@@ -115,7 +113,7 @@ class SearchChannelTest {
     @Test
     fun threeConsecutiveTimeoutsGoHttpOnlyForSession() =
         runTest {
-            val ch = newChannel { }
+            val ch = newChannel(backgroundScope) { }
             repeat(3) { ch.suggest("dead$it") }
             assertTrue(ch.httpOnlyForTest())
             val strikesBefore = ch.timeoutStrikesForTest()
@@ -127,7 +125,7 @@ class SearchChannelTest {
     fun healthyResponseResetsBothCounters() =
         runTest {
             val ch =
-                newChannel { s ->
+                newChannel(backgroundScope) { s ->
                     s.onSend { q -> if (q.contains("query=one-good")) s.incoming.send(Frame.Text(suggestionsJson(q))) }
                 }
             ch.suggest("bad-one")
@@ -137,11 +135,19 @@ class SearchChannelTest {
             assertEquals(0, ch.socketStrikesForTest())
         }
 
+    /**
+     * Inverted from the pre-wave version, which was named `repeatedMispairsFlipToFallbackSingleFlight`
+     * while asserting the opposite (`correlationMode == ORDERED`). The behaviour it actually
+     * protects is worth stating plainly: `collectLatest` cancellation removes an abandoned query
+     * from the FIFO deque, so a cancelled request must *not* be counted as a divergence.
+     */
     @Test
-    fun repeatedMispairsFlipToFallbackSingleFlight() =
+    @OptIn(ExperimentalCoroutinesApi::class)
+    fun cancelledRequestsNeverCountAsMispairsSoTheModeStaysOrdered() =
         runTest {
             val ch =
                 newChannel(
+                    backgroundScope,
                     cfg = AppConfig(wsRequestTimeoutMs = 2000),
                     replyDelayMs = 300,
                 ) { s ->
@@ -149,33 +155,48 @@ class SearchChannelTest {
                 }
             ch.correlationMode = CorrelationMode.ORDERED
             repeat(3) { round ->
-                // After F4 fix, collectLatest cancellation removes abandoned query from deque,
-                // so cancellation no longer counts as divergence — mode must stay ORDERED.
                 val abandoned = launch { ch.suggest("a$round") }
                 testScheduler.advanceTimeBy(150)
                 ch.suggest("b$round")
                 testScheduler.advanceUntilIdle()
                 abandoned.cancel()
+                abandoned.join()
             }
             assertEquals(
                 CorrelationMode.ORDERED,
                 ch.correlationMode,
-                "cancellation-induced mispairs must no longer flip to single-flight (F4)",
+                "cancellation-induced abandonment is not a mispair (F4)",
+            )
+            assertTrue(
+                !ch.debugState().contains("div=3"),
+                "divergence must not accumulate from cancellations: ${ch.debugState()}",
             )
         }
 
+    /**
+     * Replaces the deleted `trueOutOfOrderFramesStillFlipToSingleFlight`, whose assertion was
+     * `mode=UNORDERED || mode == ORDERED` — always true, while its comment claimed the opposite.
+     * This states what actually happens, and it is falsifiable.
+     *
+     * The reason is structural, not accidental: `tryWs` correlates by *FIFO position*, not by
+     * frame content, and `engine()`'s `collectLatest` guarantees at most one outstanding query. So
+     * the deque head is always the current query and `divergence` can never increment — the
+     * UNORDERED degradation path is unreachable. Frames delivered in any order are therefore
+     * accepted, and the frame *content* is never checked against the query it answers.
+     */
     @Test
-    fun trueOutOfOrderFramesStillFlipToSingleFlight() =
+    @OptIn(ExperimentalCoroutinesApi::class)
+    fun outOfOrderFramesAreUnreachableSoDivergenceNeverIncrements() =
         runTest {
             val ch =
                 newChannel(
+                    backgroundScope,
                     cfg = AppConfig(wsRequestTimeoutMs = 2000),
                     replyDelayMs = 10,
                 ) { s ->
-                    // Deliberately deliver out-of-order: first frame belongs to second query
                     s.onSend { q ->
                         if (q.contains("query=a")) {
-                            // Hold a's reply, let b's arrive first
+                            // Wrong query's payload for a's request: accepted anyway.
                             s.incoming.send(Frame.Text(suggestionsJson("b")))
                         } else {
                             s.incoming.send(Frame.Text(suggestionsJson(q)))
@@ -183,13 +204,66 @@ class SearchChannelTest {
                     }
                 }
             ch.correlationMode = CorrelationMode.ORDERED
-            // Directly drive tryWs ordering without collectLatest cancellation
             ch.request("a")
             ch.request("b")
             ch.request("c")
             testScheduler.advanceUntilIdle()
-            // True reordering (not cancellation) must still degrade after 3 mispairs
-            // (verified via debugState, not timing-dependent)
-            assertTrue(ch.debugState().contains("mode=UNORDERED") || ch.correlationMode == CorrelationMode.ORDERED)
+            assertEquals(
+                CorrelationMode.ORDERED,
+                ch.correlationMode,
+                "reordering cannot be detected: the deque head is always the current query",
+            )
+            assertTrue(
+                ch.debugState().contains("div=0"),
+                "so the divergence counter — the only thing that flips the mode — never moves: ${ch.debugState()}",
+            )
+            testScheduler.advanceUntilIdle()
+        }
+
+    /**
+     * The consequence of correlating by position instead of by content, and the real defect this
+     * area actually has. A duplicated or late frame stays in `incoming` after its query was
+     * answered; the next query pops its own FIFO head and is then handed the *stale* frame.
+     */
+    @Test
+    @Ignore(
+        "SaavnSearchChannel.tryWs correlates by FIFO position, not by frame content " +
+            "(SaavnSearchChannel.kt:167-172), so a frame that outlives its query is served as the " +
+            "answer to the next one. Counterexample: the session answers the query 'one' with two " +
+            "frames; suggest('one') consumes the first, then suggest('two') pops head='two' and is " +
+            "answered with 'one' payload. Fix: carry the query (or a correlation id) in the request " +
+            "and match it in the response instead of relying on send order. " +
+            "See docs/codebase-audit.md section 3.5.",
+    )
+    @OptIn(ExperimentalCoroutinesApi::class)
+    fun aLateFrameIsServedAsTheAnswerToTheNextQuery() =
+        runTest {
+            val ch =
+                newChannel(
+                    backgroundScope,
+                    cfg = AppConfig(wsRequestTimeoutMs = 2000),
+                    replyDelayMs = 10,
+                ) { s ->
+                    s.onSend { q ->
+                        if (q.contains("query=one")) {
+                            s.incoming.send(Frame.Text(suggestionsJson("one")))
+                            s.incoming.send(Frame.Text(suggestionsJson("one")))
+                        } else {
+                            s.incoming.send(Frame.Text(suggestionsJson(q)))
+                        }
+                    }
+                }
+            ch.correlationMode = CorrelationMode.ORDERED
+            ch.suggest("one")
+            testScheduler.advanceUntilIdle()
+            ch.suggest("two")
+            testScheduler.advanceUntilIdle()
+            val answer = ch.suggestions.value
+            assertNotNull(answer, "the second query must have been answered at all")
+            assertTrue(
+                answer.second.isEmpty(),
+                "the stale frame was answered to the second query but never should have been: " +
+                    "query=${answer.first} results=${answer.second.size}",
+            )
         }
 }

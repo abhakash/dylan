@@ -13,10 +13,9 @@ import dylan.download.DownloadEngine
 import dylan.model.Quality
 import dylan.provider.MusicProvider
 import dylan.support.MutableClock
-import dylan.util.AppDispatchers
+import dylan.support.TestLanes
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.runTest
 import okio.FileSystem
@@ -41,7 +40,7 @@ class ReconcilerClockTest {
     private lateinit var reconciler: Reconciler
     private val clock = MutableClock()
     private val fs = FileSystem.SYSTEM
-    private val disp = AppDispatchers(Dispatchers.Default, Dispatchers.Default, Dispatchers.Default, Dispatchers.Default)
+    private val disp = TestLanes().disp
     private val cfg = AppConfig(clock = clock)
     private val log = LogBuffer(minLevel = LogLevel.DEBUG)
 

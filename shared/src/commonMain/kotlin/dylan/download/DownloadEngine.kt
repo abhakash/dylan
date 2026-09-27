@@ -31,10 +31,12 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.sync.Mutex
@@ -119,15 +121,16 @@ class DownloadEngine(
     private val otherEndpointsHealthy: () -> Boolean = { true },
     private val log: dylan.diag.LogBuffer,
 ) {
-    private val supervisor = SupervisorJob()
-    private val scope =
-        CoroutineScope(
-            supervisor + disp.io +
-                kotlinx.coroutines.CoroutineExceptionHandler { _, t ->
-                    log.c("dl", "engine job crashed: ${t.message ?: t::class.simpleName}")
-                    dylan.util.logErr("dylan-engine: ${t.message ?: t::class.simpleName}")
-                },
-        )
+    // The scope is rebuilt on every start() so a stop()/start() cycle relaunches into a live
+    // scope. Cancelling a constructor-owned SupervisorJob made start() a no-op forever after one
+    // stop, which is what AppContainer.stop() used to do (audit DI-1).
+    private val engineFailure =
+        kotlinx.coroutines.CoroutineExceptionHandler { _, t ->
+            log.c("dl", "engine job crashed: ${t.message ?: t::class.simpleName}")
+            dylan.util.logErr("dylan-engine: ${t.message ?: t::class.simpleName}")
+        }
+    private var scope: CoroutineScope = CoroutineScope(SupervisorJob() + disp.io + engineFailure)
+
     private val clock = cfg.clock
     private val mutex = Mutex()
     private val wake = Channel<Unit>(Channel.CONFLATED)
@@ -142,10 +145,13 @@ class DownloadEngine(
     private val lastProgressEmit = mutableMapOf<SongKey, Long>()
 
     fun stop() {
-        supervisor.cancel()
+        scope.cancel()
     }
 
     fun start() {
+        if (!scope.isActive) {
+            scope = CoroutineScope(SupervisorJob() + disp.io + engineFailure)
+        }
         scope.launch { loop() }
     }
 

@@ -17,7 +17,7 @@ import dylan.model.Quality
 import dylan.model.SongKey
 import dylan.provider.MusicProvider
 import dylan.provider.SignedStream
-import dylan.util.AppDispatchers
+import dylan.support.TestLanes
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
 import io.ktor.client.engine.mock.respond
@@ -94,7 +94,7 @@ class DownloadEngineTest {
     private lateinit var engine: DownloadEngine
     private lateinit var provider: FakeProvider
     private lateinit var audioDir: okio.Path
-    private val disp = AppDispatchers(Dispatchers.Main, Dispatchers.Default, Dispatchers.Default, Dispatchers.Default)
+    private val disp = TestLanes().disp
     private var cfg = AppConfig()
     private lateinit var bulk: HttpClient
     private var slowChunkBytes = 0

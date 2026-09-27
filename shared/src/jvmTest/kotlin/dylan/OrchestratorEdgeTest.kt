@@ -21,14 +21,13 @@ import dylan.model.SongKey
 import dylan.playback.EngineErr
 import dylan.playback.EngineEvent
 import dylan.playback.Intent.PlayNow
-import dylan.playback.LocalTrack
 import dylan.playback.Orchestrator
-import dylan.playback.PlayerEngine
 import dylan.playback.TransitionReason
 import dylan.provider.MusicProvider
 import dylan.provider.SignedStream
 import dylan.repo.SettingsStore
-import dylan.util.AppDispatchers
+import dylan.support.FakePlayerEngine
+import dylan.support.TestLanes
 import dylan.util.NetClass
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
@@ -41,10 +40,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharedFlow
-import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -55,38 +51,6 @@ import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
-
-private class FakeEngine : PlayerEngine {
-    val preparedWindows = mutableListOf<List<LocalTrack>>()
-    val upNextHistory = mutableListOf<LocalTrack?>()
-
-    private val mutableEvents = MutableSharedFlow<EngineEvent>(extraBufferCapacity = 64)
-    override val events: SharedFlow<EngineEvent> = mutableEvents
-    val mutablePosition = MutableStateFlow(0L)
-    override val positionFlow: StateFlow<Long> = mutablePosition
-
-    override fun prepare(window: List<LocalTrack>) {
-        preparedWindows += window
-        mutableEvents.tryEmit(EngineEvent.Prepared(window.first().itemId))
-        mutableEvents.tryEmit(EngineEvent.TrackChanged(window.first().itemId, TransitionReason.EXPLICIT))
-    }
-
-    override fun replaceUpNext(track: LocalTrack?) {
-        upNextHistory += track
-    }
-
-    override fun play() = Unit
-
-    override fun pause() = Unit
-
-    override fun seekTo(ms: Long) = Unit
-
-    override fun release() = Unit
-
-    fun emit(e: EngineEvent) {
-        mutableEvents.tryEmit(e)
-    }
-}
 
 private class GatedProvider : MusicProvider {
     var gate = CompletableDeferred<Unit>()
@@ -120,11 +84,11 @@ class OrchestratorEdgeTest {
     private lateinit var db: Dylan
     private lateinit var orchestrator: Orchestrator
     private lateinit var downloadEngine: DownloadEngine
-    private lateinit var fakePlayer: FakeEngine
+    private lateinit var fakePlayer: dylan.support.FakePlayerEngine
     private lateinit var provider: GatedProvider
     private lateinit var scope: CoroutineScope
     private lateinit var paths: Paths
-    private lateinit var disp: AppDispatchers
+    private lateinit var disp: dylan.util.AppDispatchers
     private lateinit var bulk: HttpClient
     private lateinit var settings: SettingsStore
     private val protectedKeys = MutableStateFlow<Set<SongKey>>(emptySet())
@@ -143,7 +107,7 @@ class OrchestratorEdgeTest {
         val fs = FileSystem.SYSTEM
         fs.createDirectories(tmp.toPath())
         db = Dylan(DriverFactory("$tmp/dylan.db", testLog).createDriver())
-        disp = AppDispatchers(Dispatchers.Main, Dispatchers.Default, Dispatchers.Default, Dispatchers.Default)
+        disp = TestLanes().disp
         scope =
             CoroutineScope(
                 SupervisorJob() + Dispatchers.Default +
@@ -157,12 +121,16 @@ class OrchestratorEdgeTest {
                     respond(
                         content = mockBody,
                         status = mockStatus,
-                        headers = headersOf("Content-Length" to listOf(mockBody.size.toString()), "Content-Type" to listOf("audio/mp4")),
+                        headers =
+                            headersOf(
+                                "Content-Length" to listOf(mockBody.size.toString()),
+                                "Content-Type" to listOf("audio/mp4"),
+                            ),
                     )
                 },
             )
         buildGraph(AppConfig())
-        fakePlayer = FakeEngine()
+        fakePlayer = dylan.support.FakePlayerEngine.onRealLooper(scope)
         orchestrator.attachEngine(fakePlayer)
         downloadEngine.start()
         mockBody = ftypBody(1000)
@@ -211,7 +179,7 @@ class OrchestratorEdgeTest {
         runCatching { orchestrator.detachEngine() }
         runCatching { downloadEngine.stop() }
         buildGraph(newCfg)
-        fakePlayer = FakeEngine()
+        fakePlayer = dylan.support.FakePlayerEngine.onRealLooper(scope)
         orchestrator.attachEngine(fakePlayer)
         downloadEngine.start()
     }
@@ -267,7 +235,11 @@ class OrchestratorEdgeTest {
             orchestrator.submit(PlayNow(listOf(song("a")), 0))
             val s = awaitPhase { it.phase is dylan.model.Phase.Playing }
             assertEquals("a", s.current?.key?.songId)
-            assertEquals(1, fakePlayer.preparedWindows.last().size, "uncached next means the window holds only the current track")
+            assertEquals(
+                1,
+                fakePlayer.preparedWindows.last().size,
+                "uncached next means the window holds only the current track",
+            )
         }
 
     @Test
@@ -276,7 +248,9 @@ class OrchestratorEdgeTest {
             provider.gate = CompletableDeferred()
             orchestrator.submit(PlayNow(listOf(song("a"), song("b")), 0))
             withTimeout(15_000) {
-                orchestrator.state.first { it.phase is dylan.model.Phase.Resolving || it.phase is dylan.model.Phase.Downloading }
+                orchestrator.state.first {
+                    it.phase is dylan.model.Phase.Resolving || it.phase is dylan.model.Phase.Downloading
+                }
             }
             orchestrator.submit(dylan.playback.Intent.AddLast(song("z")))
             withTimeout(5_000) { orchestrator.state.first { it.queue.any { q -> q.key.songId == "z" } } }
@@ -310,8 +284,11 @@ class OrchestratorEdgeTest {
                     .toList()
             assertEquals(0, order.first(), "current-first permutation expected")
             val expectedId = list[order[1]].key.songId
-            fakePlayer.emit(EngineEvent.QueueExhausted)
-            val wrapped = awaitPhase(timeoutMs = 30_000) { it.phase is dylan.model.Phase.Playing && it.current?.key?.songId == expectedId }
+            fakePlayer.script(EngineEvent.QueueExhausted)
+            val wrapped =
+                awaitPhase(timeoutMs = 30_000) {
+                    it.phase is dylan.model.Phase.Playing && it.current?.key?.songId == expectedId
+                }
             assertEquals(expectedId, wrapped.current?.key?.songId)
         }
 
@@ -367,8 +344,8 @@ class OrchestratorEdgeTest {
             awaitPhase { it.phase is dylan.model.Phase.Playing }
             val window = fakePlayer.preparedWindows.last()
             assertEquals(2, window.size, "a cached next track must ride the initial engine window")
-            fakePlayer.emit(EngineEvent.ItemEnded(window[0].itemId))
-            fakePlayer.emit(EngineEvent.TrackChanged(window[1].itemId, TransitionReason.AUTO))
+            fakePlayer.script(EngineEvent.ItemEnded(window[0].itemId))
+            fakePlayer.script(EngineEvent.TrackChanged(window[1].itemId, TransitionReason.AUTO))
             val advanced = awaitPhase { it.current?.key?.songId == "b" }
             assertTrue(advanced.phase is dylan.model.Phase.Playing, "auto-advance must land in Playing")
             assertEquals(1, advanced.index)
@@ -379,14 +356,16 @@ class OrchestratorEdgeTest {
         runBlocking {
             orchestrator.submit(PlayNow(listOf(song("a"), song("b")), 0))
             awaitPhase { it.phase is dylan.model.Phase.Playing }
-            fakePlayer.mutablePosition.value = 50_000L
-            delay(300)
+            // Absence assertion: proving "no prefetch fired" costs a bounded real wait, because the
+            // only evidence is the absence of an event. 300 ms is ~30 poll ticks.
+            fakePlayer.setPositionMs(50_000L)
+            delay(PREFETCH_ABSENCE_MS)
             assertTrue(
                 downloadEngine.states.value.keys
                     .none { it.songId == "b" },
                 "no prefetch may fire mid-track",
             )
-            fakePlayer.mutablePosition.value = 96_000L
+            fakePlayer.setPositionMs(96_000L)
             withTimeout(30_000) {
                 downloadEngine.states.first { st -> st.keys.any { it.songId == "b" } }
             }
@@ -402,8 +381,8 @@ class OrchestratorEdgeTest {
             assertEquals(dylan.model.Repeat.ONE, s.repeat)
             orchestrator.submit(PlayNow(listOf(song("a"), song("b")), 0))
             awaitPhase { it.phase is dylan.model.Phase.Playing }
-            fakePlayer.mutablePosition.value = 99_500L
-            delay(400)
+            fakePlayer.setPositionMs(99_500L)
+            delay(PREFETCH_ABSENCE_MS)
             assertTrue(
                 downloadEngine.states.value.keys
                     .none { it.songId == "b" },
@@ -417,11 +396,9 @@ class OrchestratorEdgeTest {
             orchestrator.submit(PlayNow(listOf(song("a"), song("b")), 0))
             awaitPhase { it.phase is dylan.model.Phase.Playing }
             assertEquals(1, fakePlayer.preparedWindows.last().size, "uncached next starts as a single-item window")
-            fakePlayer.mutablePosition.value = 96_000L
-            withTimeout(30_000) {
-                while (fakePlayer.upNextHistory.none { it?.itemId?.startsWith("saavn:b:") == true }) delay(50)
-            }
-            fakePlayer.emit(EngineEvent.TrackChanged("saavn:b:128", TransitionReason.AUTO))
+            fakePlayer.setPositionMs(96_000L)
+            withTimeout(30_000) { fakePlayer.upNext.first { t -> t?.itemId?.startsWith("saavn:b:") == true } }
+            fakePlayer.script(EngineEvent.TrackChanged("saavn:b:128", TransitionReason.AUTO))
             val advanced = awaitPhase { it.current?.key?.songId == "b" }
             assertTrue(advanced.phase is dylan.model.Phase.Playing)
         }
@@ -431,7 +408,7 @@ class OrchestratorEdgeTest {
         runBlocking {
             orchestrator.submit(PlayNow(listOf(song("a"), song("b")), 0))
             awaitPhase { it.phase is dylan.model.Phase.Playing }
-            fakePlayer.emit(
+            fakePlayer.script(
                 EngineEvent.ItemEnded(
                     fakePlayer.preparedWindows
                         .last()
@@ -439,10 +416,12 @@ class OrchestratorEdgeTest {
                         .itemId,
                 ),
             )
-            fakePlayer.emit(EngineEvent.QueueExhausted)
+            fakePlayer.script(EngineEvent.QueueExhausted)
             val advanced = awaitPhase { it.current?.key?.songId == "b" }
             assertTrue(
-                advanced.phase is dylan.model.Phase.Playing || advanced.phase is dylan.model.Phase.Downloading || advanced.phase is dylan.model.Phase.Resolving,
+                advanced.phase is dylan.model.Phase.Playing ||
+                    advanced.phase is dylan.model.Phase.Downloading ||
+                    advanced.phase is dylan.model.Phase.Resolving,
                 "natural end with uncached next must pull it down and continue",
             )
         }
@@ -566,6 +545,11 @@ class OrchestratorEdgeTest {
             )
         }
 
+    /**
+     * Rewritten. The previous version passed with the `Next` line deleted: nothing was pending, so
+     * nothing could stomp anything. It now proves the pending advance *existed* before the newer
+     * `PlayNow` superseded it, which is what makes the second half meaningful.
+     */
     @Test
     fun playNowSupersedesPendingSettleAdvance() =
         runBlocking {
@@ -576,15 +560,32 @@ class OrchestratorEdgeTest {
             orchestrator.submit(PlayNow(listOf(song("a"), song("b")), 0))
             awaitPhase { it.phase is dylan.model.Phase.Playing }
             orchestrator.submit(dylan.playback.Intent.Next)
+            // StateFlow.first evaluates the predicate against the current value first, so this
+            // returns as soon as the optimistic advance is visible.
+            val pending = withTimeout(5_000L) { orchestrator.state.first { it.current?.key?.songId == "b" } }
+            assertEquals(
+                "b",
+                pending.current?.key?.songId,
+                "Next must actually arm a pending advance, or the rest of this test proves nothing",
+            )
             orchestrator.submit(PlayNow(listOf(song("z"), song("y")), 0))
             awaitPhase { it.phase is dylan.model.Phase.Playing && it.current?.key?.songId == "z" }
-            delay(600)
+            // The only way to observe that a timer did *not* fire is to outlive it, so this is the
+            // one place in the file where a real wait is not avoidable. skipSettleMs is 350 ms.
+            delay(SETTLE_SETTLE_MS + SETTLE_MARGIN_MS)
             assertEquals(
                 "z",
                 orchestrator.state.value.current
                     ?.key
                     ?.songId,
                 "stale settle timer must not stomp a newer PlayNow",
+            )
+            assertEquals(
+                "y",
+                orchestrator.state.value.nextUp
+                    ?.key
+                    ?.songId,
+                "and the newer PlayNow's own queue must be intact, not the superseded one",
             )
         }
 
@@ -595,12 +596,22 @@ class OrchestratorEdgeTest {
             val list = listOf("a", "b", "c", "d", "e").map(::song)
             orchestrator.submit(PlayNow(list, 0))
             awaitPhase { it.phase is dylan.model.Phase.Playing }
-            fakePlayer.emit(EngineEvent.Error("saavn:a:128", EngineErr.DECODE))
-            fakePlayer.emit(EngineEvent.Error("saavn:a:128", EngineErr.DECODE))
+            fakePlayer.script(EngineEvent.Error("saavn:a:128", EngineErr.DECODE))
+            fakePlayer.script(EngineEvent.Error("saavn:a:128", EngineErr.DECODE))
             awaitPhase { it.phase is dylan.model.Phase.Playing && it.current?.key?.songId == "c" }
-            fakePlayer.emit(EngineEvent.Error("saavn:c:128", EngineErr.DECODE))
-            fakePlayer.emit(EngineEvent.Error("saavn:c:128", EngineErr.DECODE))
-            val end = awaitPhase(timeoutMs = 30_000) { it.phase is dylan.model.Phase.Playing && it.current?.key?.songId == "e" }
-            assertTrue(end.phase is dylan.model.Phase.Playing, "four transient errors across resets must never reach TOO_MANY_FAILURES")
+            fakePlayer.script(EngineEvent.Error("saavn:c:128", EngineErr.DECODE))
+            fakePlayer.script(EngineEvent.Error("saavn:c:128", EngineErr.DECODE))
+            val end =
+                awaitPhase(timeoutMs = 30_000) {
+                    it.phase is dylan.model.Phase.Playing && it.current?.key?.songId == "e"
+                }
+            assertTrue(
+                end.phase is dylan.model.Phase.Playing,
+                "four transient errors across resets must never reach TOO_MANY_FAILURES",
+            )
         }
 }
+
+private const val SETTLE_SETTLE_MS = 350L
+private const val SETTLE_MARGIN_MS = 150L
+private const val PREFETCH_ABSENCE_MS = 300L

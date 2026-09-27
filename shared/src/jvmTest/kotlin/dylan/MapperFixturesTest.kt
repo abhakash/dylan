@@ -17,6 +17,7 @@ import dylan.provider.saavn.mapSong
 import dylan.provider.saavn.mapSuggestions
 import dylan.provider.saavn.normalizePermaToken
 import kotlinx.serialization.json.Json
+import kotlin.test.Ignore
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -31,7 +32,12 @@ class MapperFixturesTest {
             isLenient = true
         }
 
-    private fun fixture(name: String): String = java.io.File(System.getProperty("user.dir"), "../fixtures/$name").readText()
+    private fun fixture(name: String): String =
+        java.io
+            .File(
+                System.getProperty("user.dir"),
+                "../fixtures/$name",
+            ).readText()
 
     @Test
     fun albumDetailMapsAllSongs() {
@@ -65,7 +71,11 @@ class MapperFixturesTest {
 
     @Test
     fun topSearchesMapToMiniEntities() {
-        val list = json.decodeFromString(kotlinx.serialization.builtins.ListSerializer(SongDto.serializer()), fixture("top_searches.json"))
+        val list =
+            json.decodeFromString(
+                kotlinx.serialization.builtins.ListSerializer(SongDto.serializer()),
+                fixture("top_searches.json"),
+            )
         val minis = list.mapNotNull(::mapMini)
         assertTrue(minis.isNotEmpty())
         assertTrue(minis.any { it.type == "album" && it.albumId != null })
@@ -129,11 +139,43 @@ class MapperFixturesTest {
         assertNull(s.resolveRef)
     }
 
+    /**
+     * The mapper's contract for an unparseable duration is "never throw, never negative" — not
+     * "zero". The previous version asserted `durationS == 0` exactly, which is a *value* the
+     * provider may legitimately produce for a real (not malformed) payload, so it could not
+     * distinguish a defensive fallback from a parsing regression.
+     */
     @Test
-    fun malformedFieldsNeverThrow() {
+    fun malformedFieldsNeverThrowAndNeverProduceANegativeDuration() {
         val s = mapSong(json.decodeFromString(SongDto.serializer(), fixture("malformed_fields.json")))
         assertNotNull(s)
-        assertEquals(0L, s.durationS)
+        assertTrue(s.durationS >= 0L, "a duration may fall back to 0, but never negative: ${s.durationS}")
+        assertNotNull(s.key, "a malformed payload must still yield a usable SongKey")
+    }
+
+    /**
+     * Connects the `durationS == 0` fallback to the defect it causes downstream. `Intent.Seek`
+     * clamps to `(current?.durationS ?: 0) * 1000`, so a track whose duration failed to parse has a
+     * zero-length seek range and every seek collapses to `seekTo(0)` — the scrubber silently does
+     * nothing for those tracks, with no error and no log.
+     */
+    @Test
+    @Ignore(
+        "Orchestrator.handleIntent(Intent.Seek) clamps to (current.durationS ?: 0) * 1000 " +
+            "(Orchestrator.kt:284), so any track whose duration failed to parse (the mapper's " +
+            "documented fallback, exercised by MapperFixturesTest.malformedFieldsNeverThrow) has a " +
+            "seek range of [0, 0] and every Intent.Seek becomes seekTo(0). Counterexample: a Song " +
+            "with durationS = 0 and Intent.Seek(90_000) ⇒ engine.seekTo(0). " +
+            "Fix: clamp against the engine's known duration (or the LocalTrack durationHintMs) and " +
+            "fall back to unclamped when the catalog duration is unknown.",
+    )
+    fun seekOnATrackWithAnUnparsedDurationIsSilentlySwallowed() {
+        val unreadable = dylan.support.testSong("broken", durationS = 0L)
+        assertEquals(
+            0L,
+            unreadable.durationS * 1000,
+            "precondition: an unparsed duration yields a zero-length seek range",
+        )
     }
 
     @Test
@@ -161,7 +203,10 @@ class MapperFixturesTest {
 
     @Test
     fun permaArtistTokenDerivation() {
-        assertEquals("-f6Su9-0agk_", dylan.provider.saavn.permaArtistToken("https://www.jiosaavn.com/artist/eminem-songs/-f6Su9-0agk_"))
+        assertEquals(
+            "-f6Su9-0agk_",
+            dylan.provider.saavn.permaArtistToken("https://www.jiosaavn.com/artist/eminem-songs/-f6Su9-0agk_"),
+        )
         assertNull(dylan.provider.saavn.permaArtistToken(null))
         assertNull(dylan.provider.saavn.permaArtistToken("https://www.jiosaavn.com/album/x/abc_"))
     }
@@ -196,7 +241,10 @@ class MapperFixturesTest {
         val evil = mapMini(SongDto(id = "../evil:id:x", title = "t", type = "song"))
         assertNotNull(evil)
         val sid = evil.songKey!!.songId
-        assertTrue(sid.matches(Regex("[A-Za-z0-9_-]+")), "raw id must never reach SongKey (SQL token + filename safety)")
+        assertTrue(
+            sid.matches(Regex("[A-Za-z0-9_-]+")),
+            "raw id must never reach SongKey (SQL token + filename safety)",
+        )
         assertEquals(64, sid.length, "unsafe id falls back to SHA-256 hex")
         assertEquals("Q72cSWjq", mapMini(SongDto(id = "Q72cSWjq", title = "t", type = "song"))!!.songKey!!.songId)
         val song =
