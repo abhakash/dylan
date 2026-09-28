@@ -61,6 +61,13 @@ interface PlayerEngine {
     /** Synchronous engine-known position; -1 when the engine cannot answer inline. */
     fun currentTimeMs(): Long = -1L
 
+    /**
+     * Real media duration of the current item in ms, or -1 when the engine cannot answer inline.
+     * The orchestrator clamps a seek against this rather than against the catalog's duration, whose
+     * documented fallback for an unparseable value is 0.
+     */
+    fun durationMs(): Long = -1L
+
     fun release()
 }
 

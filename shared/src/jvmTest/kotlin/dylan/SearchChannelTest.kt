@@ -2,268 +2,487 @@ package dylan
 
 import dylan.config.AppConfig
 import dylan.diag.LogBuffer
-import dylan.search.CorrelationMode
+import dylan.model.MiniEntity
+import dylan.search.AnswerSource
 import dylan.search.SaavnSearchChannel
 import dylan.search.WsSessionLike
+import dylan.support.MutableClock
 import dylan.support.TestLanes
+import dylan.util.NetClass
+import dylan.util.NetMonitor
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
-import io.ktor.client.engine.mock.respondOk
+import io.ktor.client.engine.mock.respond
+import io.ktor.http.HttpStatusCode
+import io.ktor.http.headersOf
 import io.ktor.websocket.Frame
 import io.ktor.websocket.readText
-import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.test.runTest
-import kotlin.test.Ignore
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.JsonPrimitive
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertNotNull
+import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 
+/**
+ * Correlation tests for the suggestion socket.
+ *
+ * Two properties changed the shape of this suite:
+ *
+ *  1. The origin's frame carries **no query echo and no request id** (`fixtures/autocomplete_ws_frame.json`;
+ *     `ProbeMain` P4 finds 0/3 echoes). The previous fake replied after a delay *with* a query echo,
+ *     so every correlation assertion in the old suite ran against a fiction the server never sent.
+ *     These tests script the frames instead and never rely on an echo.
+ *  2. A mispair cannot be repaired by reading more frames — the next frame may be the earlier
+ *     demand's late answer, which would then pop our stamp and be rendered as ours. So a mispair
+ *     closes the socket and the demand is answered from HTTP. A test that cannot see a mispair
+ *     therefore cannot see a wrong answer either.
+ *
+ * No wall-clock dependence: the scripted session delivers frames when the test says so, and the only
+ * real time in the suite is the engine's own debounce and the (deliberately tiny) answer deadline,
+ * which are configuration values, not assertions about elapsed time.
+ */
 class SearchChannelTest {
-    private class FakeSession(
-        private val launchScope: kotlinx.coroutines.CoroutineScope,
-        private val replyDelayMs: Long,
-    ) : WsSessionLike {
+    /**
+     * A frame whose payload is unmistakably the answer to [token], and which carries **no query
+     * echo** — the real shape (`fixtures/autocomplete_ws_frame.json`).
+     */
+    private fun frameFor(
+        token: String,
+        action: String = "search",
+    ): Frame.Text {
+        val inner =
+            "{\"modules\":[{\"title\":\"Songs\"}]," +
+                "\"data_0\":[{\"id\":\"${token}id\",\"title\":\"$token\",\"type\":\"song\"}]}"
+        // `resp` is a nested JSON *string* in the real frame, so the payload must be escaped into
+        // it. Interpolating it raw produced a frame that is not valid JSON at all, and the decoder
+        // rejected the whole thing with FRAME_NOT_JSON.
+        return Frame.Text("""{"action":"$action","resp":${JsonPrimitive(inner)}}""")
+    }
+
+    /**
+     * A session the test drives. Frames are pushed explicitly, so no test depends on a reply delay
+     * and the ordering is a property of the test, not of the scheduler.
+     */
+    private class ScriptedSession : WsSessionLike {
         override val incoming = Channel<Frame>(Channel.UNLIMITED)
         val sent = mutableListOf<String>()
-        private var autoReply: (suspend (String) -> Unit)? = null
-
-        fun onSend(reply: suspend (String) -> Unit) {
-            autoReply = reply
-        }
+        var closeCount = 0
 
         override suspend fun send(frame: Frame) {
-            val q = (frame as Frame.Text).readText()
-            sent += q
-            // async like a real socket: reply lands AFTER send() returns, so an abandoned
-            // request can be cancelled between queueing and consuming its answer
-            autoReply?.let { cb ->
-                launchScope.launch {
-                    delay(replyDelayMs)
-                    cb(q)
-                }
-            }
+            sent += (frame as Frame.Text).readText()
         }
 
         override suspend fun close() {
-            incoming.close()
+            closeCount++
         }
+
+        fun queryOf(sent: String): String =
+            Regex("query=([^&]+)")
+                .find(sent)
+                ?.groupValues
+                ?.get(1)
+                ?.let { java.net.URLDecoder.decode(it, "UTF-8") } ?: sent
     }
 
-    private fun suggestionsJson(q: String) = """{"action":"search","resp":"{\"modules\":[{\"title\":\"Songs\",\"position\":0,\"source\":\"data_0\"}],\"data_0\":[],\"query\":\"$q\"}"}"""
-
-    private val noopHttp = HttpClient(MockEngine { _ -> respondOk("{}") }) { }
-
-    // onBackground() must land on the same lane the WS engine runs on, or the channel's own
-    // state is racy in the test exactly as it was on device. Production lanes, not Dispatchers.Default.
+    private val clock = MutableClock()
     private val lanes = TestLanes()
+    private val httpCalls = mutableListOf<String>()
 
-    private fun newChannel(
-        scope: kotlinx.coroutines.CoroutineScope,
-        cfg: AppConfig = AppConfig(),
-        replyDelayMs: Long = 50,
-        sessionInit: (FakeSession) -> Unit = {},
+    /** The HTTP fallback answers with a payload that is *also* unmistakably HTTP's. */
+    private val httpAnswer =
+        """{"songs":{"data":[{"id":"httpid","title":"http","type":"song"}]}}"""
+
+    private val net =
+        object : NetMonitor {
+            override fun current(): NetClass = NetClass.UNMETERED
+
+            override fun isOnline(): Boolean = true
+
+            override fun changes(): Flow<NetClass> = MutableStateFlow(NetClass.UNMETERED)
+        }
+
+    private fun http(): HttpClient =
+        HttpClient(
+            MockEngine { req ->
+                httpCalls += req.url.toString()
+                respond(
+                    content = httpAnswer,
+                    status = HttpStatusCode.OK,
+                    headers = headersOf("Content-Type", listOf("application/json")),
+                )
+            },
+        )
+
+    private val sessions = mutableListOf<ScriptedSession>()
+    private var scope: CoroutineScope? = null
+
+    private fun channel(
+        cfg: AppConfig =
+            AppConfig(
+                clock = clock,
+                wsTypingDebounceMs = TEST_DEBOUNCE_MS,
+                wsAnswerTimeoutMs = TEST_ANSWER_MS,
+                wsSearchBudgetMs = TEST_BUDGET_MS,
+            ),
     ): SaavnSearchChannel {
         val ch =
             SaavnSearchChannel(
-                http = noopHttp,
-                wsClient = HttpClient(MockEngine { _ -> error("ws engine unused: connectBlock is faked") }) { },
+                http = http(),
+                wsClient = HttpClient(MockEngine { error("ws engine unused: connectBlock is scripted") }),
                 cfg = cfg,
-                scope = scope,
+                scope = CoroutineScope(lanes.disp.io + SupervisorJob()).also { scope = it },
                 disp = lanes.disp,
                 log = LogBuffer(),
+                net = net,
             )
-        ch.connectBlock = { FakeSession(scope, replyDelayMs).apply(sessionInit) }
+        ch.connectBlock = { ScriptedSession().also { sessions += it } }
         return ch
     }
 
-    @Test
-    fun orderedModeAnswersTheQueryItAskedFor() =
-        runTest {
-            lateinit var session: FakeSession
-            val ch =
-                newChannel(backgroundScope) { s ->
-                    session = s
-                    s.onSend { q -> s.incoming.send(Frame.Text(suggestionsJson(q))) }
-                }
-            ch.correlationMode = CorrelationMode.ORDERED
-            val out = ch.suggest("pop")
-            assertEquals(CorrelationMode.ORDERED, ch.correlationMode)
-            assertTrue(
-                session.sent.any { it.contains("autocomplete.get&query=pop") },
-                "the query must actually reach the wire, sent=${session.sent}",
-            )
-            assertEquals(0, out.size)
-            assertEquals(0, ch.timeoutStrikesForTest())
-        }
+    private fun closeChannel() {
+        scope?.cancel()
+        scope = null
+    }
 
-    @Test
-    fun silenceTimesOutCountsStrikeServesHttp() =
-        runTest {
-            val ch = newChannel(backgroundScope) { }
-            val out = ch.suggest("silent")
-            assertTrue(out.isEmpty())
-            assertEquals(1, ch.timeoutStrikesForTest())
-            assertEquals(0, ch.socketStrikesForTest(), "timeout never counts as a socket-error strike")
+    /** Bounded wait for a condition. Not an assertion about timing — a failing condition fails. */
+    private fun waitFor(
+        what: String,
+        ceilingMs: Long = CEILING_MS,
+        cond: () -> Boolean,
+    ) {
+        val end = System.nanoTime() + ceilingMs * 1_000_000
+        while (System.nanoTime() < end) {
+            if (cond()) return
+            Thread.sleep(POLL_MS)
         }
+        throw AssertionError("timed out waiting for $what")
+    }
 
-    @Test
-    fun threeConsecutiveTimeoutsGoHttpOnlyForSession() =
-        runTest {
-            val ch = newChannel(backgroundScope) { }
-            repeat(3) { ch.suggest("dead$it") }
-            assertTrue(ch.httpOnlyForTest())
-            val strikesBefore = ch.timeoutStrikesForTest()
-            ch.suggest("still-dead")
-            assertEquals(strikesBefore, ch.timeoutStrikesForTest(), "degraded channel never re-arms the WS")
-        }
+    private fun titles(items: List<MiniEntity>) = items.map { it.title }
 
-    @Test
-    fun healthyResponseResetsBothCounters() =
-        runTest {
-            val ch =
-                newChannel(backgroundScope) { s ->
-                    s.onSend { q -> if (q.contains("query=one-good")) s.incoming.send(Frame.Text(suggestionsJson(q))) }
-                }
-            ch.suggest("bad-one")
-            assertEquals(1, ch.timeoutStrikesForTest())
-            ch.suggest("one-good")
-            assertEquals(0, ch.timeoutStrikesForTest(), "healthy response resets both counters")
-            assertEquals(0, ch.socketStrikesForTest())
-        }
+    // ── the epoch, not the query string ─────────────────────────────────────────────────────
 
     /**
-     * Inverted from the pre-wave version, which was named `repeatedMispairsFlipToFallbackSingleFlight`
-     * while asserting the opposite (`correlationMode == ORDERED`). The behaviour it actually
-     * protects is worth stating plainly: `collectLatest` cancellation removes an abandoned query
-     * from the FIFO deque, so a cancelled request must *not* be counted as a divergence.
-     */
-    @Test
-    @OptIn(ExperimentalCoroutinesApi::class)
-    fun cancelledRequestsNeverCountAsMispairsSoTheModeStaysOrdered() =
-        runTest {
-            val ch =
-                newChannel(
-                    backgroundScope,
-                    cfg = AppConfig(wsRequestTimeoutMs = 2000),
-                    replyDelayMs = 300,
-                ) { s ->
-                    s.onSend { q -> s.incoming.send(Frame.Text(suggestionsJson(q))) }
-                }
-            ch.correlationMode = CorrelationMode.ORDERED
-            repeat(3) { round ->
-                val abandoned = launch { ch.suggest("a$round") }
-                testScheduler.advanceTimeBy(150)
-                ch.suggest("b$round")
-                testScheduler.advanceUntilIdle()
-                abandoned.cancel()
-                abandoned.join()
-            }
-            assertEquals(
-                CorrelationMode.ORDERED,
-                ch.correlationMode,
-                "cancellation-induced abandonment is not a mispair (F4)",
-            )
-            assertTrue(
-                !ch.debugState().contains("div=3"),
-                "divergence must not accumulate from cancellations: ${ch.debugState()}",
-            )
-        }
-
-    /**
-     * Replaces the deleted `trueOutOfOrderFramesStillFlipToSingleFlight`, whose assertion was
-     * `mode=UNORDERED || mode == ORDERED` — always true, while its comment claimed the opposite.
-     * This states what actually happens, and it is falsifiable.
+     * The defect: keystroke `a` sends; 130 ms later the user types `ab`, cancelling the `a` block;
+     * the socket then delivers **the answer for `a`**, which the old FIFO popped against `ab`,
+     * matched (`head == query` was vacuously true), and rendered as the suggestions for `ab`.
      *
-     * The reason is structural, not accidental: `tryWs` correlates by *FIFO position*, not by
-     * frame content, and `engine()`'s `collectLatest` guarantees at most one outstanding query. So
-     * the deque head is always the current query and `divergence` can never increment — the
-     * UNORDERED degradation path is unreachable. Frames delivered in any order are therefore
-     * accepted, and the frame *content* is never checked against the query it answers.
+     * A frame for `a` delivered while `ab` is outstanding must never be rendered for `ab`.
      */
     @Test
-    @OptIn(ExperimentalCoroutinesApi::class)
-    fun outOfOrderFramesAreUnreachableSoDivergenceNeverIncrements() =
-        runTest {
-            val ch =
-                newChannel(
-                    backgroundScope,
-                    cfg = AppConfig(wsRequestTimeoutMs = 2000),
-                    replyDelayMs = 10,
-                ) { s ->
-                    s.onSend { q ->
-                        if (q.contains("query=a")) {
-                            // Wrong query's payload for a's request: accepted anyway.
-                            s.incoming.send(Frame.Text(suggestionsJson("b")))
-                        } else {
-                            s.incoming.send(Frame.Text(suggestionsJson(q)))
-                        }
-                    }
-                }
-            ch.correlationMode = CorrelationMode.ORDERED
+    fun aFrameForAnAbandonedQueryIsNeverRenderedForTheCurrentOne() {
+        val ch = channel()
+        runBlocking {
             ch.request("a")
-            ch.request("b")
-            ch.request("c")
-            testScheduler.advanceUntilIdle()
+            waitFor("the a query on the wire") { sessions.any { s -> s.sent.isNotEmpty() } }
+            val aSent = sessions.first()
+            val epochA = ch.stateForTest().epoch
+
+            ch.request("ab")
+            waitFor("the ab query on the wire") { aSent.sent.size == 2 }
+            val epochB = ch.stateForTest().epoch
+
+            // The socket now delivers `a`'s answer, late, while `ab` is the live demand.
+            aSent.incoming.trySend(frameFor("aaa"))
+
+            waitFor("an answer for ab") { ch.answerForTest()?.epoch == epochB }
+            val answer = ch.answerForTest()!!
+            assertNotEquals(
+                listOf("aaa"),
+                titles(answer.items),
+                "the answer for the abandoned query 'a' was rendered for 'ab'",
+            )
             assertEquals(
-                CorrelationMode.ORDERED,
-                ch.correlationMode,
-                "reordering cannot be detected: the deque head is always the current query",
+                AnswerSource.HTTP,
+                answer.via,
+                "a mispair must be answered from HTTP, which correlates implicitly, not guessed at",
+            )
+            assertTrue(ch.stateForTest().divergence >= 1, "the mispair must be detected, not absorbed: ${ch.debugState()}")
+        }
+        closeChannel()
+    }
+
+    /** The stamp is the only reason the mispair above is *visible*. It must outlive cancellation. */
+    @Test
+    fun theCancelledStampIsRetainedSoTheLateFrameCannotPopTheWrongQuery() {
+        val ch = channel()
+        runBlocking {
+            ch.request("a")
+            waitFor("the a query on the wire") { sessions.any { s -> s.sent.isNotEmpty() } }
+            val s = sessions.first()
+            val epochA = ch.stateForTest().epoch
+
+            ch.request("ab")
+            waitFor("the ab query on the wire") { s.sent.size == 2 }
+            val epochB = ch.stateForTest().epoch
+
+            assertEquals(
+                listOf(epochA, epochB),
+                ch.stampsForTest(),
+                "cancelling the 'a' demand must NOT remove its stamp — that removal is the bug",
+            )
+        }
+        closeChannel()
+    }
+
+    /** A true reorder: the later query's frame arrives before the earlier query's. */
+    @Test
+    fun aReorderIncrementsDivergenceAndIsNotGuessedAt() {
+        val ch = channel()
+        runBlocking {
+            ch.request("a")
+            waitFor("the a query on the wire") { sessions.any { s -> s.sent.isNotEmpty() } }
+            val s = sessions.first()
+            ch.request("ab")
+            waitFor("the ab query on the wire") { s.sent.size == 2 }
+            val epochB = ch.stateForTest().epoch
+
+            // Reverse order: ab's answer first.
+            s.incoming.trySend(frameFor("b-response"))
+            waitFor("an answer for ab") { ch.answerForTest()?.epoch == epochB }
+
+            assertTrue(
+                ch.stateForTest().divergence >= 1,
+                "reordering must increment the divergence counter: ${ch.debugState()}",
+            )
+            assertEquals(
+                AnswerSource.HTTP,
+                ch.answerForTest()!!.via,
+                "a reordered frame must not be accepted: FIFO said it belonged to the earlier demand",
+            )
+            assertNotEquals(
+                listOf("b-response"),
+                titles(ch.answerForTest()!!.items),
+                "the reordered payload was rendered as ab's suggestions",
+            )
+        }
+        closeChannel()
+    }
+
+    // ── the happy path still works ──────────────────────────────────────────────────────────
+
+    @Test
+    fun aFrameForTheCurrentDemandIsRenderedOverTheWebSocket() {
+        val ch = channel()
+        runBlocking {
+            ch.request("arijit")
+            waitFor("the query on the wire") { sessions.any { s -> s.sent.isNotEmpty() } }
+            val s = sessions.first()
+            val epoch = ch.stateForTest().epoch
+            assertTrue(s.sent.first().contains("autocomplete.get"), "the query must reach the wire: ${s.sent}")
+            s.incoming.trySend(frameFor("arijit-result"))
+            waitFor("the ws answer") { ch.answerForTest()?.epoch == epoch }
+            val a = ch.answerForTest()!!
+            assertEquals(AnswerSource.WS, a.via)
+            assertEquals(listOf("arijit-result"), titles(a.items))
+        }
+        closeChannel()
+    }
+
+    @Test
+    fun aNonSearchActionIsNotRenderedAsResults() {
+        val ch = channel()
+        runBlocking {
+            ch.request("arijit")
+            waitFor("the query on the wire") { sessions.any { s -> s.sent.isNotEmpty() } }
+            val s = sessions.first()
+            val epoch = ch.stateForTest().epoch
+            s.incoming.trySend(frameFor("keepalive-frame", action = "keepalive"))
+            waitFor("an answer for that demand") { ch.answerForTest()?.epoch == epoch }
+            assertEquals(
+                AnswerSource.HTTP,
+                ch.answerForTest()!!.via,
+                "a keepalive must fall back, not render as a result set",
+            )
+        }
+        closeChannel()
+    }
+
+    // ── degradation is a cooldown, not a latch ──────────────────────────────────────────────
+
+    @Test
+    fun threeTimeoutsOpenACooldownThatExpires() {
+        val ch =
+            channel(
+                AppConfig(
+                    clock = clock,
+                    wsTypingDebounceMs = TEST_DEBOUNCE_MS,
+                    wsAnswerTimeoutMs = TEST_ANSWER_MS,
+                    wsSearchBudgetMs = TEST_BUDGET_MS,
+                ),
+            )
+        runBlocking {
+            repeat(3) { i ->
+                ch.request("dead$i")
+                waitFor("dead$i to be answered") { ch.answerForTest()?.query == "dead$i" }
+            }
+            waitFor("the cooldown to open") { ch.stateForTest().suppressed }
+            assertTrue(ch.stateForTest().cooldownRemainingMs > 0, "${ch.debugState()}")
+
+            ch.request("during-cooldown")
+            waitFor("an answer during the cooldown") { ch.answerForTest()?.query == "during-cooldown" }
+            val sessionsDuring = sessions.size
+            assertEquals(
+                sessionsDuring,
+                sessions.size,
+                "no socket is opened while suppressed (opened ${sessions.size} in total)",
+            )
+
+            // Half-open: the cooldown expires, so the next demand probes again.
+            clock.advanceMs(AppConfig().wsCooldownBaseMs + 1)
+            assertTrue(!ch.stateForTest().suppressed, "the cooldown must expire, not latch for the process")
+            ch.request("after-cooldown")
+            waitFor("a re-probe") { sessions.size > sessionsDuring }
+        }
+        closeChannel()
+    }
+
+    @Test
+    fun aHealthyAnswerClearsTheDegradationState() {
+        val ch = channel()
+        runBlocking {
+            repeat(3) { i ->
+                ch.request("dead$i")
+                waitFor("dead$i to be answered") { ch.answerForTest()?.query == "dead$i" }
+            }
+            waitFor("the cooldown to open") { ch.stateForTest().suppressed }
+            clock.advanceMs(AppConfig().wsCooldownBaseMs + 1)
+            // The three timeouts each dropped their socket, so the re-probe opens a NEW one:
+            // waiting on `sessions.last().sent` alone is satisfied by the dead session above.
+            val sessionsBeforeProbe = sessions.size
+            ch.request("good")
+            waitFor("the re-probe socket after the cooldown") { sessions.size > sessionsBeforeProbe }
+            val s = sessions.last()
+            val epoch = ch.stateForTest().epoch
+            s.incoming.trySend(frameFor("good-result"))
+            waitFor("the ws answer") { ch.answerForTest()?.epoch == epoch && ch.answerForTest()?.via == AnswerSource.WS }
+            assertEquals(0, ch.stateForTest().cooldownRemainingMs, "a good answer must clear the cooldown: ${ch.debugState()}")
+        }
+        closeChannel()
+    }
+
+    // ── one owner for the socket ────────────────────────────────────────────────────────────
+
+    @Test
+    fun warmUpAndADemandNeverOpenTwoSockets() {
+        val ch = channel()
+        runBlocking {
+            ch.warmUp()
+            waitFor("the warm-up socket") { sessions.isNotEmpty() }
+            val first = sessions.first()
+            ch.request("arijit")
+            waitFor("the demand to be sent") { first.sent.isNotEmpty() }
+            ch.warmUp()
+            Thread.sleep(QUIET_MS)
+            assertEquals(1, sessions.size, "a live socket must be reused, not replaced: ${sessions.size} opened")
+            assertEquals(0, first.closeCount, "a replaced socket is leaked; a reused one is not closed")
+        }
+        closeChannel()
+    }
+
+    // ── normalisation, clearing, and the request surface ────────────────────────────────────
+
+    @Test
+    fun queriesAreNormalisedOnceAtTheBoundary() {
+        val ch = channel()
+        runBlocking {
+            ch.request("  ari  ")
+            ch.request("ari")
+            waitFor("the query on the wire") { sessions.any { s -> s.sent.isNotEmpty() } }
+            Thread.sleep(QUIET_MS)
+            assertEquals(
+                1,
+                sessions.sumOf { it.sent.size },
+                "an untrimmed and a trimmed version of the same keystrokes are one demand: " +
+                    sessions.flatMap { it.sent },
             )
             assertTrue(
-                ch.debugState().contains("div=0"),
-                "so the divergence counter — the only thing that flips the mode — never moves: ${ch.debugState()}",
+                sessions
+                    .first()
+                    .sent
+                    .first()
+                    .contains("query=ari"),
+                sessions.first().sent.first(),
             )
-            testScheduler.advanceUntilIdle()
         }
+        closeChannel()
+    }
 
     /**
-     * The consequence of correlating by position instead of by content, and the real defect this
-     * area actually has. A duplicated or late frame stays in `incoming` after its query was
-     * answered; the next query pops its own FIFO head and is then handed the *stale* frame.
+     * `request("")` used to return before touching the channel, so the previous query's socket read
+     * kept the session busy to its full deadline after the user had cleared the box.
      */
     @Test
-    @Ignore(
-        "SaavnSearchChannel.tryWs correlates by FIFO position, not by frame content " +
-            "(SaavnSearchChannel.kt:167-172), so a frame that outlives its query is served as the " +
-            "answer to the next one. Counterexample: the session answers the query 'one' with two " +
-            "frames; suggest('one') consumes the first, then suggest('two') pops head='two' and is " +
-            "answered with 'one' payload. Fix: carry the query (or a correlation id) in the request " +
-            "and match it in the response instead of relying on send order. " +
-            "See docs/codebase-audit.md section 3.5.",
-    )
-    @OptIn(ExperimentalCoroutinesApi::class)
-    fun aLateFrameIsServedAsTheAnswerToTheNextQuery() =
-        runTest {
-            val ch =
-                newChannel(
-                    backgroundScope,
-                    cfg = AppConfig(wsRequestTimeoutMs = 2000),
-                    replyDelayMs = 10,
-                ) { s ->
-                    s.onSend { q ->
-                        if (q.contains("query=one")) {
-                            s.incoming.send(Frame.Text(suggestionsJson("one")))
-                            s.incoming.send(Frame.Text(suggestionsJson("one")))
-                        } else {
-                            s.incoming.send(Frame.Text(suggestionsJson(q)))
-                        }
-                    }
-                }
-            ch.correlationMode = CorrelationMode.ORDERED
-            ch.suggest("one")
-            testScheduler.advanceUntilIdle()
-            ch.suggest("two")
-            testScheduler.advanceUntilIdle()
-            val answer = ch.suggestions.value
-            assertNotNull(answer, "the second query must have been answered at all")
-            assertTrue(
-                answer.second.isEmpty(),
-                "the stale frame was answered to the second query but never should have been: " +
-                    "query=${answer.first} results=${answer.second.size}",
-            )
+    fun clearingTheQueryReachesTheChannelAndReleasesTheSocket() {
+        val ch = channel()
+        runBlocking {
+            ch.request("arijit")
+            waitFor("the query on the wire") { sessions.any { s -> s.sent.isNotEmpty() } }
+            val s = sessions.first()
+            val epochBefore = ch.stateForTest().epoch
+            ch.request("")
+            waitFor("the socket to be released") { s.closeCount > 0 }
+            assertNotEquals(epochBefore, ch.stateForTest().epoch, "clearing must advance the epoch, or an in-flight answer is still renderable")
+            assertTrue(ch.stampsForTest().isEmpty(), "the FIFO must not keep stamps for a cleared demand")
         }
+        closeChannel()
+    }
+
+    @Test
+    fun suggestOnABlankQueryIsEmptyAndCostsNothing() {
+        val ch = channel()
+        runBlocking {
+            assertEquals(emptyList(), ch.suggest("   "))
+            assertEquals(0, httpCalls.size, "a blank query must not reach the network")
+        }
+        closeChannel()
+    }
+
+    @Test
+    fun anOfflineDeviceAnswersOfflineWithoutOpeningASocket() {
+        val offline =
+            object : NetMonitor {
+                override fun current(): NetClass = NetClass.METERED
+
+                override fun isOnline(): Boolean = false
+
+                override fun changes(): Flow<NetClass> = MutableStateFlow(NetClass.METERED)
+            }
+        val ch =
+            SaavnSearchChannel(
+                http = http(),
+                wsClient = HttpClient(MockEngine { error("unused") }),
+                cfg = AppConfig(clock = clock, wsTypingDebounceMs = TEST_DEBOUNCE_MS, wsSearchBudgetMs = TEST_BUDGET_MS),
+                scope = CoroutineScope(lanes.disp.io + SupervisorJob()).also { scope = it },
+                disp = lanes.disp,
+                log = LogBuffer(),
+                net = offline,
+            )
+        ch.connectBlock = { ScriptedSession().also { sessions += it } }
+        runBlocking {
+            ch.request("arijit")
+            waitFor("an answer") { ch.answerForTest() != null }
+            val a = ch.answerForTest()!!
+            assertEquals(dylan.model.ErrorCode.OFFLINE, a.error)
+            assertTrue(sessions.isEmpty(), "an offline device must not open a socket")
+        }
+        closeChannel()
+    }
+
+    private companion object {
+        /** Small but non-zero: 0 would make `delay(0)` a busy loop in the engine. */
+        const val TEST_DEBOUNCE_MS = 20
+        const val TEST_ANSWER_MS = 250L
+        const val TEST_BUDGET_MS = 3_000L
+        const val CEILING_MS = 5_000L
+        const val POLL_MS = 5L
+        const val QUIET_MS = 150L
+    }
 }

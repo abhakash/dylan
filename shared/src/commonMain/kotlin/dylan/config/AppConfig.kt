@@ -16,10 +16,39 @@ data class AppConfig(
     val userAgent: String = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
     val wsSearchUrl: String = "wss://ws.jiosaavn.com/",
     val wsTypingDebounceMs: Int = 120,
-    val wsRequestTimeoutMs: Int = 800,
     val wsPingIntervalMs: Int = 25_000,
     val wsBackoffBaseMs: Long = 1_000,
     val wsBackoffCapMs: Long = 16_000,
+
+    // ── WS budget, split in two (audit SE-2 / §3.5) ───────────────────────────────────────
+    // The socket is a *latency optimisation only*: the frame carries no query echo and no
+    // request id, so FIFO position is strictly weaker correlation than HTTP's implicit
+    // correlation. Budget therefore has two independent parts, because a cold TLS connect
+    // (hundreds of ms to seconds on mobile) must not be charged against the answer window.
+    /** Ktor deliberately skips `requestTimeoutMillis` for `wss://`, so the upgrade needs its own. */
+    val wsHandshakeTimeoutMs: Long = 5_000,
+    /** Hard ceiling on `webSocketSession()`; a blackholed upgrade otherwise pins the engine. */
+    val wsHandshakeAttempts: Int = 2,
+    /** Per-answer window. Probe P12 measures a healthy handshake+round-trip at <2 s. */
+    val wsAnswerTimeoutMs: Long = 1_500,
+    /** Frames accepted per demand. The server answers one request per frame; 1 is the budget. */
+    val wsFrameBudget: Int = 1,
+    /** Total wall budget for one suggestion answer (WS attempt(s) + HTTP fallback). */
+    val wsSearchBudgetMs: Long = 2_500,
+    /** Consecutive WS failures before the cooldown opens. */
+    val wsStrikesBeforeCooldown: Int = 3,
+    /** Cooldown after degradation. It EXPIRES — the next demand is a half-open re-probe. */
+    val wsCooldownBaseMs: Long = 30_000,
+    /** Ceiling for a repeatedly-failing cooldown (each post-cooldown failure doubles it). */
+    val wsCooldownCapMs: Long = 600_000,
+
+    // ── catalog resilience (audit §3.5: null-returning provider) ─────────────────────────
+    /** In-memory LRU entries for album/artist/home/topSearches. */
+    val catalogLruEntries: Int = 24,
+    /** How long a failed endpoint is answered from cache instead of re-requested. */
+    val catalogNegativeTtlMs: Long = 30_000,
+    /** `Retry-After` longer than this is not honoured; the negative TTL wins instead. */
+    val catalogRetryAfterCapMs: Long = 60_000,
     val submitPageSize: Int = 20,
     val cacheMaxFiles: Int = 300,
     val cacheMaxBytes: Long = 2L * 1024 * 1024 * 1024,
@@ -44,6 +73,14 @@ data class AppConfig(
     val skipSettleMs: Int = 350,
     // Rapid Next/Previous taps inside this window are dropped (first tap always allowed).
     val navDebounceMs: Long = 300,
+    // Resume artifact: how often a playing session may rewrite it, and how far the position has to
+    // move before a tick considers it changed. The write is one dbLane round-trip plus a whole-queue
+    // serialisation, so a ticker that fired unconditionally contended with every download step.
+    val snapshotIntervalMs: Long = 30_000,
+    val snapshotPosStepMs: Long = 5_000,
+    // A resume snapshot older than this describes a track that was paused, not one that was playing
+    // when the process died, so its position is not honoured.
+    val resumeMaxAgeMs: Long = RESUME_MAX_AGE_MINUTES * MS_PER_MINUTE,
     // ensureReady watchdog: log-only tripwire, never fails playback (readyTimeoutMs still owns failure).
     val ensureReadyWatchdogMs: Long = 15_000,
     val prefetchEnabled: Boolean = true,
@@ -65,4 +102,10 @@ data class AppConfig(
      * tests; production graphs leave it at [SystemClock].
      */
     val clock: Clock = SystemClock,
-)
+) {
+    private companion object {
+        /** 15 minutes: a snapshot older than this describes a paused track, not a playing one. */
+        const val RESUME_MAX_AGE_MINUTES = 15
+        const val MS_PER_MINUTE = 60_000L
+    }
+}

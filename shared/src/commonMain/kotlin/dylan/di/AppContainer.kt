@@ -222,8 +222,19 @@ class AppContainer(
                     requestTimeoutMillis = 8_000
                 }
             }
-        val channel = SaavnSearchChannel(api, ws, cfg, componentScope("search", disp.state), disp, log)
-        return NetGraph(api, bulk, ws, SaavnProvider(api, cfg), channel, netMonitor)
+        // The search engine maps and decodes JSON, which is CPU-bound and does not yield, so it
+        // belongs on io — NOT on `state`, which also carries the orchestrator inbox and the 10 Hz
+        // position ticker. (The channel forces io internally too; this keeps the scope's default
+        // consistent with where its work actually runs.)
+        val channel = SaavnSearchChannel(api, ws, cfg, componentScope("search", disp.io), disp, log, netMonitor)
+        return NetGraph(
+            api,
+            bulk,
+            ws,
+            SaavnProvider(api, cfg, componentScope("provider", disp.io), disp, netMonitor, log),
+            channel,
+            netMonitor,
+        )
     }
 
     private fun buildPlayback(): PlaybackGraph {

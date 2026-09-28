@@ -7,32 +7,19 @@ import dylan.model.Repeat
 internal object QueueStateMachine {
     fun transportable(phase: Phase): Boolean = phase is Phase.Playing || phase is Phase.Paused || phase is Phase.Ready
 
+    /**
+     * The single owner of "what plays next". Pure and total: it reads only the queue's four algebra
+     * inputs, so it answers identically for a `PlayerState` built by hand and for one produced by
+     * `PlayerState.withQueueMutation`, and it always returns a slot in `0 until queue.size`.
+     */
+    fun nextIndex(
+        state: PlayerState,
+        dir: Int,
+    ): Int? = PlayerState.nextIndexIn(state.queue, state.index, state.shuffleOrder, state.shuffleOn, state.repeat, dir)
+
+    /** Repeat-ONE pins the transport: both directions stay on the current index. */
     fun resolveAdvance(
         state: PlayerState,
         dir: Int,
-    ): Int? {
-        if (state.queue.isEmpty()) return null
-        // Repeat ONE pins the transport: next and previous both stay on the current index.
-        if (state.repeat == Repeat.ONE) return state.index.takeIf { it in state.queue.indices }
-        return if (state.shuffleOn) {
-            val order = state.shuffleOrder ?: return null
-            val pos = order.indexOf(state.index)
-            if (pos < 0) return null
-            val nextPos = pos + dir
-            when {
-                nextPos in order.indices -> order[nextPos]
-                dir > 0 && state.repeat == Repeat.ALL -> order.first()
-                dir < 0 && state.repeat == Repeat.ALL -> order.last()
-                else -> null
-            }
-        } else {
-            val n = state.index + dir
-            when {
-                n in state.queue.indices -> n
-                dir > 0 && state.repeat == Repeat.ALL -> 0
-                dir < 0 && state.repeat == Repeat.ALL -> state.queue.lastIndex
-                else -> null
-            }
-        }
-    }
+    ): Int? = nextIndex(state, dir)
 }

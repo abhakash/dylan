@@ -1,6 +1,8 @@
 package dylan
 
 import dylan.model.Quality
+import dylan.provider.durationKnown
+import dylan.provider.dylanJson
 import dylan.provider.saavn.art500
 import dylan.provider.saavn.coerceHas320
 import dylan.provider.saavn.dto.AlbumDto
@@ -26,11 +28,14 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class MapperFixturesTest {
-    private val json =
-        Json {
-            ignoreUnknownKeys = true
-            isLenient = true
-        }
+    private val json = dylanJson
+
+    private fun fixturesDir() = java.io.File(System.getProperty("user.dir"), "../fixtures")
+
+    private fun testSources(): List<java.io.File> {
+        val root = java.io.File(System.getProperty("user.dir"), "src")
+        return root.walkTopDown().filter { it.isFile && it.name.endsWith(".kt") }.toList()
+    }
 
     private fun fixture(name: String): String =
         java.io
@@ -140,17 +145,69 @@ class MapperFixturesTest {
     }
 
     /**
-     * The mapper's contract for an unparseable duration is "never throw, never negative" — not
-     * "zero". The previous version asserted `durationS == 0` exactly, which is a *value* the
-     * provider may legitimately produce for a real (not malformed) payload, so it could not
-     * distinguish a defensive fallback from a parsing regression.
+     * The contract is explicit rather than "never negative": an unparseable duration is a *named
+     * drift*, and `durationKnown(0)` is false, so a caller can tell "unknown" from "zero-length".
+     * Asserting `durationS == 0` could not distinguish a defensive fallback from a parsing
+     * regression, because 0 is also a value a real payload produces.
      */
     @Test
-    fun malformedFieldsNeverThrowAndNeverProduceANegativeDuration() {
+    fun malformedFieldsYieldAnExplicitUnknownDurationNotASilentZero() {
         val s = mapSong(json.decodeFromString(SongDto.serializer(), fixture("malformed_fields.json")))
         assertNotNull(s)
-        assertTrue(s.durationS >= 0L, "a duration may fall back to 0, but never negative: ${s.durationS}")
-        assertNotNull(s.key, "a malformed payload must still yield a usable SongKey")
+        assertEquals(0L, s.durationS)
+        assertFalse(durationKnown(s.durationS), "\"not-a-number\" is unknown, not zero-length")
+        val drift = mutableListOf<dylan.provider.Drift>()
+        val again = dylan.provider.saavn.mapCard(json.parseToJsonElement(fixture("malformed_fields.json")), "test", drift)
+        assertNotNull(again)
+        assertTrue(
+            drift.any { it.reason == dylan.provider.saavn.DURATION_UNPARSED },
+            "the unparsed duration must be reported, not folded into the value: $drift",
+        )
+    }
+
+    /**
+     * A fixture no test imports is a bug. Three of fifteen were orphans on arrival
+     * (`rate_limited_429.json`, `html_error_page.txt`, `expired_signature_403.txt`) and they were
+     * precisely the provider's three error paths — the paths with no test file at all. This is the
+     * 15-line test that would have caught them on day one.
+     */
+    @Test
+    fun everyCommittedFixtureIsReferencedBySomeSourceFile() {
+        val sources = testSources()
+        assertTrue(sources.isNotEmpty(), "no test sources found from ${System.getProperty("user.dir")}")
+        val corpus = sources.joinToString("\n") { it.readText() }
+        val orphans =
+            fixturesDir()
+                .listFiles()
+                .orEmpty()
+                .filter { it.isFile }
+                .map { it.name }
+                .filterNot { corpus.contains("\"$it\"") || corpus.contains(it) }
+                .sorted()
+        assertEquals(emptyList(), orphans, "committed fixtures that nothing references")
+    }
+
+    @Test
+    fun theFixtureSetIsTheOneTheSuiteExpects() {
+        val names =
+            fixturesDir()
+                .listFiles()
+                .orEmpty()
+                .filter { it.isFile }
+                .map { it.name }
+                .toSortedSet()
+        assertTrue(
+            names.containsAll(
+                listOf(
+                    "rate_limited_429.json",
+                    "html_error_page.txt",
+                    "expired_signature_403.txt",
+                    "autocomplete_ws_frame.json",
+                    "malformed_fields.json",
+                ),
+            ),
+            "the error-path fixtures must stay committed: $names",
+        )
     }
 
     /**
@@ -181,9 +238,9 @@ class MapperFixturesTest {
     @Test
     fun wsFrameParsesSuggestions() {
         val frame = fixture("autocomplete_ws_frame.json")
-        val suggestions = mapSuggestions(frame)
-        assertTrue(suggestions.isNotEmpty())
-        assertTrue(suggestions.any { it.type == "album" || it.songKey != null })
+        val rows = mapSuggestions(frame)
+        assertTrue(rows.items.isNotEmpty(), "${rows.drift}")
+        assertTrue(rows.items.any { it.type == "album" || it.songKey != null })
     }
 
     @Test
@@ -252,9 +309,7 @@ class MapperFixturesTest {
                 SongDto(
                     id = "a:b",
                     title = "t",
-                    moreInfo =
-                        dylan.provider.saavn.dto
-                            .MoreInfoDto(),
+                    moreInfo = kotlinx.serialization.json.Json.encodeToJsonElement(dylan.provider.saavn.dto.MoreInfoDto.serializer(), dylan.provider.saavn.dto.MoreInfoDto()),
                 ),
             )
         assertNotNull(song)

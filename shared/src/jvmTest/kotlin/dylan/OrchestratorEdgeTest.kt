@@ -46,6 +46,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import okio.FileSystem
 import okio.Path.Companion.toPath
+import kotlin.system.measureNanoTime
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
@@ -397,8 +398,8 @@ class OrchestratorEdgeTest {
             awaitPhase { it.phase is dylan.model.Phase.Playing }
             assertEquals(1, fakePlayer.preparedWindows.last().size, "uncached next starts as a single-item window")
             fakePlayer.setPositionMs(96_000L)
-            withTimeout(30_000) { fakePlayer.upNext.first { t -> t?.itemId?.startsWith("saavn:b:") == true } }
-            fakePlayer.script(EngineEvent.TrackChanged("saavn:b:128", TransitionReason.AUTO))
+            withTimeout(30_000) { fakePlayer.upNext.first { t -> t?.itemId?.contains(":saavn:b:") == true } }
+            fakePlayer.script(EngineEvent.TrackChanged(fakePlayer.upNext.value!!.itemId, TransitionReason.AUTO))
             val advanced = awaitPhase { it.current?.key?.songId == "b" }
             assertTrue(advanced.phase is dylan.model.Phase.Playing)
         }
@@ -539,9 +540,16 @@ class OrchestratorEdgeTest {
                 while (fakePlayer.preparedWindows.isEmpty()) delay(50)
             }
             assertEquals(
-                listOf("saavn:a:128", "saavn:b:128"),
-                fakePlayer.preparedWindows.last().map { it.itemId },
+                listOf("a", "b"),
+                fakePlayer.preparedWindows
+                    .last()
+                    .map { it.itemId.substringAfter(":").substringBeforeLast(":") },
                 "attach onto a restored PAUSED state must hand the engine its window",
+            )
+            assertTrue(
+                fakePlayer.preparedWindows.last().all { it.itemId.startsWith("g") },
+                "itemIds are generation-stamped g<gen>:<provider>:<songId>:<bits>, so a stale prefix " +
+                    "is one comparison rather than a scan",
             )
         }
 
@@ -610,8 +618,223 @@ class OrchestratorEdgeTest {
                 "four transient errors across resets must never reach TOO_MANY_FAILURES",
             )
         }
+
+    /**
+     * PB-1. The inbox consumer was `for (m in inbox) process(m)` with no `try`/`catch`, so one throw
+     * ended playback for the life of the process while the `UNLIMITED` channel kept accepting.
+     * A throwing platform toast sink is a realistic source of that throw, and it happens on the
+     * "End of queue" path, which only fires once the queue has actually been walked to its end.
+     */
+    @Test
+    fun oneFailedMessageDoesNotEndPlayback() =
+        runBlocking {
+            rebuildGraph(AppConfig(navDebounceMs = 0L))
+            seedCached("a")
+            seedCached("b")
+            orchestrator.submit(PlayNow(listOf(song("a"), song("b")), 0))
+            awaitPhase { it.phase is dylan.model.Phase.Playing }
+            orchestrator.submit(dylan.playback.Intent.Next)
+            awaitPhase { it.current?.key?.songId == "b" && it.phase is dylan.model.Phase.Playing }
+            orchestrator.toast = { throw IllegalStateException("toast sink exploded") }
+            // End of the queue: this is the path that reaches the platform sink, and it throws.
+            orchestrator.submit(dylan.playback.Intent.Next)
+            delay(FAILED_MESSAGE_SETTLE_MS)
+            // Proof the loop is still consuming: a later message must still take effect.
+            orchestrator.toast = null
+            orchestrator.submit(dylan.playback.Intent.CycleRepeat)
+            val after =
+                withTimeout(5_000) {
+                    orchestrator.state.first { it.repeat == dylan.model.Repeat.ALL }
+                }
+            assertEquals(dylan.model.Repeat.ALL, after.repeat, "the inbox must survive a failed message")
+        }
+
+    /** AN-2: `detachEngine` cancelled nothing, so a stale event advanced the queue with no engine. */
+    @Test
+    fun aDetachedEngineNoLongerDrivesTheQueue() =
+        runBlocking {
+            seedCached("a")
+            seedCached("b")
+            orchestrator.submit(PlayNow(listOf(song("a"), song("b")), 0))
+            awaitPhase { it.phase is dylan.model.Phase.Playing }
+            val head = fakePlayer.preparedWindows.last().first()
+            val liveItemId = head.itemId
+            orchestrator.detachEngine()
+            withTimeout(5_000) { orchestrator.state.first { it.phase is dylan.model.Phase.Paused } }
+            // A stale Error is the sharpest probe: it carries no generation to reject, it is just
+            // three engine errors arriving at a queue that no longer has an engine.
+            repeat(3) { fakePlayer.script(EngineEvent.Error(liveItemId, EngineErr.DECODE)) }
+            delay(DETACHED_SETTLE_MS)
+            val s = orchestrator.state.value
+            assertEquals("a", s.current?.key?.songId, "a stale event must not advance the queue with no engine")
+            assertTrue(
+                s.phase is dylan.model.Phase.Paused,
+                "three stale errors must not reach TOO_MANY_FAILURES with no engine attached, got ${s.phase}",
+            )
+        }
+
+    /** PB-3: `posMs` was written but never consumed, so a restart began at 0 and autoplayed. */
+    @Test
+    fun aRestoredPositionIsAppliedExactlyOnceAndNeverAutoplays() =
+        runBlocking {
+            seedCached("a")
+            seedCached("b")
+            orchestrator.detachEngine()
+            val snap =
+                dylan.playback.ResumeSnapshot(
+                    items = listOf(dylan.playback.ItemRef("saavn", "a"), dylan.playback.ItemRef("saavn", "b")),
+                    index = 0,
+                    posMs = 12_345L,
+                    playedAtMs = cfg.clock.nowMs(),
+                )
+            db.dylanQueries.putSetting("resume", dylan.playback.encodeSnapshot(snap))
+            orchestrator.restoreFromSnapshot()
+            val restored = awaitPhase { it.phase is dylan.model.Phase.Paused && it.queue.size == 2 }
+            assertEquals(12_345L, restored.posMs, "the state machine must own the restored position")
+            assertTrue(restored.phase is dylan.model.Phase.Paused, "restore never autoplays")
+            fakePlayer.preparedWindows.clear()
+            fakePlayer.seeks.clear()
+            orchestrator.attachEngine(fakePlayer)
+            withTimeout(15_000) { while (fakePlayer.seeks.isEmpty()) delay(20) }
+            delay(RESUME_SETTLE_MS)
+            assertEquals(listOf(12_345L), fakePlayer.seeks, "exactly one clamped seek, not one per rebuffer")
+        }
+
+    /**
+     * PB-2 tail: a committed row whose file cannot be sniffed used to become a permanent `Ready`
+     * deadlock — the window came out empty, the engine had nothing, and there was no error and no
+     * skip. Whichever site rejects the bytes (the download's own verify step, or the orchestrator's
+     * re-check of a `Done`), the observable contract is the same: a failure, not a stall in `Ready`.
+     */
+    @Test
+    fun aTrackThatCannotBeSniffedNeverSitsInReady() =
+        runBlocking {
+            mockBody = ByteArray(1_000).also { it[0] = 0x58 }
+            orchestrator.submit(PlayNow(listOf(song("broken")), 0))
+            val end =
+                awaitPhase(timeoutMs = 30_000) {
+                    it.phase is dylan.model.Phase.Error || it.phase is dylan.model.Phase.Playing
+                }
+            assertTrue(
+                end.phase is dylan.model.Phase.Error,
+                "an unplayable committed file must surface a failure, got ${end.phase}",
+            )
+        }
+
+    /**
+     * Task 4.10. The engine preempts only on a *strictly* higher priority, so an abandoned
+     * `USER_NOW` could not be preempted by its replacement's `USER_NOW` and a 3-second skip cost a
+     * full transfer.
+     */
+    @Test
+    fun skippingAnUncachedTrackCancelsItsDownload(): Unit =
+        runBlocking {
+            provider.gate = CompletableDeferred()
+            orchestrator.submit(PlayNow(listOf(song("a"), song("b")), 0))
+            val downloading = awaitPhase { it.phase is dylan.model.Phase.Downloading }
+            val abandoned = downloading.current?.key
+            orchestrator.submit(dylan.playback.Intent.Next)
+            val cancelled =
+                withTimeout(20_000) {
+                    downloadEngine.states.first { abandoned != null && it[abandoned] is JobState.Cancelled }
+                }
+            assertTrue(
+                cancelled[abandoned] is JobState.Cancelled,
+                "the abandoned job must be dropped, not left to finish, got ${cancelled[abandoned]}",
+            )
+            provider.gate.complete(Unit)
+        }
+
+    /** Task 4.5: `restore` used to keep `shuffleOn` after `sanitizeSnapshot` dropped a stale order. */
+    @Test
+    fun aRestoredShuffleWithoutAPermutationIsNavigableAgain() =
+        runBlocking {
+            seedCached("a")
+            seedCached("b")
+            val snap =
+                dylan.playback.ResumeSnapshot(
+                    items = listOf(dylan.playback.ItemRef("saavn", "a"), dylan.playback.ItemRef("saavn", "b")),
+                    index = 0,
+                    posMs = 0L,
+                    shuffleOn = true,
+                    order = emptyList(),
+                )
+            db.dylanQueries.putSetting("resume", dylan.playback.encodeSnapshot(snap))
+            orchestrator.restoreFromSnapshot()
+            val s = awaitPhase { it.queue.size == 2 }
+            assertTrue(!s.shuffleOn, "a shuffle with no surviving permutation is not a shuffle")
+            assertEquals("b", s.nextUp?.key?.songId, "the restored queue must be navigable")
+        }
+
+    /**
+     * Not JMH (the module has no benchmark source set): `measureNanoTime` over a fixed workload
+     * after warm-up, with a blackhole accumulator so the JIT cannot delete the work. Both shapes run
+     * against the *same* 1000-row database, so the only difference is the algorithm.
+     *
+     * OLD: one `dbLane` round-trip per item, then a linear scan in `sanitizeSnapshot`'s predicate,
+     * then another linear scan — two fresh `SongKey` allocations per comparison.
+     * NEW: one batched pass, one `HashMap`, one lookup per item.
+     */
+    @Test
+    fun restoreOfALargeQueueIsLinearNotQuadratic() =
+        runBlocking {
+            val n = 1_000
+            repeat(n) { db.dylanQueries.insertSong("saavn", "s$it", "s$it", "", null, null, "", "", 100L, 1L, "e$it", null, 0L) }
+            val refs = (0 until n).map { dylan.playback.ItemRef("saavn", "s$it") }
+            val snap = dylan.playback.ResumeSnapshot(items = refs, index = n - 1, posMs = 1_000L)
+            val encoded = dylan.playback.encodeSnapshot(snap)
+            var blackhole = 0L
+
+            val oldNs =
+                measureNanoTime {
+                    val songs = mutableListOf<Song>()
+                    for (ref in refs) {
+                        songs +=
+                            db.dylanQueries.selectSong(ref.provider, ref.songId).executeAsOneOrNull()?.let { row ->
+                                Song(
+                                    SongKey(row.provider, row.song_id),
+                                    row.title,
+                                    row.subtitle,
+                                    row.album_id,
+                                    row.album_name,
+                                    row.art_url_150,
+                                    row.art_url_500,
+                                    row.duration_s,
+                                    row.has_320 == 1L,
+                                    row.resolve_ref,
+                                    row.perma_token,
+                                )
+                            } ?: continue
+                    }
+                    val kept =
+                        refs.withIndex().filter { iv ->
+                            songs.any { s -> s.key == SongKey(iv.value.provider, iv.value.songId) }
+                        }
+                    blackhole += kept.size.toLong()
+                }
+
+            db.dylanQueries.putSetting("resume", encoded)
+            val t0 = System.nanoTime()
+            orchestrator.restoreFromSnapshot()
+            val restored = awaitPhase(timeoutMs = 60_000) { it.queue.size == n }
+            val newNs = System.nanoTime() - t0
+            blackhole += restored.index.toLong()
+            println(
+                "[bench] restore($n items): OLD ${"%.1f".format(oldNs / 1e6)} ms  NEW ${"%.1f".format(newNs / 1e6)} ms  " +
+                    "(${"%.1f".format(oldNs.toDouble() / newNs)}x)  blackhole=$blackhole",
+            )
+            assertEquals(n, restored.queue.size)
+            assertTrue(
+                newNs * 3 < oldNs,
+                "the batched restore must be at least 3x faster than one round-trip per item: " +
+                    "old=${oldNs / 1_000_000}ms new=${newNs / 1_000_000}ms",
+            )
+        }
 }
 
+private const val FAILED_MESSAGE_SETTLE_MS = 300L
+private const val DETACHED_SETTLE_MS = 400L
+private const val RESUME_SETTLE_MS = 400L
 private const val SETTLE_SETTLE_MS = 350L
 private const val SETTLE_MARGIN_MS = 150L
 private const val PREFETCH_ABSENCE_MS = 300L

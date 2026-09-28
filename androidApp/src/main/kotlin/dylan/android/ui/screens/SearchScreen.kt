@@ -45,6 +45,10 @@ import dylan.android.ui.components.toArtistEntry
 import dylan.di.AppContainer
 import dylan.model.MiniEntity
 import dylan.model.Song
+import dylan.provider.saavn.MiniKind
+import dylan.provider.saavn.kind
+import dylan.provider.saavn.navigable
+import dylan.provider.saavn.rowKey
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -106,22 +110,25 @@ fun SearchScreen(
     LaunchedEffect(Unit) { container.searchChannel.warmUp() }
     // Fire-and-forget demand; answers render on arrival (never blocks typing).
     LaunchedEffect(Unit) {
-        demand.debounce(120).distinctUntilChanged().collect { q ->
-            when {
-                submitted != null -> {}
-                q.length >= 2 -> container.searchChannel.request(q)
-                else -> suggestions = emptyList()
+        demand
+            .debounce(container.cfg.wsTypingDebounceMs)
+            .distinctUntilChanged()
+            .collect { q ->
+                if (submitted != null) return@collect
+                // Hand *every* keystroke to the channel, including a cleared or one-char one: the
+                // channel owns the socket, and a demand it never hears about is a socket it keeps
+                // reading on until its deadline. The channel normalises and releases it.
+                container.searchChannel.request(q)
+                if (q.trim().length < MIN_SUGGEST_QUERY) suggestions = emptyList()
             }
-        }
     }
     LaunchedEffect(Unit) {
-        container.searchChannel.suggestions.collect { ans ->
-            val (q, list) = ans ?: return@collect
-            if (submitted != null || q != demand.value || q.length < 2) return@collect
-            // Server repeats entries across buckets/keystrokes [verified: 7.har] — dedupe or LazyColumn keys collide.
-            // Ranked like submit sections: exact/prefix matches float above fuzzy ones.
-            suggestions =
-                dylan.search.rankMinis(q, list.distinctBy { it.title to (it.songKey?.songId ?: it.albumId.orEmpty()) })
+        container.searchChannel.suggestions.collect { a ->
+            // The channel is the single render gate: it never publishes an answer whose epoch is
+            // not the current demand, so the UI no longer re-checks the query against `demand` —
+            // it only applies its own "a submit is showing" policy and the minimum-length rule.
+            if (a == null || submitted != null || a.query.length < MIN_SUGGEST_QUERY) return@collect
+            suggestions = dylan.search.rankMinisDistinct(a.query, a.items)
         }
     }
     LaunchedEffect(submitted) {
@@ -176,14 +183,14 @@ fun SearchScreen(
                 songPage = nextSong
             }
             albumsDef.await()?.let { paged ->
-                val seen = albums.map { it.title to it.albumId }.toHashSet()
-                albums = albums + paged.items.filter { seen.add(it.title to it.albumId) }
+                val seen = albums.map { it.rowKey }.toHashSet()
+                albums = albums + paged.items.filter { seen.add(it.rowKey) }
                 albumTotal = paged.total
                 albumPage = nextAlbum
             }
             artistsDef.await()?.let { paged ->
-                val seen = artists.map { it.title to it.artistId }.toHashSet()
-                artists = artists + paged.items.filter { seen.add(it.title to it.artistId) }
+                val seen = artists.map { it.rowKey }.toHashSet()
+                artists = artists + paged.items.filter { seen.add(it.rowKey) }
                 artistTotal = paged.total
                 artistPage = nextArtist
             }
@@ -296,17 +303,23 @@ fun SearchScreen(
                 }
             suggestions.isNotEmpty() ->
                 LazyColumn(Modifier.fillMaxSize()) {
-                    items(suggestions, key = { it.title + (it.songKey?.songId ?: it.albumId ?: it.artistId ?: "") }) { m ->
-                        MiniRow(m, greyed = false) {
-                            val albumTarget = m.albumId
-                            when {
-                                m.artistId != null -> onOpenArtist(m)
-                                albumTarget != null -> onOpenAlbum(albumTarget)
-                                m.songKey != null -> {
+                    // Keyed on the shared, namespaced dedupKey: the old key was
+                    // `title + (songId ?: albumId ?: "")`, which collided across the three id
+                    // namespaces and degenerated to `title + ""` for playlist/show rows — two
+                    // same-titled playlists then crashed Compose with a duplicate key.
+                    items(suggestions, key = { m -> "sg-" + m.rowKey }) { m ->
+                        MiniRow(m, greyed = !m.navigable) {
+                            // Non-navigable rows (playlist / show / episode) have no screen: the
+                            // `when` used to fall through and swallow the tap silently.
+                            when (val k = m.kind) {
+                                is MiniKind.ArtistCard -> onOpenArtist(m)
+                                is MiniKind.AlbumCard -> onOpenAlbum(k.id)
+                                is MiniKind.SongCard -> {
                                     val q = query.ifBlank { m.title }
                                     query = q
                                     submitted = q
                                 }
+                                is MiniKind.OtherCard -> Unit
                             }
                         }
                     }
@@ -371,9 +384,13 @@ private sealed interface Hit {
     ) : Hit
 }
 
+/** Full id tuple, never a title and never "". */
 private fun hitKey(hit: Hit): String =
     when (hit) {
-        is Hit.SongHit -> "so-${hit.song.key.songId}"
-        is Hit.AlbumHit -> "al-${hit.mini.title}-${hit.mini.albumId}"
-        is Hit.ArtistHit -> "ar-${hit.mini.title}-${hit.mini.artistId}"
+        is Hit.SongHit -> "so-" + hit.song.key.provider + ":" + hit.song.key.songId
+        is Hit.AlbumHit -> "al-" + hit.mini.rowKey
+        is Hit.ArtistHit -> "ar-" + hit.mini.rowKey
     }
+
+/** Below this the origin has nothing useful to suggest and every keystroke is a wasted request. */
+private const val MIN_SUGGEST_QUERY = 2

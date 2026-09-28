@@ -1,0 +1,203 @@
+-- v0 -> v1: split cached_files into library (per-song LRU/pin record + active rendition) and
+-- media_objects (per-rendition lifecycle state), materialise cache_totals and protected_keys,
+-- and add the indexes the eviction, GC and trim queries were missing.
+--
+-- Both rebuilt tables are rebuilt rather than ALTERed because the new CHECK constraints cannot
+-- be added to an existing table. cached_files is copied column-for-column, and the pin invariant
+-- is repaired on the way in: v0 allowed pinned=1 with a NULL pinned_at_ms (and the mirror),
+-- which is the phantom pin of §3.9 that nothing ever cleared.
+--
+-- 1.sqm is executed verbatim by Schema.migrate, so it must be dialect-valid SQL and must never
+-- fail on real v0 data. Every COPY is therefore total: no filter, no CASE that can violate the
+-- new CHECK, no NOT NULL on a column v0 allowed to be NULL.
+
+CREATE TABLE library (
+  provider     TEXT NOT NULL,
+  song_id      TEXT NOT NULL,
+  bitrate      INTEGER NOT NULL,
+  ext          TEXT NOT NULL,
+  bytes        INTEGER NOT NULL,
+  cached_at_ms INTEGER NOT NULL,
+  last_used_ms INTEGER,
+  play_count   INTEGER NOT NULL DEFAULT 0,
+  pinned       INTEGER NOT NULL DEFAULT 0 CHECK (pinned IN (0,1)),
+  pinned_at_ms INTEGER,
+  PRIMARY KEY (provider, song_id),
+  FOREIGN KEY (provider, song_id) REFERENCES songs(provider, song_id) ON DELETE CASCADE,
+  CHECK (bytes >= 0),
+  CHECK (bitrate > 0),
+  CHECK (ext <> ''),
+  CHECK (play_count >= 0),
+  CHECK ((pinned = 0) = (pinned_at_ms IS NULL))
+);
+
+INSERT INTO library(provider, song_id, bitrate, ext, bytes, cached_at_ms, last_used_ms, play_count, pinned, pinned_at_ms)
+SELECT provider, song_id, bitrate, ext, bytes, cached_at_ms, last_used_ms, play_count,
+       CASE WHEN pinned = 1 THEN 1 ELSE 0 END,
+       CASE WHEN pinned = 1 THEN COALESCE(pinned_at_ms, cached_at_ms) ELSE NULL END
+  FROM cached_files;
+
+DROP TABLE cached_files;
+
+CREATE INDEX idx_cached_lru ON library
+  ((play_count = 0) DESC, (last_used_ms IS NULL) DESC, last_used_ms, cached_at_ms, provider, song_id)
+  WHERE pinned = 0;
+
+CREATE INDEX idx_cached_pinned ON library(pinned_at_ms, last_used_ms, play_count, provider, song_id)
+  WHERE pinned = 1;
+
+CREATE TABLE media_objects (
+  provider       TEXT NOT NULL,
+  song_id        TEXT NOT NULL,
+  bitrate        INTEGER NOT NULL,
+  ext            TEXT NOT NULL,
+  bytes          INTEGER NOT NULL DEFAULT 0,
+  state          TEXT NOT NULL DEFAULT 'READY'
+                 CHECK (state IN ('WRITING','READY','VERIFY_FAILED','EVICTING')),
+  etag           TEXT,
+  verified_at_ms INTEGER,
+  PRIMARY KEY (provider, song_id, bitrate, ext),
+  FOREIGN KEY (provider, song_id) REFERENCES songs(provider, song_id) ON DELETE CASCADE,
+  CHECK (bytes >= 0),
+  CHECK (bitrate > 0),
+  CHECK (ext <> '')
+);
+
+CREATE INDEX idx_media_state ON media_objects(state, provider, song_id, bitrate, ext);
+
+CREATE TABLE cache_totals (
+  id          INTEGER PRIMARY KEY CHECK (id = 0),
+  final_bytes INTEGER NOT NULL DEFAULT 0,
+  final_count INTEGER NOT NULL DEFAULT 0,
+  part_bytes  INTEGER NOT NULL DEFAULT 0,
+  part_count  INTEGER NOT NULL DEFAULT 0,
+  CHECK (final_bytes >= 0 AND final_count >= 0 AND part_bytes >= 0 AND part_count >= 0)
+);
+
+CREATE TABLE protected_keys (
+  provider TEXT NOT NULL,
+  song_id  TEXT NOT NULL,
+  reason   TEXT NOT NULL CHECK (reason IN ('PLAYING','INFLIGHT','UPGRADE_SOURCE','EXEMPT')),
+  PRIMARY KEY (provider, song_id)
+);
+
+-- One asset row per copied library row: the pre-split state machine starts at READY.
+INSERT INTO media_objects(provider, song_id, bitrate, ext, bytes, state, verified_at_ms)
+SELECT provider, song_id, bitrate, ext, bytes, 'READY', cached_at_ms FROM library;
+
+INSERT INTO cache_totals(id, final_bytes, final_count, part_bytes, part_count)
+SELECT 0, COALESCE(SUM(bytes), 0), COUNT(*), 0, 0 FROM library;
+
+CREATE TRIGGER trg_library_total_ins AFTER INSERT ON library
+BEGIN
+  UPDATE cache_totals SET final_bytes = final_bytes + new.bytes, final_count = final_count + 1 WHERE id = 0;
+END;
+
+CREATE TRIGGER trg_library_total_del AFTER DELETE ON library
+BEGIN
+  UPDATE cache_totals
+     SET final_bytes = MAX(0, final_bytes - old.bytes),
+         final_count = MAX(0, final_count - 1)
+   WHERE id = 0;
+END;
+
+CREATE TRIGGER trg_library_total_upd AFTER UPDATE OF bytes ON library
+BEGIN
+  UPDATE cache_totals SET final_bytes = MAX(0, final_bytes - old.bytes + new.bytes) WHERE id = 0;
+END;
+
+CREATE TRIGGER trg_library_asset_ins AFTER INSERT ON library
+BEGIN
+  INSERT INTO media_objects(provider, song_id, bitrate, ext, bytes, state, verified_at_ms)
+    VALUES (new.provider, new.song_id, new.bitrate, new.ext, new.bytes, 'READY', new.cached_at_ms)
+    ON CONFLICT(provider, song_id, bitrate, ext) DO UPDATE SET
+      bytes = excluded.bytes, state = 'READY', verified_at_ms = excluded.verified_at_ms;
+  DELETE FROM media_objects
+   WHERE provider = new.provider AND song_id = new.song_id
+     AND (bitrate <> new.bitrate OR ext <> new.ext)
+     AND state <> 'WRITING';
+END;
+
+CREATE TRIGGER trg_library_asset_upd AFTER UPDATE OF bitrate, ext, bytes ON library
+BEGIN
+  INSERT INTO media_objects(provider, song_id, bitrate, ext, bytes, state, verified_at_ms)
+    VALUES (new.provider, new.song_id, new.bitrate, new.ext, new.bytes, 'READY', new.cached_at_ms)
+    ON CONFLICT(provider, song_id, bitrate, ext) DO UPDATE SET
+      bytes = excluded.bytes, state = 'READY', verified_at_ms = excluded.verified_at_ms;
+  DELETE FROM media_objects
+   WHERE provider = new.provider AND song_id = new.song_id
+     AND (bitrate <> new.bitrate OR ext <> new.ext)
+     AND state <> 'WRITING';
+END;
+
+CREATE TRIGGER trg_library_drop_assets AFTER DELETE ON library
+BEGIN
+  DELETE FROM media_objects WHERE provider = old.provider AND song_id = old.song_id;
+END;
+
+CREATE TRIGGER trg_media_drop_library AFTER DELETE ON media_objects
+WHEN NOT EXISTS (SELECT 1 FROM media_objects m2 JOIN library l2
+                    ON l2.provider = m2.provider AND l2.song_id = m2.song_id
+                   AND l2.bitrate = m2.bitrate AND l2.ext = m2.ext
+                  WHERE m2.provider = old.provider AND m2.song_id = old.song_id)
+BEGIN
+  DELETE FROM library WHERE provider = old.provider AND song_id = old.song_id;
+END;
+
+CREATE VIEW cached_files AS
+SELECT provider, song_id, bitrate, ext, bytes, cached_at_ms, last_used_ms, play_count, pinned, pinned_at_ms
+  FROM library
+ WHERE provider IS NOT NULL;
+
+CREATE INDEX idx_songs_gc ON songs(updated_at_ms);
+
+-- play_history had no index on its own FK columns, so gcSongs' NOT EXISTS full-scanned the whole
+-- history for every candidate song. idx_history also gains id so trimHistory's ORDER BY
+-- (played_at_ms DESC, id DESC) is served without a sort.
+DROP INDEX idx_history;
+CREATE INDEX idx_history ON play_history(played_at_ms DESC);
+CREATE INDEX idx_history_song ON play_history(provider, song_id, played_at_ms DESC);
+
+CREATE INDEX idx_home_cache ON home_cache(fetched_at_ms DESC);
+
+ALTER TABLE download_intents RENAME TO download_intents_v0;
+
+CREATE TABLE download_intents (
+  provider       TEXT NOT NULL,
+  song_id        TEXT NOT NULL,
+  reason         TEXT NOT NULL,
+  bitrate        INTEGER NOT NULL,
+  enqueued_at_ms INTEGER NOT NULL,
+  priority       INTEGER NOT NULL DEFAULT 3,
+  PRIMARY KEY (provider, song_id),
+  CHECK (priority BETWEEN 0 AND 3),
+  CHECK (reason IN ('USER_NOW','USER_BULK','PREFETCH_NEXT','QUALITY_UPGRADE'))
+);
+
+-- v0's CASE mapped every unknown reason to rank 3, so normalising an unknown reason to
+-- QUALITY_UPGRADE preserves the ordering the old scheduler computed and satisfies the new CHECK.
+INSERT INTO download_intents(provider, song_id, reason, bitrate, enqueued_at_ms, priority)
+SELECT provider, song_id,
+       CASE WHEN reason IN ('USER_NOW','USER_BULK','PREFETCH_NEXT','QUALITY_UPGRADE')
+            THEN reason ELSE 'QUALITY_UPGRADE' END,
+       bitrate, enqueued_at_ms,
+       CASE reason WHEN 'USER_NOW' THEN 0 WHEN 'USER_BULK' THEN 1 WHEN 'PREFETCH_NEXT' THEN 2 ELSE 3 END
+  FROM download_intents_v0;
+
+DROP TABLE download_intents_v0;
+
+CREATE TRIGGER trg_intent_priority_ins AFTER INSERT ON download_intents
+BEGIN
+  UPDATE download_intents
+     SET priority = (CASE new.reason WHEN 'USER_NOW' THEN 0 WHEN 'USER_BULK' THEN 1
+                                     WHEN 'PREFETCH_NEXT' THEN 2 ELSE 3 END)
+   WHERE provider = new.provider AND song_id = new.song_id;
+END;
+
+CREATE TRIGGER trg_intent_priority_upd AFTER UPDATE OF reason ON download_intents
+BEGIN
+  UPDATE download_intents
+     SET priority = (CASE new.reason WHEN 'USER_NOW' THEN 0 WHEN 'USER_BULK' THEN 1
+                                     WHEN 'PREFETCH_NEXT' THEN 2 ELSE 3 END)
+   WHERE provider = new.provider AND song_id = new.song_id;
+END;

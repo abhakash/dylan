@@ -1,6 +1,7 @@
 package dylan
 
 import dylan.cache.CacheManager
+import dylan.cache.CachePath
 import dylan.cache.Paths
 import dylan.config.AppConfig
 import dylan.db.DriverFactory
@@ -10,12 +11,12 @@ import dylan.diag.LogLevel
 import dylan.model.SongKey
 import dylan.support.TestLanes
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import okio.FileSystem
 import okio.Path.Companion.toPath
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
-import kotlin.test.Ignore
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -94,16 +95,63 @@ class CacheManagerTest {
         }
 
     /**
-     * Rewritten. The previous version asserted `pins.all { it.pinned_at_ms >= 10 }` over rows that
-     * were *inserted* with `>= 10` — true by construction, and `all {}` over the empty list the
-     * demotion wave leaves behind is also true. It could not fail, and its name claimed a
-     * guarantee ("never blocks favorites") that nothing in the code implements.
-     *
-     * What the code actually guarantees is `pinnedMaxFraction` (75 % of the budget) for the pinned
-     * sub-pool, ordered strictly by `pinned_at_ms`. Both are asserted here, and the ordering claim
-     * is the part that is genuinely falsifiable: a regression to arbitrary-order demotion leaves
-     * survivors and demotions interleaved and turns this red.
+     * @Ignore removed. The counterexample was real: v0's pinned loop was bounded by bytes only, so
+     * one pinned file larger than the whole cap walked the pool to empty — demoting the user's only
+     * offline copy of an explicitly favourited track. The pinned sub-pool now has a row budget from
+     * the same 0.75 fraction and a hard floor of one survivor, so this is enforced rather than
+     * documented.
      */
+    @Test
+    fun aPinLargerThanTheCapIsDemotedEvenThoughItIsTheOnlyOfflineCopy() =
+        runTest {
+            db.dylanQueries.setPin(1L, 100L, "saavn", "n1")
+            db.dylanQueries.setPin(1L, 200L, "saavn", "p1")
+            repeat(3) { idx ->
+                val k = SongKey("saavn", "big$idx")
+                db.dylanQueries.insertSong(
+                    k.provider,
+                    k.songId,
+                    k.songId,
+                    "",
+                    null,
+                    null,
+                    "",
+                    "",
+                    200L,
+                    1L,
+                    "ref",
+                    null,
+                    0L,
+                )
+                db.dylanQueries.insertCached(
+                    k.provider,
+                    k.songId,
+                    128L,
+                    "m4a",
+                    20_000_000L,
+                    idx.toLong(),
+                    null,
+                    0,
+                    1,
+                    (idx + 10).toLong(),
+                )
+            }
+            cacheManager.enforceBudget()
+            val pinned =
+                db.dylanQueries
+                    .selectAllCached()
+                    .executeAsList()
+                    .filter { it.pinned == 1L }
+            assertTrue(
+                pinned.isNotEmpty(),
+                "an explicitly pinned track must not be demoted by its own pin",
+            )
+            assertTrue(
+                db.dylanQueries.pinnedBytes().executeAsOne() <= cacheManager.pinnedByteBudget,
+                "and the survivors must fit the pinned byte budget",
+            )
+        }
+
     @Test
     fun pinnedDemotionRespectsThePinnedCapAndDemotesOldestPinFirst() =
         runTest {
@@ -144,14 +192,13 @@ class CacheManagerTest {
             val all = db.dylanQueries.selectAllCached().executeAsList()
             assertEquals(302, all.count { it.pinned == 1L }, "precondition: 300 bulk pins plus n1 and p1")
 
-            cacheManager.enforceBudget(netNewBytes = 0)
+            cacheManager.enforceBudget()
 
             val after = db.dylanQueries.selectAllCached().executeAsList()
             val survivors = after.filter { it.pinned == 1L }
             val demoted = all.filter { row -> after.none { it.song_id == row.song_id && it.pinned == 1L } }
 
             val pinnedBytes = db.dylanQueries.pinnedBytes().executeAsOne()
-            val pinnedCap = (cfg.cacheMaxBytes * cfg.pinnedMaxFraction).toLong()
             assertTrue(notified, "a demotion wave must tell the user their favourites moved")
             assertTrue(
                 survivors.isNotEmpty(),
@@ -159,11 +206,11 @@ class CacheManagerTest {
             )
             assertTrue(
                 demoted.isNotEmpty(),
-                "300 x 20 MB against a 25 MB budget cannot fit without demotion",
+                "300 x 5 MB against a 25 MB budget cannot fit without demotion",
             )
             assertTrue(
-                pinnedBytes <= pinnedCap,
-                "the pinned sub-pool must come back inside its 75 % budget: $pinnedBytes > $pinnedCap",
+                pinnedBytes <= cacheManager.pinnedByteBudget,
+                "pinned pool must fit its 75% budget: $pinnedBytes > ${cacheManager.pinnedByteBudget}",
             )
             assertTrue(
                 demoted.maxOf { pinAt(it) } <= survivors.minOf { pinAt(it) },
@@ -174,66 +221,44 @@ class CacheManagerTest {
         }
 
     /**
-     * The mirror image of the audit's "the pinned sub-pool has no row budget" finding: when a single
-     * pinned file is already larger than the whole pinned cap, the demotion loop empties the pinned
-     * pool completely — the user's only offline copy of an explicitly favourited track is unprotected
-     * from its own pin. Found while rewriting the test above, which is why the fixture there uses
-     * 5 MB pins rather than the 20 MB ones the old test used.
+     * The pinned sub-pool's row budget, which is what makes the 300-file cap enforceable at all.
+     * 300 favourites x 4 MB is 1.2 GB, comfortably under a byte cap, so the v0 byte-only loop ran
+     * zero iterations, `lruVictim` (WHERE pinned = 0) matched nothing, and `?: break` exited with
+     * the cap permanently unenforceable and no user-visible signal.
      */
     @Test
-    @Ignore(
-        "CacheManager.enforceBudget's pinned loop has no row or floor budget: while pinnedUsage > " +
-            "cacheMaxBytes * pinnedMaxFraction it demotes oldest-pinned-first with no stop, so one " +
-            "pinned file larger than the 75% cap empties the whole pinned pool. Counterexample: " +
-            "cacheMaxBytes = 25 MiB, pinnedMaxFraction = 0.75 ⇒ cap = 19,660,800; 300 pins of " +
-            "20,000,000 B plus two 10,000,000 B favourites ⇒ all 302 demoted, pinnedBytes = 0. " +
-            "Fix: give the pinned sub-pool a row budget derived from the same 0.75 fraction and stop " +
-            "demoting when only favourites remain (docs/codebase-audit.md 3.3).",
-    )
-    fun aPinLargerThanTheCapIsDemotedEvenThoughItIsTheOnlyOfflineCopy() =
+    fun thePinnedPoolHasARowBudgetSoTheFileCapStaysEnforceable() =
         runTest {
-            db.dylanQueries.setPin(1L, 100L, "saavn", "n1")
-            db.dylanQueries.setPin(1L, 200L, "saavn", "p1")
-            repeat(3) { idx ->
-                val k = SongKey("saavn", "big$idx")
-                db.dylanQueries.insertSong(
-                    k.provider,
-                    k.songId,
-                    k.songId,
-                    "",
-                    null,
-                    null,
-                    "",
-                    "",
-                    200L,
-                    1L,
-                    "ref",
-                    null,
-                    0L,
+            withFreshCache(cfg = AppConfig(cacheMaxBytes = 2_000_000_000L, cacheMaxFiles = 10)) { db2, cm2, _ ->
+                repeat(12) { idx ->
+                    val k = SongKey("saavn", "fav$idx")
+                    db2.dylanQueries
+                        .insertSong("saavn", k.songId, k.songId, "", null, null, "", "", 200L, 1L, "r", null, 0L)
+                    db2.dylanQueries.insertCached(
+                        "saavn",
+                        k.songId,
+                        128L,
+                        "m4a",
+                        4_000_000L,
+                        idx.toLong(),
+                        null,
+                        0L,
+                        1L,
+                        (idx + 1).toLong(),
+                    )
+                }
+                assertEquals(12L, db2.dylanQueries.pinnedCount().executeAsOne())
+
+                cm2.enforceBudget()
+
+                val pinned = db2.dylanQueries.pinnedCount().executeAsOne()
+                assertEquals(
+                    cm2.pinnedRowBudget.toLong(),
+                    pinned,
+                    "12 pins x 4 MB is under a 2 GB byte cap, so only a ROW budget can hold the pool",
                 )
-                db.dylanQueries.insertCached(
-                    k.provider,
-                    k.songId,
-                    128L,
-                    "m4a",
-                    20_000_000L,
-                    idx.toLong(),
-                    null,
-                    0,
-                    1,
-                    (idx + 10).toLong(),
-                )
+                assertTrue(pinned >= 1L, "the pool must keep at least one favourite")
             }
-            cacheManager.enforceBudget(netNewBytes = 0)
-            val pinned =
-                db.dylanQueries
-                    .selectAllCached()
-                    .executeAsList()
-                    .filter { it.pinned == 1L }
-            assertTrue(
-                pinned.isNotEmpty(),
-                "an explicitly pinned track must not be demoted by its own pin",
-            )
         }
 
     @Test
@@ -255,8 +280,8 @@ class CacheManagerTest {
                 null,
                 0L,
             )
-            db.dylanQueries.insertCached(key.provider, key.songId, 320L, "m4a", 20_000_000L, 999L, null, 0, 0, null)
-            cacheManager.enforceBudget(netNewBytes = 0, exemptKeys = setOf(key))
+            db.dylanQueries.insertCached(key.provider, key.songId, 320L, "m4a", 20_000_000L, 999L, null, 0L, 0L, null)
+            cacheManager.enforceBudget(exemptKeys = setOf(key))
             assertEquals(
                 key.songId,
                 db.dylanQueries
@@ -267,16 +292,38 @@ class CacheManagerTest {
         }
 
     /**
-     * Rewritten with a control. The previous version wrote a 1 MB `.part` and asserted the cache
-     * was non-empty — which is true before and after `enforceBudget` whether or not parts are
-     * counted at all, because the shared fixture is already 40 MB against a 25 MB budget.
-     *
-     * Here the cached rows fit *under* the budget and only the parts push it over, so a regression
-     * that drops `partBytes()` from the usage sum evicts nothing and the assertion fails. The
-     * control asserts the opposite direction too: with no parts, the same rows survive.
+     * CA-1. `while (usage > cap || count + 1 > maxFiles)` reserved a phantom slot on every call,
+     * including the four whose row was already committed. At the cap, every completed download and
+     * every favourite destroyed one extra unrelated file. The reservation is now an explicit
+     * parameter, and this is the boundary: exactly at the cap with nothing pending, zero victims.
      */
     @Test
-    fun partBytesCountTowardUsage() =
+    fun atTheFileCapWithNoPendingRowNothingIsEvicted() =
+        runTest {
+            val capCfg = AppConfig(cacheMaxBytes = 1_000_000_000L, cacheMaxFiles = 5)
+            withFreshCache(cfg = capCfg) { db2, cm2, _ ->
+                repeat(5) { idx ->
+                    val id = "k$idx"
+                    db2.dylanQueries.insertSong("saavn", id, id, "", null, null, "", "", 200L, 1L, "ref", null, 0L)
+                    db2.dylanQueries.insertCached("saavn", id, 128L, "m4a", 1_000L, idx.toLong(), null, 0L, 0L, null)
+                }
+                assertEquals(5L, db2.songCount())
+
+                cm2.enforceBudget()
+                assertEquals(
+                    5L,
+                    db2.songCount(),
+                    "count == cacheMaxFiles with nothing pending must evict nothing",
+                )
+
+                // Control: the same state with one row genuinely pending DOES evict exactly one.
+                cm2.enforceBudget(pendingRows = 1)
+                assertEquals(4L, db2.songCount())
+            }
+        }
+
+    @Test
+    fun partBytesCountTowardUsageOnlyAfterTheyAreReported() =
         runTest {
             withFreshCache { db2, cm2, root2 ->
                 fun seed(
@@ -291,7 +338,6 @@ class CacheManagerTest {
                 seed("k1", 10_000_000L, playCount = 0, lastUsed = null)
                 seed("k2", 10_000_000L, playCount = 1, lastUsed = 1_000L)
                 seed("k3", 5_000_000L, playCount = 5, lastUsed = 9_000L)
-                val cachedBefore = db2.dylanQueries.selectAllCached().executeAsList()
                 val (c, b) = db2.dylanQueries.cachedCountAndBytes().executeAsOne()
                 assertEquals(3L, c)
                 assertTrue(
@@ -299,23 +345,23 @@ class CacheManagerTest {
                     "precondition: rows alone must fit, they are $b of ${cfg.cacheMaxBytes}",
                 )
 
-                // Control: without parts nothing is over budget, so nothing is evicted.
-                cm2.enforceBudget(netNewBytes = 0)
-                assertEquals(
-                    cachedBefore.map { it.song_id }.toSet(),
-                    db2.dylanQueries
-                        .selectAllCached()
-                        .executeAsList()
-                        .map { it.song_id }
-                        .toSet(),
-                    "control: 24 MB of rows against a 25 MB budget evicts nothing",
-                )
-
                 val audio = root2.toPath() / "audio"
                 FileSystem.SYSTEM.createDirectories(audio)
                 FileSystem.SYSTEM.write(audio / "saavn_stray_128.part") { write(ByteArray(2_000_000)) }
 
-                cm2.enforceBudget(netNewBytes = 0)
+                // A caller that has not reported its parts has no parts on the books, and the
+                // budget check is O(1) instead of a directory walk.
+                cm2.enforceBudget()
+                assertEquals(
+                    3L,
+                    db2.songCount(),
+                    "an unreported .part must not silently move the goalposts",
+                )
+
+                cm2.refreshPartTotals()
+                assertEquals(2_000_000L, db2.partBytes())
+
+                cm2.enforceBudget()
                 val after =
                     db2.dylanQueries
                         .selectAllCached()
@@ -324,7 +370,7 @@ class CacheManagerTest {
                         .toSet()
                 assertTrue(
                     after.size < 3,
-                    "2 MB of .part bytes must count toward the budget: 24 MB + 2 MB > 25 MB, " +
+                    "2 MB of .part bytes must count toward the budget: 25 MB + 2 MB > 25 MB, " +
                         "so a victim is due, survivors=$after",
                 )
                 assertTrue(
@@ -348,6 +394,110 @@ class CacheManagerTest {
             assertFalse("n1" in rows)
         }
 
+    /**
+     * CA-2/CA-3's class fix: the claim statement itself consults the `protected_keys` table, so
+     * there is no window between "decide who is protected" and "delete them" for a caller to slip
+     * into. Asserted at the SQL boundary, which is where the guarantee now lives.
+     */
+    @Test
+    fun theClaimStatementItselfHonoursTheProtectionTable() {
+        protectedKeys.value = setOf(SongKey("saavn", "p1"))
+        db.transaction {
+            db.dylanQueries.clearProtectedKeys()
+            db.dylanQueries.putProtectedKey("saavn", "p1", "PLAYING")
+        }
+        val claimed = db.dylanQueries.claimAllUnprotected().executeAsList()
+        assertFalse(claimed.any { it.song_id == "p1" }, "a protected key must never be claimable")
+        assertTrue(claimed.any { it.song_id == "n1" })
+        assertEquals(
+            1L,
+            db.dylanQueries.protectedKeyCount().executeAsOne(),
+            "the protection set is a table now, not three .value reads in a composable",
+        )
+    }
+
+    @Test
+    fun evictOneRefusesAProtectedKeyAndKeepsItsFile() {
+        val fs = FileSystem.SYSTEM
+        val paths = Paths(tmp.toPath() / "audio", fs)
+        fs.createDirectories(paths.audioDir)
+        fs.write(paths.final(SongKey("saavn", "n1"), 128, "m4a")) { write(ByteArray(10_000_000)) }
+        protectedKeys.value = setOf(SongKey("saavn", "n1"))
+        runTest {
+            assertFalse(cacheManager.evictOne(SongKey("saavn", "n1")), "a protected key must be refused")
+            assertTrue(fs.exists(paths.final(SongKey("saavn", "n1"), 128, "m4a")), "and its file must survive")
+        }
+    }
+
+    @Test
+    fun evictOneRemovesAnUnprotectedKeyAndItsFile() {
+        val fs = FileSystem.SYSTEM
+        val paths = Paths(tmp.toPath() / "audio", fs)
+        fs.createDirectories(paths.audioDir)
+        val file = paths.final(SongKey("saavn", "n1"), 128, "m4a")
+        fs.write(file) { write(ByteArray(10_000_000)) }
+        runTest {
+            assertTrue(cacheManager.evictOne(SongKey("saavn", "n1")))
+            assertFalse(fs.exists(file))
+            assertEquals(null, db.dylanQueries.selectCached("saavn", "n1").executeAsOneOrNull())
+        }
+    }
+
+    /**
+     * CA-4's class rule: a file we could not unlink keeps its row, so the next sweep retries it.
+     * A non-empty directory at the final path is the one unlink failure that is reproducible.
+     */
+    @Test
+    fun aFailedUnlinkKeepsTheRowForTheNextSweep() {
+        val fs = FileSystem.SYSTEM
+        val paths = Paths(tmp.toPath() / "audio", fs)
+        fs.createDirectories(paths.audioDir)
+        val key = SongKey("saavn", "n1")
+        val blocked = paths.final(key, 128, "m4a")
+        fs.createDirectories(blocked)
+        fs.write(blocked / "occupied") { write(ByteArray(8)) }
+        runTest {
+            cacheManager.enforceBudget(netNewBytes = 90_000_000L)
+            assertTrue(
+                db.dylanQueries.selectCached("saavn", "n1").executeAsOneOrNull() != null,
+                "the row must survive an unlink that failed, or the track is gone for good",
+            )
+            assertEquals(
+                0L,
+                db.dylanQueries
+                    .evictingObjects()
+                    .executeAsList()
+                    .count { it.song_id == "n1" }
+                    .toLong(),
+                "and it must go back to READY rather than sit in EVICTING",
+            )
+        }
+    }
+
+    /**
+     * The other half of the state machine: a process death between the claim and the unlink leaves
+     * an EVICTING row, and [CacheManager.reapEvicting] is what finishes it. Idempotent by
+     * construction — a second call finds nothing to do.
+     */
+    @Test
+    fun anInterruptedEvictionIsReapedOnTheNextBoot() {
+        val fs = FileSystem.SYSTEM
+        val paths = Paths(tmp.toPath() / "audio", fs)
+        fs.createDirectories(paths.audioDir)
+        val key = SongKey("saavn", "n1")
+        fs.write(paths.final(key, 128, "m4a")) { write(ByteArray(10_000_000)) }
+        db.transaction { db.dylanQueries.clearProtectedKeys() }
+        val claimed = db.dylanQueries.claimAllUnprotected().executeAsList()
+        assertTrue(claimed.any { it.song_id == "n1" }, "precondition: the row is claimed and its file still there")
+        assertTrue(fs.exists(paths.final(key, 128, "m4a")), "precondition: claimed, not yet unlinked")
+
+        runTest {
+            assertEquals(1, cacheManager.reapEvicting())
+            assertFalse(fs.exists(paths.final(key, 128, "m4a")))
+            assertEquals(0, cacheManager.reapEvicting(), "a second reap must be a no-op")
+        }
+    }
+
     @Test
     fun intentUpsertNeverDowngradesPriority() =
         runTest {
@@ -359,6 +509,7 @@ class CacheManagerTest {
                     .executeAsList()
                     .first { it.song_id == "x" }
             assertEquals("USER_BULK", intent.reason, "lower-priority enqueue must not replace")
+            assertEquals(1L, intent.priority, "priority is stored, not recomputed per query")
             db.dylanQueries.upsertIntent("saavn", "x", "USER_NOW", 320L, 3L)
             val upgraded =
                 db.dylanQueries
@@ -366,11 +517,67 @@ class CacheManagerTest {
                     .executeAsList()
                     .first { it.song_id == "x" }
             assertEquals("USER_NOW", upgraded.reason)
+            assertEquals(0L, upgraded.priority)
         }
+
+    @Test
+    fun removableKeysFollowTheProtectionFlows() =
+        runTest {
+            val before =
+                cacheManager.downloads
+                    .first()
+            assertTrue(before.all { it.removable })
+            assertEquals(4, before.size, "one JOIN, one row per cached song")
+
+            protectedKeys.value = setOf(SongKey("saavn", "n1"))
+            val after =
+                cacheManager.downloads
+                    .first()
+            assertFalse(after.first { it.songId() == "n1" }.removable)
+            assertTrue(after.first { it.songId() == "p1" }.removable)
+            assertFalse(cacheManager.isRemovable(SongKey("saavn", "n1")))
+            assertTrue(cacheManager.isRemovable(SongKey("saavn", "p1")))
+        }
+
+    @Test
+    fun theFileNameGrammarRoundTripsAndRefusesForeignFiles() {
+        val parsed = CachePath.parse(CachePath.fileName("saavn", "abc-123", 128, "m4a"))
+        assertEquals(CacheFileNameAssert("saavn", "abc-123", 128, "m4a"), CacheFileNameAssert.of(parsed))
+        assertEquals(null, CachePath.parse("cover.jpg"), "a cover is not ours to delete")
+        assertEquals(null, CachePath.parse("cover_500.jpg"), "two segments is not our shape")
+        val debris = CachePath.parse("saavn_x_128.m4a.part.tmp")
+        assertEquals(null, debris, "an interrupted unlink's debris is not ours either")
+        assertEquals("m4a", CachePath.parse("saavn_x_128.m4a")?.ext)
+        // A provider id is sanitised too, which §8.2's adapter-boundary rule never applied to.
+        val escaped = CachePath.fileName("../../etc", "x", 128, "m4a")
+        assertFalse(escaped.contains('/'), "provider must be sanitised: $escaped")
+        assertEquals(
+            "saavn_x_128.m4a",
+            CachePath.fileName("saavn", "x", 128, "m4a"),
+            "the on-disk layout must not move",
+        )
+    }
+
+    private fun dylan.cache.DownloadEntry.songId(): String = key.songId
+
+    private fun Dylan.songCount(): Long =
+        dylanQueries
+            .cachedCountAndBytes()
+            .executeAsOne()
+            .song_count
+
+    private fun Dylan.partBytes(): Long =
+        dylanQueries
+            .partTotals()
+            .executeAsOne()
+            .part_bytes
 
     private fun pinAt(row: dylan.db.Cached_files): Long = row.pinned_at_ms ?: 0L
 
-    private suspend fun withFreshCache(block: suspend (Dylan, CacheManager, String) -> Unit) {
+    private suspend fun withFreshCache(
+        cfg: AppConfig = this.cfg,
+        block: suspend (Dylan, CacheManager, String) -> Unit,
+    ) {
         val root = freshDir("dylan-parts")
         val fs = FileSystem.SYSTEM
         val db2 = Dylan(DriverFactory("$root/dylan.db", log).createDriver())
@@ -388,4 +595,16 @@ class CacheManagerTest {
         (FileSystem.SYSTEM_TEMPORARY_DIRECTORY.toString() + "/$prefix-${System.nanoTime()}").also {
             FileSystem.SYSTEM.createDirectories(it.toPath())
         }
+}
+
+private data class CacheFileNameAssert(
+    val provider: String,
+    val songId: String,
+    val bitrate: Int,
+    val ext: String,
+) {
+    companion object {
+        fun of(parsed: dylan.cache.CacheFileName?): CacheFileNameAssert? =
+            parsed?.let { CacheFileNameAssert(it.provider, it.songId, it.bitrate, it.ext) }
+    }
 }

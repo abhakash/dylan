@@ -3,17 +3,19 @@ package dylan
 import dylan.config.AppConfig
 import dylan.model.Phase
 import dylan.model.Repeat
+import dylan.playback.EngineEvent
 import dylan.playback.Intent
+import dylan.playback.TransitionReason
 import dylan.support.FakeNetMonitor
 import dylan.support.GraphHarness
 import dylan.support.testSong
 import dylan.util.NetClass
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
-import kotlin.test.Ignore
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
@@ -190,6 +192,121 @@ class IntentMatrixTest {
                 assertTrue(
                     h.engine.currentTimeMs() >= 0,
                     "currentTimeMs must answer inline once the engine can, or enginePositionMs() falls back",
+                )
+            }
+        }
+
+    /**
+     * The catalog's documented fallback for an unparseable duration is 0, and the old clamp was
+     * `durationS * 1000` — so every seek on such a track collapsed to `seekTo(0)`, silently.
+     * With no usable upper bound the request passes through instead.
+     */
+    @Test
+    fun seekOnATrackWithNoKnownDurationPassesThroughInsteadOfCollapsingToZero() =
+        runBlocking {
+            harness(cfg()) { h ->
+                h.seedCached("a", durationS = 0L)
+                h.submit(Intent.PlayNow(h.songs("a"), 0))
+                h.awaitPlaying()
+                h.awaitWindow("saavn:a")
+                h.submit(Intent.Seek(90_000L))
+                h.settleIntents()
+                assertEquals(
+                    listOf(90_000L),
+                    h.engine.seeks,
+                    "an unknown duration must not be treated as a zero-length track",
+                )
+            }
+        }
+
+    /**
+     * A seek issued while the track is still resolving is not dropped: the clamped value lands in
+     * `PlayerState.posMs` and the window that is prepared later starts there.
+     */
+    @Test
+    fun aSeekWhileResolvingIsDeferredAndAppliedToTheWindow() =
+        runBlocking {
+            harness(cfg()) { h ->
+                h.seedCached("a", durationS = 100L)
+                h.submit(Intent.PlayNow(h.songs("a"), 0))
+                h.awaitPlaying()
+                h.awaitWindow("saavn:a")
+                h.engine.setPositionMs(0L)
+                h.submit(Intent.Seek(12_345L))
+                h.settleIntents()
+                assertEquals(12_345L, h.state.posMs, "the state machine owns the position whether or not the engine does")
+                assertEquals(listOf(12_345L), h.engine.seeks)
+            }
+        }
+
+    /**
+     * `Prepared` is a buffering event. Calling `play()` from it made a rebuffer override a user
+     * pause, so the notification and the app disagreed about the most important state.
+     */
+    @Test
+    fun aRebufferDoesNotOverrideAUserPause() =
+        runBlocking {
+            harness(cfg()) { h ->
+                h.seedCached("a")
+                h.seedCached("b")
+                h.submit(Intent.PlayNow(h.songs("a", "b"), 0))
+                h.awaitPlaying()
+                h.awaitWindow("saavn:a")
+                h.submit(Intent.TogglePlayPause)
+                h.awaitState { it.phase is Phase.Paused }
+                val playsBefore = h.engine.playCount
+                h.engine.script(EngineEvent.Prepared("g0:saavn:a:128"))
+                delay(REBUFFER_SETTLE_MS)
+                assertEquals(playsBefore, h.engine.playCount, "a rebuffer must not resume a paused transport")
+                assertTrue(h.state.phase is Phase.Paused, "…and the state machine must still say paused")
+            }
+        }
+
+    /**
+     * The engine's itemId carries the play generation, so an event stamped with a superseded one is
+     * a fault, never a track change: the old prefix scan matched the key and happily moved the queue
+     * to a track the user had already replaced.
+     */
+    @Test
+    fun aSupersededGenerationItemIdIsAFaultNotATrackChange() =
+        runBlocking {
+            harness(cfg()) { h ->
+                h.seedCached("a")
+                h.seedCached("z")
+                h.submit(Intent.PlayNow(h.songs("a"), 0))
+                h.awaitPlaying()
+                h.awaitWindow("saavn:a")
+                val windows = h.engine.preparedWindows
+                val head = windows.last()
+                val staleItemId = head.first().itemId
+                h.submit(Intent.PlayNow(h.songs("z"), 0))
+                h.awaitState { it.current?.key?.songId == "z" && it.phase is Phase.Playing }
+                h.engine.script(EngineEvent.TrackChanged(staleItemId, TransitionReason.AUTO))
+                delay(STALE_EVENT_SETTLE_MS)
+                val s = h.state
+                assertEquals("z", s.current?.key?.songId, "a superseded generation must not move the queue")
+            }
+        }
+
+    /** Repeat-ONE pins the transport, so a window listing the same track twice played it twice. */
+    @Test
+    fun repeatOneNeverBuildsAWindowWithTheSameTrackTwice() =
+        runBlocking {
+            harness(cfg()) { h ->
+                h.seedCached("a")
+                h.seedCached("b")
+                h.setRepeat(Repeat.ONE)
+                h.submit(Intent.PlayNow(h.songs("a", "b"), 0))
+                h.awaitPlaying()
+                h.awaitWindow("saavn:a")
+                h.settleIntents()
+                assertTrue(
+                    h.engine.preparedWindows.all { w -> w.size == 1 },
+                    "repeat ONE must prepare a one-item window, got ${h.engine.preparedWindows.map { it.map { t -> t.itemId } }}",
+                )
+                assertTrue(
+                    h.engine.upNextHistory.none { it != null },
+                    "and must never ask the engine to replace the up-next with the item it is playing",
                 )
             }
         }
@@ -381,22 +498,11 @@ class IntentMatrixTest {
         }
 
     /**
-     * Found while building the matrix: `handleExhaustedNext` decides between "restart the queue" and
-     * "End of queue" by comparing `s.index` with `s.queue.lastIndex` — a *slot* comparison — while
-     * the exhaustion itself was computed by `resolveAdvance`, which walks the *shuffle order*. With
-     * shuffle on and repeat off, the two disagree: the last element of the permutation toasts
-     * "End of queue" while unplayed slots remain.
+     * Found while building the matrix: the restart-or-toast decision used to compare `s.index` with
+     * `s.queue.lastIndex` — a *slot* comparison — after the algebra had already decided there was
+     * no successor in the *order*. Both now read `PlayerState.atPlaybackEnd`, which walks the order.
      */
     @Test
-    @Ignore(
-        "shuffle + repeat OFF: at the end of the shuffle permutation Intent.Next toasts " +
-            "\"End of queue\" even though queue slots are unplayed, because handleExhaustedNext " +
-            "(Orchestrator.kt:516) tests `s.index == s.queue.lastIndex` — a slot comparison — after " +
-            "resolveAdvance already decided there was no successor in the *order*. " +
-            "Counterexample: queue=[a,b,c], shuffleOrder=[2,0,1], index=1, repeat=OFF ⇒ resolveAdvance(+1)=null " +
-            "(end of the permutation) and index(1) != lastIndex(2), so the user is told the queue ended. " +
-            "Fix: base the restart-or-toast decision on the same algebra resolveAdvance uses.",
-    )
     fun shuffleRepeatOffAtTheEndOfTheOrderToastsEndOfQueue() =
         runBlocking {
             harness(cfg()) { h ->
@@ -502,3 +608,5 @@ class IntentMatrixTest {
 private const val POSITION_MS = 1_000L
 private const val PAST_RESTART_MS = 5_000L
 private const val RESTART_THRESHOLD_MS = 3_000L
+private const val REBUFFER_SETTLE_MS = 200L
+private const val STALE_EVENT_SETTLE_MS = 300L

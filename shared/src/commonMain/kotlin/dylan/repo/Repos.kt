@@ -99,10 +99,13 @@ class Favorites(
                     )
                 }
                 db.dylanQueries.addFavorite(song.key.provider, song.key.songId, now)
+                // Read inside this transaction, never before it: a `remove` landing between the
+                // read and the write is what used to leave a permanent phantom pin (docs §3.9).
                 db.dylanQueries.setPin(1L, now, song.key.provider, song.key.songId)
             }
         }
-        cacheManager.enforceBudget(netNewBytes = 0)
+        // The pin is a write, not a new row: nothing is pending, so nothing is reserved.
+        cacheManager.enforceBudget()
         version.value += 1
     }
 
@@ -110,7 +113,7 @@ class Favorites(
         withContext(disp.dbLane) {
             db.transaction {
                 db.dylanQueries.removeFavorite(key.provider, key.songId)
-                db.dylanQueries.setPin(0L, null, key.provider, key.songId)
+                db.dylanQueries.demotePin(key.provider, key.songId)
             }
         }.also { version.value += 1 }
 
@@ -200,10 +203,27 @@ class HomeCacheRepo(
     suspend fun evictWeekly() =
         withContext(disp.dbLane) {
             db.dylanQueries.evictStaleHomeCache(cfg.clock.nowMs() - cfg.homeCacheTtlMs)
-            val keepKeys = db.dylanQueries.newestHomeKeys(cfg.homeCacheRowCap.toLong()).executeAsList()
-            if (keepKeys.isNotEmpty()) db.dylanQueries.evictHomeCacheNotIn(keepKeys)
+            db.dylanQueries.evictHomeCacheKeepNewest(cfg.homeCacheRowCap.toLong())
         }
 }
+
+/**
+ * Quality-upgrade candidates: the predicate, the `has_320` filter and the LIMIT are all in SQL.
+ * The call site used to `selectAllCached()` and then `selectSong()` per row *before* `.take(n)`,
+ * so the limit bounded nothing and a 300-row cache cost 301 round trips through the single
+ * dbLane every 30 minutes, blocking playback DB work for the duration.
+ */
+suspend fun Dylan.upgradeCandidates(
+    disp: AppDispatchers,
+    fromBitrate: Long,
+    limit: Int,
+): List<SongKey> =
+    withContext(disp.dbLane) {
+        dylanQueries
+            .selectUpgradeCandidates(fromBitrate, limit.toLong())
+            .executeAsList()
+            .map { SongKey(it.provider, it.song_id) }
+    }
 
 suspend fun Dylan.weeklyGc(
     disp: AppDispatchers,
@@ -218,4 +238,9 @@ suspend fun Dylan.weeklyGc(
     // jump-back-in songs whose rows still exist is never touched — history feeds both the
     // resume snapshot above and the Home carousel, and only truly dangling rows go.
     dylanQueries.deleteOrphanHistory()
+    // The same failure mode for the cache: with PRAGMA foreign_keys off, or a store written
+    // before the PRAGMA existed, a deleted song can leave cached rows behind, and those rows
+    // keep bytes charged against the budget forever.
+    dylanQueries.deleteOrphanLibrary()
+    dylanQueries.deleteOrphanObjects()
 }

@@ -100,6 +100,16 @@ sqldelight {
         create("Dylan") {
             packageName.set("dylan.db")
             dialect("app.cash.sqldelight:sqlite-3-38-dialect:${libs.versions.sqldelight.get()}")
+            // Where `./gradlew :shared:generateCommonMainDylanMigrations` writes the next .sqm.
+            // It must be this directory: it is the only place the plugin both reads and writes
+            // migrations from, and it is the one directory the plugin also globs for .sq files,
+            // so a migration can never be committed somewhere the codegen silently ignores.
+            migrationOutputDirectory.set(file("src/commonMain/sqldelight/migrations"))
+            // verifyMigrations stays OFF on purpose: in 2.0.2 it needs a committed per-version
+            // .db snapshot to migrate FROM, and with only the newest snapshot present the
+            // verify task is green even when a migration drops an index (verified). A gate that
+            // cannot fail is worse than no gate; the real gate is CacheMigrationTest, which
+            // builds a genuine v0 database and opens it through the real DriverFactory.
         }
     }
 }

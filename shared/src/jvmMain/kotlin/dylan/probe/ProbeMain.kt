@@ -1,12 +1,16 @@
 package dylan.probe
 
 import dylan.config.AppConfig
+import dylan.diag.LogBuffer
 import dylan.model.MiniEntity
 import dylan.model.Quality
 import dylan.model.Song
 import dylan.net.apiClient
 import dylan.net.bulkClient
 import dylan.provider.saavn.SaavnProvider
+import dylan.util.AppDispatchers
+import dylan.util.NetClass
+import dylan.util.NetMonitor
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.cio.CIO
 import io.ktor.client.plugins.websocket.webSocketSession
@@ -20,7 +24,11 @@ import io.ktor.http.HttpHeaders
 import io.ktor.http.isSuccess
 import io.ktor.utils.io.readAvailable
 import io.ktor.websocket.close
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
@@ -145,7 +153,7 @@ object Probe {
             )
         api = apiClient(CIO.create(), cfg)
         bulk = bulkClient(CIO.create(), cfg)
-        provider = SaavnProvider(api, cfg)
+        provider = SaavnProvider(api, cfg, CoroutineScope(Dispatchers.IO), TestProbeLanes.disp, TestProbeLanes.net, LogBuffer())
 
         // S1-S3 need no catalog seed; skipping it also keeps the nightly off the
         // three extra search+home round trips the local mode uses.
@@ -278,7 +286,7 @@ object Probe {
         }
 
         check("P12", "M0", "WS handshake + round-trip < 2s") {
-            val wsCfg = cfg.copy(wsRequestTimeoutMs = 3_000)
+            val wsCfg = cfg.copy(wsAnswerTimeoutMs = 3_000)
             val t0 = System.nanoTime()
             val session = api.wsClientForProbe(wsCfg).webSocketSession(cfg.wsSearchUrl)
             session.send(
@@ -444,6 +452,23 @@ object Probe {
         )
         return if (blocking.isEmpty()) 0 else 1
     }
+}
+
+/**
+ * The lanes and connectivity the live probe runs on. The probe is a `main()` with no graph, so it
+ * supplies them itself; `AlwaysOnline` matches the `NetMonitor` contract default of a platform
+ * monitor that actually knows the answer (the probe requires the network to be up by construction).
+ */
+private object TestProbeLanes {
+    val disp = AppDispatchers(Dispatchers.Default, Dispatchers.IO, Dispatchers.Default, Dispatchers.Default)
+    val net =
+        object : NetMonitor {
+            override fun current(): NetClass = NetClass.UNMETERED
+
+            override fun isOnline(): Boolean = true
+
+            override fun changes(): Flow<NetClass> = MutableStateFlow(NetClass.UNMETERED)
+        }
 }
 
 private fun HttpClient.wsClientForProbe(cfg: AppConfig): HttpClient =

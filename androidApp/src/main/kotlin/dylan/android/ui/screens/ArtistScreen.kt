@@ -53,11 +53,21 @@ fun ArtistScreen(
 ) {
     val t = LocalDylanTokens.current
     var artist by remember { mutableStateOf<Artist?>(null) }
-    var failed by remember { mutableStateOf(false) }
+    var errorCode by remember { mutableStateOf<dylan.model.ErrorCode?>(null) }
 
+    // Typed: a numeric id has no route on this API and is refused with NOT_FOUND, so a stale
+    // numeric token says "unavailable" instead of the old blanket "Check your connection".
     LaunchedEffect(artistToken) {
-        artist = runCatching { container.provider.artist(artistToken) }.getOrNull()
-        failed = artist == null
+        when (val r = container.provider.artistDetail(artistToken)) {
+            is dylan.provider.CatalogResult.Ok -> {
+                artist = r.value
+                errorCode = null
+            }
+            is dylan.provider.CatalogResult.Err -> {
+                artist = null
+                errorCode = r.code
+            }
+        }
     }
 
     val songs = artist?.songs.orEmpty()
@@ -140,10 +150,10 @@ fun ArtistScreen(
                 },
             )
         }
-        if (failed) {
+        if (errorCode != null) {
             item {
                 Text(
-                    dylan.android.ui.Copy.NETWORK,
+                    dylan.model.DylanFailure(errorCode!!).message(),
                     style = MaterialTheme.typography.bodyMedium,
                     color = t.error,
                     modifier = Modifier.padding(16.dp),

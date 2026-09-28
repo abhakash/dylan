@@ -4,6 +4,7 @@ import dylan.config.AppConfig
 import dylan.net.apiClient
 import dylan.provider.saavn.dto.AlbumDto
 import dylan.provider.saavn.dto.ArtistDto
+import dylan.provider.saavn.dto.MoreInfoDto
 import dylan.provider.saavn.dto.ResultsDto
 import dylan.provider.saavn.dto.SongDto
 import dylan.provider.saavn.mapAlbum
@@ -36,6 +37,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.encodeToJsonElement
 import java.io.File
 import kotlin.system.exitProcess
@@ -418,7 +420,7 @@ object ContractDrift {
             songs.size,
             "rewrite fell back",
         )
-        val raw320 = dto.results.mapNotNull { s -> s.moreInfo?.has320 }
+        val raw320 = dto.results.mapNotNull { s -> moreInfoOf(s)?.has320 }
         val bad320 = raw320.count { el -> el !is JsonPrimitive || el.booleanOrNull == null }
         if (bad320 > 0) rows += warn("MoreInfo.has320", "PARSE_FAIL", "$bad320/${raw320.size} not boolean literal (mapper coerces to false)")
         return dto
@@ -473,7 +475,7 @@ object ContractDrift {
         if (artist.topSongs.isEmpty()) rows += fail("mapArtist.topSongs", "EMPTY_TRACKLIST", "token=$token")
         partial(
             "Artist.topSongs.resolveRef",
-            artist.topSongs.count { s -> s.moreInfo?.encryptedMediaUrl != null },
+            artist.topSongs.count { s -> moreInfoOfCard(s)?.encryptedMediaUrl != null },
             artist.topSongs.size,
             "encrypted_media_url absent",
         )
@@ -571,6 +573,17 @@ object ContractDrift {
         if (total > 0 && hits < total) rows += warn(field, "PARTIAL_PRESENT", "$hits/$total ($why)")
     }
 
+    /**
+     * `more_info` is an untyped [JsonElement] on the DTO now, and so is every element of an artist's
+     * `topSongs`. These are the two decodes the mapper itself does, so the probe reads the same
+     * fields the app does instead of a re-typed view of them.
+     */
+    private fun moreInfoOf(dto: SongDto): MoreInfoDto? =
+        dto.moreInfo?.let { runCatching { json.decodeFromJsonElement(MoreInfoDto.serializer(), it) }.getOrNull() }
+
+    private fun moreInfoOfCard(card: JsonElement): MoreInfoDto? =
+        runCatching { json.decodeFromJsonElement(SongDto.serializer(), card) }.getOrNull()?.let(::moreInfoOf)
+
     /** Everything the album/artist/auth probes need to derive their request tokens. */
     private class Tokens(
         val album: String?,
@@ -603,7 +616,7 @@ object ContractDrift {
                         ?: minis.firstOrNull { it.type == "album" }?.let { permaAlbumToken(it.permaUrl) },
                     dto.results.firstNotNullOfOrNull { permaArtistToken(it.permaUrl) }
                         ?: minis.firstOrNull { it.type == "artist" }?.let { permaArtistToken(it.permaUrl) },
-                    dto.results.firstNotNullOfOrNull { it.moreInfo?.encryptedMediaUrl },
+                    dto.results.firstNotNullOfOrNull { moreInfoOf(it)?.encryptedMediaUrl },
                 )
             }
         }

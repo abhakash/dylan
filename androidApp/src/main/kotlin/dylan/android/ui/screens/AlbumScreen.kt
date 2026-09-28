@@ -65,17 +65,23 @@ fun AlbumScreen(
 ) {
     val t = LocalDylanTokens.current
     var album by remember { mutableStateOf<Album?>(null) }
-    var failed by remember { mutableStateOf(false) }
+    var errorCode by remember { mutableStateOf<dylan.model.ErrorCode?>(null) }
 
+    // The provider returns a CatalogResult, so there is nothing left to catch: every failure mode
+    // (offline, geo-blocked, rate limited, bot-walled, timed out, gone) is a named code with its own
+    // message. The old try/catch here was dead code — the provider could only return null — and the
+    // screen showed "Check your connection" for all five.
     LaunchedEffect(albumId) {
-        try {
-            album = container.provider.album(albumId)
-        } catch (e: kotlinx.coroutines.CancellationException) {
-            throw e
-        } catch (_: Exception) {
-            album = null
+        when (val r = container.provider.albumDetail(albumId)) {
+            is dylan.provider.CatalogResult.Ok -> {
+                album = r.value
+                errorCode = null
+            }
+            is dylan.provider.CatalogResult.Err -> {
+                album = null
+                errorCode = r.code
+            }
         }
-        failed = album == null
     }
 
     val songs = album?.songs.orEmpty()
@@ -171,10 +177,10 @@ fun AlbumScreen(
                     },
                 )
             }
-            if (failed) {
+            if (errorCode != null) {
                 item {
                     Text(
-                        dylan.android.ui.Copy.NETWORK,
+                        dylan.model.DylanFailure(errorCode!!).message(),
                         style = MaterialTheme.typography.bodyMedium,
                         color = t.error,
                         modifier = Modifier.padding(16.dp),

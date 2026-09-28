@@ -14,98 +14,146 @@ import dylan.model.SongKey
 import dylan.provider.MusicProvider
 import dylan.provider.SignedStream
 import dylan.util.AppDispatchers
+import dylan.util.Clock
 import dylan.util.DISK_UNKNOWN
+import dylan.util.Lane
 import dylan.util.NetClass
 import dylan.util.freeDiskBytes
 import io.ktor.client.HttpClient
-import io.ktor.client.request.header
-import io.ktor.client.request.prepareGet
-import io.ktor.client.statement.HttpResponse
-import io.ktor.client.statement.bodyAsChannel
-import io.ktor.http.HttpHeaders
-import io.ktor.http.Url
-import io.ktor.utils.io.ByteReadChannel
-import io.ktor.utils.io.readAvailable
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.supervisorScope
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import okio.FileSystem
 import okio.Path
+import kotlin.concurrent.atomics.AtomicBoolean
 import kotlin.concurrent.atomics.AtomicReference
-import kotlin.math.ceil
 import kotlin.math.max
-import kotlin.math.min
-import kotlin.random.Random
 import kotlin.time.TimeSource
 
-private class PreemptSignal : CancellationException("preempted")
+/** Size verdicts, split so the two-sided band is only consulted when the origin declared nothing. */
+internal enum class SizeVerdict { Exact, Short, Oversize, BandOk, BandLow, BandHigh }
 
-/** Watchdog-to-copy stall signal: distinct from external cancellation by type. */
-private class StallSignal : CancellationException("stall")
+/**
+ * The size check, as a pure function.
+ *
+ * `duration × bitrate` used to be a hard *lower* bound at 90%. `Quality.BITRATE_128.bps` is already
+ * 27% padded, so that floor deterministically rejected every legitimate 128 kbps m4a whose response
+ * was chunked — the exact tier the app picks by default on metered (DL-6). The origin's own
+ * `Content-Length` / `Content-Range` total, now persisted in [Breakpoint], is authoritative when it
+ * exists; the estimate survives only as a two-sided sanity band, and only when the origin declared
+ * nothing at all.
+ */
+internal fun sizeVerdict(
+    finalBytes: Long,
+    totalBytes: Long?,
+    estimateLo: Long,
+    estimateHi: Long,
+): SizeVerdict =
+    if (totalBytes != null) {
+        when {
+            finalBytes == totalBytes -> SizeVerdict.Exact
+            finalBytes < totalBytes -> SizeVerdict.Short
+            else -> SizeVerdict.Oversize
+        }
+    } else {
+        when {
+            finalBytes < estimateLo -> SizeVerdict.BandLow
+            finalBytes > estimateHi -> SizeVerdict.BandHigh
+            else -> SizeVerdict.BandOk
+        }
+    }
 
-// Wall cap = time-to-download at a conservative 8 KB/s (expectedB/8 ms), floored.
-// Rate-based — a flowing-but-slow link is never killed; only a trickle below that
-// average rate is. Replaces the old `expectedB/20` bytes-as-ms accident.
-internal fun stallWallCapMs(
-    floorMs: Long,
-    expectedBytes: Long,
-): Long = max(floorMs, expectedBytes / 8)
+/**
+ * Time-throttled, no-op-skipping progress publisher. One instance per attempt, so the throttle
+ * table dies with the attempt instead of holding one entry per song for the life of the process.
+ *
+ * The old predicate was `if (n - last < 250 && loaded < denom) return`: once a resumed transfer
+ * passed its denominator the byte condition stopped short-circuiting, so on a fast link every
+ * 64 KB chunk emitted — and each emission is a full Map copy that recomposes five Compose screens.
+ * Time is the throttle now; the percentage is only a filter that drops no-op changes.
+ */
+internal class ProgressThrottle(
+    private val clock: Clock,
+    private val intervalMs: Long,
+) {
+    private var lastEmitMs = 0L
+    private var lastPct = NO_EMIT
 
-// Watchdog fires when EITHER the stream shows no fresh bytes for stallTimeoutMs
-// (true stall) OR the whole transfer outlives its rate-based wall cap (trickle).
-internal fun stallTripped(
-    sinceChunkMs: Long,
-    totalElapsedMs: Long,
-    wallCapMs: Long,
-    stallTimeoutMs: Long,
-): Boolean = sinceChunkMs > stallTimeoutMs || totalElapsedMs > wallCapMs
+    /** Percentage for [loaded], or null when this tick must not produce a StateFlow emission. */
+    fun take(
+        loaded: Long,
+        denom: Long?,
+    ): Int? {
+        val pct =
+            if (denom != null && denom > 0L) {
+                ((loaded * PERCENT_SCALE) / denom).coerceIn(0L, PERCENT_CEILING).toInt()
+            } else {
+                0
+            }
+        if (pct == lastPct) return null
+        val now = clock.nowMs()
+        if (lastPct != NO_EMIT && now - lastEmitMs < intervalMs) return null
+        lastEmitMs = now
+        lastPct = pct
+        return pct
+    }
 
-private sealed interface HttpOutcome {
-    data class RateLimited(
-        val retryAfterMs: Long?,
-    ) : HttpOutcome
-
-    data object Forbidden : HttpOutcome
-
-    data object NotFound : HttpOutcome
-
-    data object RangeNotSatisfiable : HttpOutcome
-
-    data class Full(
-        val cl: Long?,
-        val etag: String?,
-        val ct: String?,
-    ) : HttpOutcome
-
-    data class Partial(
-        val cl: Long?,
-        val crTotal: Long?,
-        val etag: String?,
-        val ct: String?,
-    ) : HttpOutcome
-
-    data class Other(
-        val status: Int,
-    ) : HttpOutcome
+    private companion object {
+        const val NO_EMIT = -1
+        const val PERCENT_SCALE = 100L
+        const val PERCENT_CEILING = 99L
+    }
 }
 
-private enum class StreamErr { Ok, Stall, Storage, Cancelled }
+/** The cached row, projected to the six fields COMMIT actually needs. */
+internal data class PrevRow(
+    val bitrate: Int,
+    val ext: String,
+    val bytes: Long,
+    val lastUsedMs: Long?,
+    val playCount: Long,
+    val pinned: Boolean,
+    val pinnedAtMs: Long?,
+) {
+    /** The refetch short-circuit, named so it is one condition rather than four. */
+    fun isSameArtifact(
+        bits: Int,
+        otherExt: String,
+        otherBytes: Long,
+    ): Boolean = bitrate == bits && ext == otherExt && bytes == otherBytes
 
-private enum class Step { HYDRATE, QUALITY, DEDUPE, SIZE, RESOLVE, REQUEST, VERIFY, COMMIT }
+    fun isOtherRendition(
+        bits: Int,
+        otherExt: String,
+    ): Boolean = bitrate != bits || ext != otherExt
+}
 
+/**
+ * The download engine: a priority queue, a small worker pool, and one job body that is a state
+ * machine over [Step].
+ *
+ * Concurrency. `loop()` used to run exactly one job at a time (`j.join()`) while
+ * `cfg.maxConcurrentParts = 3` and 45 lines of part-cap machinery carefully maintained up to three
+ * parts — the config promised concurrency the engine did not have. It now runs [WORKER_COUNT] jobs
+ * at once, which is the audit's minimum for a track boundary: with one slot a `USER_NOW` cannot
+ * preempt an equal-priority `USER_NOW`, so a three-second skip pays for a whole transfer. The
+ * bounded resource is the *transfer* (see [TransferGate]), not the job, so a job parked in VERIFY
+ * or COMMIT holds no permit.
+ *
+ * The bytes-on-disk ↔ bytes-on-wire relationship is [Breakpoint], a value. See that file for the
+ * six defects that were all statements about it.
+ */
 class DownloadEngine(
     private val db: Dylan,
     private val fs: FileSystem,
@@ -131,751 +179,573 @@ class DownloadEngine(
         }
     private var scope: CoroutineScope = CoroutineScope(SupervisorJob() + disp.io + engineFailure)
 
-    private val clock = cfg.clock
-    private val mutex = Mutex()
+    private val clock: Clock = cfg.clock
     private val wake = Channel<Unit>(Channel.CONFLATED)
-    private val queue = mutableListOf<DownloadJob>()
-    private var executing: Job? = null
-    private var executingKey: SongKey? = null
-    private var executingJob: DownloadJob? = null
-    private val preemptedKey = AtomicReference<SongKey?>(null)
+    private val queue = JobQueue(QUEUE_CAPACITY)
+    private val gate = TransferGate(minOf(WORKER_COUNT, cfg.maxConcurrentParts.coerceAtLeast(1)))
+    private val started = AtomicBoolean(false)
+    private val parts = PartStore(db, fs, paths, cfg, disp, log)
+    private val library = LibraryCommitter(db, disp, log)
+    private val transfer =
+        Transfer(
+            fs = fs,
+            cfg = cfg,
+            bulk = bulk,
+            breakers = breakers,
+            gate = gate,
+            clock = clock,
+            log = log,
+            publishProgress = { key, pct -> progress.update { it + (key to pct) } },
+            defer = { job, delayMs -> requeueLater(job, delayMs) },
+        )
+
+    /** A *set*: preemption is no longer single-slot, so one global key is no longer the truth. */
+    private val preempted = AtomicReference<Set<JobId>>(emptySet())
+
+    /** Coroutine handles of the jobs in flight, so a preemption can cancel the right one. */
+    private val handles = AtomicReference<Map<SongKey, Job>>(emptyMap())
 
     val states = MutableStateFlow<Map<SongKey, JobState>>(emptyMap())
     val progress = MutableStateFlow<Map<SongKey, Int>>(emptyMap())
-    private val lastProgressEmit = mutableMapOf<SongKey, Long>()
+
+    /** Terminal state per *attempt*. This is what W3-D awaits; see [awaitAttempt]. */
+    val attemptStates = MutableStateFlow<Map<JobId, JobState>>(emptyMap())
 
     fun stop() {
+        started.store(false)
         scope.cancel()
+        preempted.store(emptySet())
+        handles.store(emptyMap())
     }
 
     fun start() {
         if (!scope.isActive) {
             scope = CoroutineScope(SupervisorJob() + disp.io + engineFailure)
         }
-        scope.launch { loop() }
+        if (!started.compareAndSet(false, true)) return
+        parts.loadFromDisk()
+        repeat(WORKER_COUNT) { index -> scope.launch { worker(index) } }
     }
 
-    fun enqueue(job: DownloadJob) {
-        log.i("dl", "enqueue ${job.key.provider}:${job.key.songId} prio=${job.reason} bits=${job.bitrate}")
-        scope.launch {
-            states.update { it - job.key }
-            var victim: DownloadJob? = null
-            var aborted = false
-            mutex.withLock {
-                val existing = queue.firstOrNull { it.key == job.key }
-                if (existing != null && existing.reason.ordinal < job.reason.ordinal) {
-                    log.d("dl", "enqueue skipped (higher prio queued) ${job.key.provider}:${job.key.songId}")
-                    aborted = true
-                    return@withLock
-                }
-                queue.removeAll { it.key == job.key }
-                queue += job
-                queue.sortWith(compareBy({ it.reason.ordinal }, { it.enqueuedAtMs }))
-                // Strictly-higher-priority preempt: keep .part, requeue victim
-                val execJob = executingJob
-                val execKey = executingKey
-                if (execJob != null && execKey != null && job.key != execKey && job.reason.ordinal < execJob.reason.ordinal) {
-                    victim = execJob
-                    preemptedKey.store(execKey)
-                    queue.removeAll { it.key == execKey }
-                    queue.add(execJob.copy(enqueuedAtMs = clock.nowMs()))
-                    queue.sortWith(compareBy({ it.reason.ordinal }, { it.enqueuedAtMs }))
-                }
+    /**
+     * Admit a job. The queue owns the decision and hands back what the caller must do, so nothing
+     * here reaches into the in-flight worker — which is what removed the unlocked-triple race
+     * rather than papering over it with a lock.
+     */
+    fun enqueue(job: DownloadJob): EnqueueResult {
+        log.i("dl", "enqueue ${job.label} prio=${job.reason} bits=${job.bitrate}")
+        val result = queue.offer(job)
+        when (result) {
+            is EnqueueResult.Queued -> {
+                states.update { it - job.key }
+                scope.launch { library.writeIntent(job) }
+                poke()
             }
-            if (aborted) return@launch
-            withContext(disp.dbLane) {
-                runCatching {
-                    db.dylanQueries.upsertIntent(
-                        job.key.provider,
-                        job.key.songId,
-                        job.reason.name,
-                        job.bitrate.toLong(),
-                        job.enqueuedAtMs,
-                    )
-                }
+            is EnqueueResult.Preempted -> {
+                states.update { it - result.victim.key }
+                scope.launch { library.writeIntent(job) }
+                log.i("dl", "preempt ${result.victim.label} for ${job.label}")
+                markPreempted(preempted, result.victim.id)
+                cancelWorker(result.victim.key)
+                poke()
             }
-            enforcePartCap()
-            victim?.let {
-                log.i("dl", "preempt ${it.key.provider}:${it.key.songId} prio=${it.reason} for ${job.key.provider}:${job.key.songId}")
-                executing?.cancel(PreemptSignal())
-            }
-            poke()
+            EnqueueResult.SupersededByHigherPriority ->
+                log.d("dl", "enqueue superseded ${job.label} prio=${job.reason}")
+            EnqueueResult.Dropped ->
+                log.w("dl", "enqueue dropped (queue full) ${job.label} prio=${job.reason}")
         }
+        // The part sweep is fire-and-forget: it is gated and incremental, so an enqueue never blocks
+        // the caller's lane on a directory walk.
+        scope.launch { enforcePartCap() }
+        return result
     }
 
+    /** Cancel every attempt for [key], running or queued. */
     fun cancel(
         key: SongKey,
         keepPart: Boolean,
     ) {
-        scope.launch {
-            mutex.withLock { queue.removeAll { it.key == key } }
-            if (executingKey == key) executing?.cancel(PreemptSignal())
-            states.update { it + (key to JobState.Cancelled) }
-            progress.update { it - key }
-            if (!keepPart) deleteParts(key)
-        }
-    }
-
-    suspend fun dropIntent(key: SongKey) {
-        withContext(disp.dbLane) {
-            runCatching { db.dylanQueries.deleteIntent(key.provider, key.songId) }
-        }
-    }
-
-    suspend fun enforcePartCap() {
-        val parts =
-            runCatching { fs.list(paths.audioDir) }
-                .getOrDefault(emptyList())
-                .filter { it.name.endsWith(".part") }
-        if (parts.size <= cfg.maxConcurrentParts) return
-        val executingPrefix = executingKey?.let { "${it.provider}_${paths.sanitize(it.songId)}_" }
-        val eligible = parts.filter { executingPrefix == null || !it.name.startsWith(executingPrefix) }
-        if (eligible.size <= cfg.maxConcurrentParts) return
-        val intentMap =
-            withContext(disp.dbLane) {
-                db.dylanQueries
-                    .allIntents()
-                    .executeAsList()
-                    .associateBy { "${it.provider}:${it.song_id}" }
-            }
-        val reasonOf = mutableMapOf<Path, Priority>()
-        for (p in eligible) {
-            val parsed = parsePartName(p.name) ?: continue
-            val key = "${parsed.first}:${parsed.second}"
-            reasonOf[p] = intentMap[key]?.let { runCatching { Priority.valueOf(it.reason) }.getOrNull() } ?: Priority.PREFETCH_NEXT
-        }
-        // Victim order: PREFETCH parts first, then oldest (§7.1) — a just-preempted USER_NOW part
-        // you are most likely to resume must not be the first thing sacrificed.
-        val victims =
-            eligible
-                .sortedWith(
-                    compareBy(
-                        { reasonOf[it] != Priority.PREFETCH_NEXT },
-                        { runCatching { fs.metadataOrNull(it)?.lastModifiedAtMillis ?: 0L }.getOrDefault(0L) },
-                    ),
-                ).take(eligible.size - cfg.maxConcurrentParts)
-        for (p in victims) {
-            parsePartName(p.name)?.let { (prov, sid) -> dropIntent(SongKey(prov, sid)) }
-            runCatching { fs.delete(p) }
-        }
-    }
-
-    private fun parsePartName(name: String): Pair<String, String>? {
-        val base = name.removeSuffix(".part")
-        val firstUnderscore = base.indexOf('_')
-        val lastUnderscore = base.lastIndexOf('_')
-        if (firstUnderscore <= 0 || lastUnderscore <= firstUnderscore) return null
-        return base.substring(0, firstUnderscore) to base.substring(firstUnderscore + 1, lastUnderscore)
-    }
-
-    private fun poke() {
-        // CONFLATED wake cannot drop unless closed; log loudly if it ever does.
-        if (wake.trySend(Unit).isFailure) log.w("dl", "wake channel closed, loop may stall")
-    }
-
-    private suspend fun loop() {
-        while (true) {
-            // Peek, not pop: if the head duplicates the key an active job owns, leave it queued
-            // and sleep — popping here would race the owner's join window and the silent-drop
-            // below would swallow a fresh user retry forever.
-            val job =
-                mutex.withLock {
-                    val head = queue.firstOrNull()
-                    if (head != null && head.key == executingKey) null else queue.removeFirstOrNull()
-                } ?: run {
-                    wake.receive()
-                    continue
-                }
-            // Single-flight per key: a duplicate enqueued while the same key executes would run a
-            // second worker against the same .part file — the executing job owns the outcome.
-            // Defensive: requeue at front and wait out the owner rather than ever dropping bytes.
-            if (job.key == executingKey) {
-                mutex.withLock { queue.add(0, job) }
-                executing?.join()
-                continue
-            }
-            val j = scope.launch { runJob(job) }
-            executing = j
-            executingKey = job.key
-            executingJob = job
-            j.join()
-            executing = null
-            executingKey = null
-            executingJob = null
-            poke()
-        }
-    }
-
-    private suspend fun runJob(job: DownloadJob) {
-        val key = job.key
-        val t0 = clock.nowMs()
-        log.d("dl", "exec ${key.provider}:${key.songId} prio=${job.reason} bits=${job.bitrate}")
-        cacheManager.inFlightJobKeys.update { it + key }
-        var resolveCount = 0
-        var attempts = 0
-        var rangeRestarts = 0
-        var etag: String? = null
-        var partB = 0L
-        var segStart = 0L
-        var segLen = 0L
-        var total: Long? = null
-        var expectedB = 0L
-        var q = Quality.BITRATE_128
-        var ext = "m4a"
-        var signed: SignedStream? = null
-        var songRow: Songs? = null
-        var contentType: String? = null
-        var step = Step.HYDRATE
-
-        try {
-            while (true) {
-                log.d("dl", "step=${step.name} ${key.provider}:${key.songId} attempts=$attempts partB=$partB")
-                when (step) {
-                    Step.HYDRATE -> {
-                        states.update { it + (key to JobState.Queued) }
-                        songRow =
-                            withContext(disp.dbLane) {
-                                db.dylanQueries.selectSong(key.provider, key.songId).executeAsOneOrNull()
-                            }
-                        val hydrated = songRow
-                        if (hydrated == null) {
-                            return fail(key, DylanFailure(ErrorCode.NO_SOURCE, key))
-                        }
-                        if (hydrated.resolve_ref.isNullOrBlank()) return fail(key, DylanFailure(ErrorCode.NO_SOURCE, key))
-                        step = Step.QUALITY
-                    }
-
-                    Step.QUALITY -> {
-                        val metered = netClass() == NetClass.METERED
-                        val wanted = if (metered) cfg.meteredQuality else qualityPref()
-                        val hydrated = songRow ?: return fail(key, DylanFailure(ErrorCode.NO_SOURCE, key))
-                        q = if (hydrated.has_320 != 1L) Quality.BITRATE_128 else wanted
-                        step = Step.DEDUPE
-                    }
-
-                    Step.DEDUPE -> {
-                        // §7.3 step 5 sufficiency: a cached entry at/above the wanted bitrate IS the
-                        // deliverable — re-fetching would burn bandwidth (and on metered, violate
-                        // "never spend cellular upgrading"). Below-wanted + metered ⇒ serve as-is.
-                        val entry =
-                            withContext(disp.dbLane) {
-                                db.dylanQueries.selectCached(key.provider, key.songId).executeAsOneOrNull()
-                            }
-                        if (entry != null && (entry.bitrate >= q.bits.toLong() || netClass() == NetClass.METERED)) {
-                            log.i("dl", "dedupe-hit ${key.provider}:${key.songId} cached=${entry.bitrate} wanted=${q.bits}")
-                            cacheManager.touch(key, clock.nowMs())
-                            states.update { it + (key to JobState.Done(entry.bytes, entry.bitrate.toInt())) }
-                            progress.update { it - key }
-                            dropIntent(key)
-                            return
-                        }
-                        step = Step.SIZE
-                    }
-
-                    Step.SIZE -> {
-                        val hydrated = songRow ?: return fail(key, DylanFailure(ErrorCode.NO_SOURCE, key))
-                        expectedB = ceil(hydrated.duration_s * q.bps.toDouble()).toLong()
-                        partB = sizeOf(paths.part(key, q.bits))
-                        val netNew = max(0L, (expectedB * cfg.estimatePadding).toLong() - partB)
-                        cacheManager.enforceBudget(netNewBytes = netNew)
-                        val free = freeDiskBytes(paths.audioDir.toString())
-                        if (free != DISK_UNKNOWN && free < max(cfg.diskFloorBytes, 2 * netNew)) {
-                            return fail(key, DylanFailure(ErrorCode.STORAGE, key))
-                        }
-                        step = Step.RESOLVE
-                    }
-
-                    Step.RESOLVE -> {
-                        states.update { it + (key to JobState.Resolving) }
-                        resolveCount++
-                        if (resolveCount > cfg.resolveCapPerJob) {
-                            return fail(key, DylanFailure(ErrorCode.RESOLVE_LIMIT, key))
-                        }
-                        val resolveRef = songRow?.resolve_ref
-                        if (resolveRef.isNullOrBlank()) {
-                            return fail(key, DylanFailure(ErrorCode.NO_SOURCE, key))
-                        }
-                        signed = provider.resolveStream(resolveRef, q)
-                        if (signed == null) {
-                            log.w("dl", "resolve failed attempt=$attempts/${cfg.resolveCapPerJob} ${key.provider}:${key.songId}")
-                            if (++attempts <= cfg.dlRetries) {
-                                delay(cfg.dlBackoffBaseMs * attempts)
-                            } else {
-                                return fail(key, DylanFailure(ErrorCode.NETWORK, key))
-                            }
-                        } else {
-                            step = Step.REQUEST
-                        }
-                    }
-
-                    Step.REQUEST -> {
-                        val s = signed ?: return fail(key, DylanFailure(ErrorCode.NO_SOURCE, key))
-                        val breaker = breakers.forHost(Url(s.url).host)
-                        val now = clock.nowMs()
-                        if (breaker.paused(now)) {
-                            delay(min(breaker.pausedUntilMs - now, 5_000))
-                            continue
-                        }
-                        states.update { it + (key to JobState.Downloading(partB, total ?: expectedB.takeIf { e -> e > 0 })) }
-                        val hadRange = partB > 0
-                        var outcome: HttpOutcome? = null
-                        var streamResult: StreamErr? = null
-                        val startedAt = TimeSource.Monotonic.markNow()
-                        val lastMark = AtomicReference(TimeSource.Monotonic.markNow())
-                        try {
-                            bulk
-                                .prepareGet(s.url) {
-                                    header(HttpHeaders.AcceptEncoding, "identity")
-                                    if (hadRange) header(HttpHeaders.Range, "bytes=$partB-")
-                                    etag?.let { header(HttpHeaders.IfRange, it) }
-                                    header(HttpHeaders.UserAgent, cfg.userAgent)
-                                    header(HttpHeaders.Referrer, cfg.apiBaseUrl.substringBefore("/api.php") + "/")
-                                }.execute { r ->
-                                    when (val o = classify(r)) {
-                                        is HttpOutcome.Full -> {
-                                            contentType = o.ct
-                                            if (hadRange) {
-                                                rangeRestarts++
-                                                truncate(paths.part(key, q.bits))
-                                                partB = 0
-                                                if (rangeRestarts <= cfg.rangeRestartsCap) {
-                                                    outcome = o
-                                                    return@execute
-                                                }
-                                            }
-                                            segStart = 0
-                                            segLen = o.cl ?: 0L
-                                            total = o.cl
-                                            o.etag?.let { etag = it }
-                                            streamResult =
-                                                streamInto(r, paths.part(key, q.bits), segStart, total, expectedB, startedAt, lastMark, key)
-                                        }
-                                        is HttpOutcome.Partial -> {
-                                            contentType = o.ct
-                                            segStart = partB
-                                            segLen = o.cl ?: 0L
-                                            total = o.crTotal
-                                            o.etag?.let { etag = it }
-                                            streamResult =
-                                                streamInto(r, paths.part(key, q.bits), segStart, total, expectedB, startedAt, lastMark, key)
-                                        }
-                                        else -> outcome = o
-                                    }
-                                }
-                        } catch (e: CancellationException) {
-                            throw e
-                        } catch (e: Exception) {
-                            outcome = HttpOutcome.Other(-1)
-                        }
-                        when {
-                            streamResult == StreamErr.Storage ->
-                                return fail(key, DylanFailure(ErrorCode.STORAGE, key))
-                            streamResult == StreamErr.Stall ->
-                                if (++attempts <= cfg.dlRetries) {
-                                    delay(backoff(attempts))
-                                    step = Step.REQUEST
-                                } else {
-                                    return fail(key, DylanFailure(ErrorCode.NETWORK_TIMEOUT, key))
-                                }
-                            streamResult == StreamErr.Cancelled -> return
-                            streamResult == StreamErr.Ok -> step = Step.VERIFY
-                            else ->
-                                when (val o = outcome) {
-                                    is HttpOutcome.RateLimited -> {
-                                        log.w("dl", "429/503 ${key.provider}:${key.songId} retryAfter=${o.retryAfterMs ?: 5_000}ms")
-                                        breaker.pauseUntil(clock.nowMs() + (o.retryAfterMs ?: 5_000))
-                                        if (job.reason == Priority.USER_NOW) return fail(key, DylanFailure(ErrorCode.RATE_LIMITED, key))
-                                        requeueLater(job, o.retryAfterMs ?: 5_000)
-                                        return
-                                    }
-                                    is HttpOutcome.Forbidden ->
-                                        if (resolveCount < cfg.resolveCapPerJob) {
-                                            step = Step.RESOLVE
-                                        } else {
-                                            return fail(
-                                                key,
-                                                DylanFailure(
-                                                    if (otherEndpointsHealthy()) ErrorCode.FORBIDDEN_REGION else ErrorCode.EXPIRED,
-                                                    key,
-                                                ),
-                                            )
-                                        }
-                                    is HttpOutcome.NotFound -> return fail(key, DylanFailure(ErrorCode.NOT_FOUND, key))
-                                    is HttpOutcome.RangeNotSatisfiable -> {
-                                        log.w("dl", "416 restart ${key.provider}:${key.songId} rangeRestarts=$rangeRestarts cap=${cfg.rangeRestartsCap}")
-                                        rangeRestarts++
-                                        if (rangeRestarts > cfg.rangeRestartsCap) {
-                                            return fail(key, DylanFailure(ErrorCode.NETWORK, key))
-                                        }
-                                        truncate(paths.part(key, q.bits))
-                                        partB = 0
-                                        etag = null
-                                        step = Step.REQUEST
-                                    }
-                                    is HttpOutcome.Full -> step = Step.REQUEST
-                                    is HttpOutcome.Partial -> {}
-                                    is HttpOutcome.Other ->
-                                        if (++attempts <= cfg.dlRetries) {
-                                            delay(backoff(attempts))
-                                            step = Step.REQUEST
-                                        } else {
-                                            return fail(key, DylanFailure(ErrorCode.NETWORK, key))
-                                        }
-                                    null ->
-                                        if (++attempts <= cfg.dlRetries) {
-                                            delay(backoff(attempts))
-                                            step = Step.REQUEST
-                                        } else {
-                                            return fail(key, DylanFailure(ErrorCode.NETWORK, key))
-                                        }
-                                }
-                        }
-                    }
-
-                    Step.VERIFY -> {
-                        states.update { it + (key to JobState.Verifying) }
-                        val hydrated = songRow ?: return fail(key, DylanFailure(ErrorCode.NO_SOURCE, key))
-                        val verified = signed ?: return fail(key, DylanFailure(ErrorCode.NO_SOURCE, key))
-                        val tmp = paths.part(key, q.bits)
-                        val finalSize = sizeOf(tmp)
-                        val floor = ceil(hydrated.duration_s * q.bps.toDouble() * 0.90).toLong()
-                        val expectedTotal = total ?: (if (segStart > 0) segStart + segLen else floor)
-                        if (total != null && finalSize != expectedTotal) {
-                            deleteQuietly(tmp)
-                            return fail(key, DylanFailure(ErrorCode.CORRUPT_SIZE, key))
-                        }
-                        if (total == null && finalSize < expectedTotal) {
-                            deleteQuietly(tmp)
-                            return fail(key, DylanFailure(ErrorCode.CORRUPT_SIZE, key))
-                        }
-                        val derived = extFor(contentType, verified.type) ?: sniffExt(tmp)
-                        if (derived == null) {
-                            deleteQuietly(tmp)
-                            return fail(key, DylanFailure(ErrorCode.UNSUPPORTED, key))
-                        }
-                        ext = derived
-                        if (ext == "m4a" && !sniffFtyp(tmp)) {
-                            deleteQuietly(tmp)
-                            return fail(key, DylanFailure(ErrorCode.CORRUPT_CONTAINER, key))
-                        }
-                        step = Step.COMMIT
-                    }
-
-                    Step.COMMIT -> {
-                        val tmp = paths.part(key, q.bits)
-                        val finalPath = paths.final(key, q.bits, ext)
-                        val finalSize = sizeOf(tmp)
-                        val now = clock.nowMs()
-                        val favorited =
-                            withContext(disp.dbLane) {
-                                db.dylanQueries.isFavorite(key.provider, key.songId).executeAsOne()
-                            }
-                        val prev =
-                            withContext(disp.dbLane) {
-                                db.dylanQueries.selectCached(key.provider, key.songId).executeAsOneOrNull()
-                            }
-                        if (prev != null && prev.bitrate == q.bits.toLong() && prev.ext == ext && prev.bytes == finalSize) {
-                            dylan.util.fsRename(tmp.toString(), finalPath.toString())
-                            dropIntent(key)
-                            log.i("dl", "done(refetch) ${key.provider}:${key.songId} bytes=$finalSize ms=${clock.nowMs() - t0}")
-                            states.update { it + (key to JobState.Done(finalSize, q.bits)) }
-                            progress.update { it - key }
-                            return
-                        }
-                        dylan.util.fsRename(tmp.toString(), finalPath.toString())
-                        val ok =
-                            runCatching {
-                                withContext(disp.dbLane) {
-                                    db.transaction {
-                                        db.dylanQueries.deleteCached(key.provider, key.songId)
-                                        db.dylanQueries.insertCached(
-                                            key.provider,
-                                            key.songId,
-                                            q.bits.toLong(),
-                                            ext,
-                                            finalSize,
-                                            now,
-                                            prev?.last_used_ms,
-                                            prev?.play_count ?: 0L,
-                                            if (favorited || prev?.pinned == 1L) 1L else 0L,
-                                            prev?.pinned_at_ms ?: if (favorited) now else null,
-                                        )
-                                    }
-                                }
-                            }.isSuccess
-                        if (!ok) {
-                            deleteQuietly(finalPath)
-                            return fail(key, DylanFailure(ErrorCode.STORAGE, key))
-                        }
-                        if (prev != null && (prev.bitrate != q.bits.toLong() || prev.ext != ext)) {
-                            deleteQuietly(paths.final(key, prev.bitrate.toInt(), prev.ext))
-                        }
-                        cacheManager.enforceBudget(netNewBytes = 0, exemptKeys = setOf(key))
-                        dropIntent(key)
-                        log.i("dl", "done ${key.provider}:${key.songId} bits=${q.bits} ext=$ext bytes=$finalSize ms=${clock.nowMs() - t0}")
-                        states.update { it + (key to JobState.Done(finalSize, q.bits)) }
-                        progress.update { it - key }
-                        return
-                    }
-                }
-            }
-        } catch (e: CancellationException) {
-            val isPreempt = e is PreemptSignal && preemptedKey.load() == key
-            if (isPreempt) {
-                preemptedKey.store(null)
-                // Re-emit the victim as Queued (it was requeued ahead of lower-prio work)
-                // so waiters and UI see a live entry until its fresh Done lands.
-                log.i("dl", "preempted ${key.provider}:${key.songId} requeued as Queued")
-                states.update { it + (key to JobState.Queued) }
-                progress.update { it - key }
-            } else {
-                states.update { it + (key to JobState.Cancelled) }
-            }
-            throw e
-        } finally {
-            cacheManager.inFlightJobKeys.update { it - key }
-        }
+        val target = queue.remove(key) ?: queue.ownerOf(key)
+        target?.let { markPreempted(preempted, it.id) }
+        target?.let { cancelWorker(it.key) }
+        states.update { it + (key to JobState.Cancelled) }
+        progress.update { it - key }
+        if (!keepPart) scope.launch { parts.deleteParts(key) }
     }
 
     /**
-     * Structured copy + watchdog: the copy child returns its own [StreamErr],
-     * the watchdog child cancels it with [StallSignal] on stall, and external
-     * cancellation propagates untouched (caller maps it to Cancelled/preempt).
-     * No shared result var, no `delay(10)` read-spin — [awaitContent] suspends
-     * until bytes arrive or the channel closes.
+     * Cancel exactly the attempt [id] names. This is what a generation change in playback wants: it
+     * knows the id it was handed and must be able to abandon that attempt without touching a newer
+     * one for the same song.
      */
-    private suspend fun streamInto(
-        r: HttpResponse,
-        partPath: okio.Path,
-        startOffset: Long,
-        totalLen: Long?,
-        expectedB: Long,
-        startedAt: TimeSource.Monotonic.ValueTimeMark,
-        lastMark: AtomicReference<TimeSource.Monotonic.ValueTimeMark>,
-        key: SongKey,
-    ): StreamErr =
-        supervisorScope {
-            val ch: ByteReadChannel = r.bodyAsChannel()
-            val copyDone =
-                async {
-                    try {
-                        val h = fs.openReadWrite(partPath, mustCreate = false, mustExist = false)
-                        try {
-                            var pos = startOffset
-                            val buf = ByteArray(64 * 1024)
-                            while (!ch.isClosedForRead) {
-                                // Suspends until bytes arrive or EOF — no read-spin.
-                                if (!ch.awaitContent()) break
-                                val n = ch.readAvailable(buf, 0, buf.size)
-                                if (n == -1) break
-                                if (n == 0) continue
-                                h.write(pos, buf, 0, n)
-                                pos += n
-                                lastMark.store(TimeSource.Monotonic.markNow())
-                                emitProgress(key, pos, totalLen ?: expectedB)
-                            }
-                        } finally {
-                            runCatching { h.flush() }
-                            runCatching { h.close() }
-                        }
-                        StreamErr.Ok
-                    } catch (e: StallSignal) {
-                        StreamErr.Stall
-                    } catch (e: CancellationException) {
-                        throw e
-                    } catch (e: Exception) {
-                        StreamErr.Storage
-                    }
-                }
-            val watchDone =
-                async {
-                    while (true) {
-                        delay(cfg.stallWatchdogTickMs)
-                        if (copyDone.isCompleted) return@async
-                        val sinceChunk = lastMark.load().elapsedNow().inWholeMilliseconds
-                        val totalElapsed = startedAt.elapsedNow().inWholeMilliseconds
-                        val wallCapMs = stallWallCapMs(cfg.stallWallFloorMs, expectedB)
-                        if (stallTripped(sinceChunk, totalElapsed, wallCapMs, cfg.stallTimeoutMs)) {
-                            log.w("dl", "stall ${key.provider}:${key.songId} sinceChunk=${sinceChunk}ms wall=${totalElapsed}ms cap=${wallCapMs}ms")
-                            copyDone.cancel(StallSignal())
-                            return@async
-                        }
-                    }
-                }
+    fun cancelAttempt(
+        id: JobId,
+        keepPart: Boolean,
+    ) {
+        val job = queue.byId(id) ?: return
+        queue.remove(job.key)
+        markPreempted(preempted, job.id)
+        cancelWorker(job.key)
+        if (!keepPart) scope.launch { parts.deleteParts(job.key) }
+    }
+
+    /** The attempt a caller should await for [key] right now: running, or queued behind one. */
+    fun attemptOf(key: SongKey): JobId? = queue.activeAttempt(key)
+
+    /**
+     * Terminal state of one specific attempt, or null if it had not settled inside [timeoutMs].
+     *
+     * A displaced attempt settles as [JobState.Cancelled] immediately, so this cannot hang the way
+     * a key-keyed wait does when a job is preempted and re-run — which is PB-2's "a failed track
+     * can never be retried in the same session" from the other side.
+     */
+    suspend fun awaitAttempt(
+        id: JobId,
+        timeoutMs: Long,
+    ): JobState? = withTimeoutOrNull(timeoutMs.coerceAtLeast(1L)) { attemptStates.first { id in it } }?.get(id)
+
+    suspend fun dropIntent(key: SongKey) = library.dropIntent(key)
+
+    /**
+     * Keep the number of `.part` files on disk within `cfg.maxConcurrentParts`. See [PartStore] for
+     * why this is a gated sweep over a maintained inventory rather than a walk per enqueue, and for
+     * the off-by-one it fixes. Pass `force` for an explicit sweep.
+     */
+    suspend fun enforcePartCap(force: Boolean = false) {
+        parts.enforce(cfg.maxConcurrentParts.coerceAtLeast(1), force, queue.inFlightKeys()) { dropIntent(it) }
+    }
+
+    // ---- workers ---------------------------------------------------------------------------
+
+    private suspend fun worker(index: Int) {
+        disp.assert(Lane.IO)
+        while (true) {
+            val job = queue.claimNext()
+            if (job == null) {
+                wake.receive()
+                continue
+            }
+            val handle = currentHandle()
+            handles.mutate { it + (job.key to handle) }
+            log.d("dl", "w$index start ${job.label} attempt=${job.attempts}")
             try {
-                copyDone.await()
+                runJob(job)
             } finally {
-                watchDone.cancel()
+                handles.mutate { it - job.key }
+                queue.release(job.key)
+                poke()
             }
         }
-
-    private fun classify(r: HttpResponse): HttpOutcome =
-        when (r.status.value) {
-            429, 503 -> HttpOutcome.RateLimited(r.headers[HttpHeaders.RetryAfter]?.toLongOrNull()?.times(1000))
-            401, 403 -> HttpOutcome.Forbidden
-            404 -> HttpOutcome.NotFound
-            416 -> HttpOutcome.RangeNotSatisfiable
-            200 ->
-                HttpOutcome.Full(
-                    cl = r.headers[HttpHeaders.ContentLength]?.toLongOrNull(),
-                    etag = r.headers[HttpHeaders.ETag],
-                    ct = r.headers[HttpHeaders.ContentType],
-                )
-            206 -> {
-                val cr = r.headers[HttpHeaders.ContentRange]
-                HttpOutcome.Partial(
-                    cl = r.headers[HttpHeaders.ContentLength]?.toLongOrNull(),
-                    crTotal =
-                        cr?.let {
-                            Regex("bytes\\s+\\d+-\\d+/(\\d+)")
-                                .find(it)
-                                ?.groupValues
-                                ?.get(1)
-                                ?.toLongOrNull()
-                        },
-                    etag = r.headers[HttpHeaders.ETag],
-                    ct = r.headers[HttpHeaders.ContentType],
-                )
-            }
-            else -> HttpOutcome.Other(r.status.value)
-        }
-
-    private fun emitProgress(
-        key: SongKey,
-        loaded: Long,
-        denom: Long,
-    ) {
-        val n = clock.nowMs()
-        val last = lastProgressEmit[key] ?: 0L
-        if (n - last < 250 && loaded < denom) return
-        lastProgressEmit[key] = n
-        val pct = (((loaded * 100) / denom.coerceAtLeast(1)).coerceIn(0L, 99L)).toInt()
-        progress.update { it + (key to pct) }
     }
 
-    private suspend fun fail(
-        key: SongKey,
-        err: DylanFailure,
-    ) {
-        log.e("dl", "failed ${key.provider}:${key.songId} code=${err.code} detail=${err.detail ?: "-"}")
-        // Resumable failures keep the .part (§7.4 reconciler resume); permanent ones must not
-        // leak bytes until the reconciler grace window.
-        if (err.code in NON_RESUMABLE_CODES) deleteParts(key)
-        states.update { it + (key to JobState.Failed(err, willRetry = false)) }
-        progress.update { it - key }
-        dropIntent(key)
+    private suspend fun currentHandle(): Job = kotlin.coroutines.coroutineContext[Job] ?: error("worker without a job")
+
+    private fun poke() {
+        // CONFLATED wake cannot drop unless closed; log loudly if it ever does.
+        if (wake.trySend(Unit).isFailure) log.w("dl", "wake channel closed, workers may stall")
     }
 
-    private companion object {
-        private val NON_RESUMABLE_CODES =
-            setOf(
-                ErrorCode.NOT_CACHEABLE,
-                ErrorCode.NO_SOURCE,
-                ErrorCode.NOT_FOUND,
-                ErrorCode.UNSUPPORTED,
-                ErrorCode.CORRUPT_SIZE,
-                ErrorCode.CORRUPT_CONTAINER,
-            )
+        private fun cancelWorker(key: SongKey) {
+        handles.load()[key]?.cancel(PreemptSignal())
     }
 
     private fun requeueLater(
         job: DownloadJob,
         delayMs: Long,
     ) {
+        val wait = delayMs.coerceIn(MIN_REQUEUE_DELAY_MS, REQUEUE_MAX_DELAY_MS)
         scope.launch {
-            delay(delayMs)
-            mutex.withLock {
-                queue.removeAll { it.key == job.key }
-                queue += job
-                queue.sortWith(compareBy({ it.reason.ordinal }, { it.enqueuedAtMs }))
-            }
+            delay(wait)
+            queue.readmit(job)
             poke()
         }
     }
 
-    private fun backoff(attempt: Int): Long = cfg.dlBackoffBaseMs * attempt + Random.nextLong(cfg.dlBackoffBaseMs / 2)
+    // ---- the job ---------------------------------------------------------------------------
 
-    private fun sizeOf(p: okio.Path): Long = runCatching { fs.metadataOrNull(p)?.size ?: 0L }.getOrDefault(0L)
+    private suspend fun runJob(job: DownloadJob) {
+        disp.assert(Lane.IO)
+        val key = job.key
+        val t0 = clock.nowMs()
+        log.d("dl", "exec ${job.label} attempt=${job.attempts}")
+        cacheManager.inFlightJobKeys.update { it + key }
+        // The source of an in-flight upgrade is the user's only copy of a track they already had
+        // offline. `upgradeSourceKeys` had six reads and no writes, so it was permanently empty and
+        // an interrupted 128→320 left them with nothing at all.
+        if (job.reason == Priority.QUALITY_UPGRADE) cacheManager.upgradeSourceKeys.update { it + key }
+        var attempts = job.attempts
+        var resolveCount = 0
+        var rangeRestarts = 0
+        var songRow: Songs? = null
+        var quality = Quality.of(job.bitrate)
+        var ext = DEFAULT_EXT
+        var signed: SignedStream? = null
+        var contentType: String? = null
+        var step = Step.HYDRATE
+        val live = AtomicReference(Breakpoint.fresh(quality, clock.nowMs()))
 
-    private fun deleteQuietly(p: okio.Path) = runCatching { fs.delete(p) }
+        try {
+            while (true) {
+                val bpNow = live.load()
+                log.d("dl", "step=${step.name} ${job.label} attempts=$attempts partB=${bpNow.partBytes}")
+                when (step) {
+                    Step.HYDRATE -> {
+                        publish(key, JobState.Queued)
+                        val row =
+                            withContext(disp.dbLane) {
+                                db.dylanQueries.selectSong(key.provider, key.songId).executeAsOneOrNull()
+                            }
+                        songRow = row
+                        if (row == null || row.resolve_ref.isNullOrBlank()) {
+                            return fail(key, job, DylanFailure(ErrorCode.NO_SOURCE, key), job.id)
+                        }
+                        step = Step.QUALITY
+                    }
 
-    private fun truncate(p: okio.Path) {
-        runCatching {
-            if (fs.exists(p)) {
-                val h = fs.openReadWrite(p)
-                try {
-                    h.resize(0)
-                } finally {
-                    runCatching { h.close() }
+                    Step.QUALITY -> {
+                        quality = chooseQuality(job, songRow, cfg, netClass, qualityPref)
+                        step = Step.DEDUPE
+                    }
+
+                    Step.DEDUPE -> {
+                        // A cached entry at or above the wanted bitrate IS the deliverable:
+                        // re-fetching burns bandwidth, and on metered it spends cellular.
+                        val entry =
+                            withContext(disp.dbLane) {
+                                db.dylanQueries.selectCached(key.provider, key.songId).executeAsOneOrNull()
+                            }
+                        val metered = netClass() == NetClass.METERED
+                        val sufficient = entry != null && entry.bitrate >= quality.bits.toLong()
+                        if (entry != null && (sufficient || metered)) {
+                            log.i("dl", "dedupe-hit ${job.label} cached=${entry.bitrate} wanted=${quality.bits}")
+                            cacheManager.touch(key, clock.nowMs())
+                            return finish(key, JobState.Done(entry.bytes, entry.bitrate.toInt()), job.id)
+                        }
+                        step = Step.SIZE
+                    }
+
+                    Step.SIZE -> {
+                        val part = parts.partOf(key, quality.bits)
+                        val onDisk = fileSize(fs, part)
+                        live.store(parts.note(key, quality, onDisk, job.reason))
+                        val need = max(0L, (live.load().totalBytes ?: paddedEstimate(cfg, songRow, quality)) - onDisk)
+                        cacheManager.enforceBudget(netNewBytes = need)
+                        val free = freeDiskBytes(paths.audioDir.toString())
+                        if (free != DISK_UNKNOWN && free < max(cfg.diskFloorBytes, 2 * need)) {
+                            return fail(key, job, DylanFailure(ErrorCode.STORAGE, key), job.id)
+                        }
+                        step = Step.RESOLVE
+                    }
+
+                    Step.RESOLVE -> {
+                        publish(key, JobState.Resolving)
+                        resolveCount++
+                        if (resolveCount > cfg.resolveCapPerJob) {
+                            return fail(key, job, DylanFailure(ErrorCode.RESOLVE_LIMIT, key), job.id)
+                        }
+                        val resolveRef = songRow?.resolve_ref
+                        if (resolveRef.isNullOrBlank()) {
+                            return fail(key, job, DylanFailure(ErrorCode.NO_SOURCE, key), job.id)
+                        }
+                        val origin = provider.resolveStream(resolveRef, quality)
+                        if (origin == null) {
+                            log.w("dl", "resolve failed $resolveCount/${cfg.resolveCapPerJob} ${job.label}")
+                            val outOfResolves = resolveCount >= cfg.resolveCapPerJob
+                            if (outOfResolves) return fail(key, job, DylanFailure(ErrorCode.NETWORK, key), job.id)
+                            delay(cfg.dlBackoffBaseMs * resolveCount)
+                        } else {
+                            signed = origin
+                            step = Step.REQUEST
+                        }
+                    }
+
+                    Step.REQUEST -> {
+                        val origin = signed ?: return fail(key, job, DylanFailure(ErrorCode.NO_SOURCE, key), job.id)
+                        val ctx = AttemptCtx(key, quality, songRow, resolveCount, rangeRestarts, attempts)
+                        val outcome = transfer.run(job, origin, parts.partOf(key, quality.bits), live, ctx, contentType)
+                        contentType = outcome.contentType ?: contentType
+                        rangeRestarts = outcome.rangeRestarts
+                        attempts = outcome.attempts
+                        when (outcome) {
+                            is TransferResult.Done -> step = Step.VERIFY
+                            is TransferResult.Retry -> {
+                                // Linear, deterministic, bounded: the breaker owns the backoff shape
+                                // for a sick host, this only spaces out an immediate retry.
+                                val spent = outcome.attempts - attempts
+                                if (spent > 0) delay(cfg.dlBackoffBaseMs * spent)
+                                step = if (outcome.reResolve) Step.RESOLVE else Step.REQUEST
+                            }
+                            is TransferResult.Defer -> {
+                                requeueLater(job.copy(attempts = attempts), outcome.delayMs)
+                                return
+                            }
+                            is TransferResult.Failed ->
+                                return fail(key, job, DylanFailure(downgrade(outcome.code), key, outcome.why), job.id)
+                        }
+                    }
+
+                    Step.VERIFY -> {
+                        publish(key, JobState.Verifying)
+                        val part = parts.partOf(key, quality.bits)
+                        val bp = live.load()
+                        val finalSize = fileSize(fs, part)
+                        val (lo, hi) = sizeBand(estimateBytes(songRow, quality))
+                        val verdict = sizeVerdict(finalSize, bp.totalBytes, lo, hi)
+                        if (verdict != SizeVerdict.Exact && verdict != SizeVerdict.BandOk) {
+                            step = onSizeMismatch(verdict, part, live, key, job, attempts)
+                            attempts = attempts
+                            if (step == Step.VERIFY) {
+                                return fail(key, job, DylanFailure(ErrorCode.CORRUPT_SIZE, key), job.id)
+                            }
+                            continue
+                        }
+                        // Body magic decides the container, before any header: a CDN error page served
+                        // as `200 audio/mpeg` used to take the mp3 path, skip the ftyp gate and be
+                        // committed as a playable file (DL-7).
+                        val container = sniffContainer(fs, part)
+                        if (container == null) {
+                            deleteQuietly(fs, part)
+                            parts.forget(key)
+                            val claimed = audioClaimed(contentType, signed?.type)
+                            val code = if (claimed) ErrorCode.CORRUPT_CONTAINER else ErrorCode.UNSUPPORTED
+                            return fail(key, job, DylanFailure(code, key), job.id)
+                        }
+                        ext = container.name.lowercase()
+                        step = Step.COMMIT
+                    }
+
+                    Step.COMMIT -> {
+                        step = Step.HYDRATE
+                        return commit(key, quality, ext, t0, job)
+                    }
                 }
             }
+        } catch (e: CancellationException) {
+            onCancelled(job, key, attempts)
+            throw e
+        } catch (expected: Throwable) {
+            // DL-4: nothing in here may die without a terminal state. A malformed signed URL, the
+            // `check(rc == 0)` inside the iOS fsRename, any SQLDelight call and `fs.list` can all
+            // throw. The consequence used to be a coroutine that died silently while `states[key]`
+            // kept a non-terminal Downloading, so playback's withTimeoutOrNull(readyTimeoutMs) sat
+            // there before reporting NETWORK_TIMEOUT.
+            val what = expected.message ?: expected::class.simpleName
+            log.e("dl", "job crashed ${job.label}: $what")
+            dylan.util.logErr("dylan-dl: $what")
+            fail(key, job, DylanFailure(ErrorCode.NETWORK, key, what), job.id)
+        } finally {
+            parts.persist(key, live.load())
+            cacheManager.inFlightJobKeys.update { it - key }
+            cacheManager.upgradeSourceKeys.update { it - key }
         }
     }
 
-    private fun deleteParts(key: SongKey) {
-        runCatching {
-            val prefix = "${key.provider}_${paths.sanitize(key.songId)}_"
-            fs
-                .list(paths.audioDir)
-                .filter { it.name.startsWith(prefix) && it.name.endsWith(".part") }
-                .forEach { fs.delete(it) }
+    /** What to do about a size that does not match: retry while the budget lasts, else give up. */
+    private fun onSizeMismatch(
+        verdict: SizeVerdict,
+        part: Path,
+        live: AtomicReference<Breakpoint>,
+        key: SongKey,
+        job: DownloadJob,
+        attempts: Int,
+    ): Step {
+        val oversize = verdict == SizeVerdict.Oversize || verdict == SizeVerdict.BandHigh
+        log.w("dl", "size ${verdict.name} for ${key.provider}:${key.songId} attempt=${attempts + 1}/${cfg.dlRetries}")
+        if (attempts + 1 > cfg.dlRetries) return Step.VERIFY
+        if (oversize) {
+            if (!truncatePart(fs, part)) {
+                scope.launch { fail(key, job, DylanFailure(ErrorCode.STORAGE, key), job.id) }
+                return Step.VERIFY
+            }
+            live.store(live.load().wrote(0L))
         }
+        return Step.REQUEST
     }
 
-    private fun sniffFtyp(p: okio.Path): Boolean =
-        runCatching {
-            val h = fs.openReadOnly(p)
-            try {
-                val buf = ByteArray(4)
-                var read = 0
-                while (read < 4) {
-                    val n = h.read(4L + read, buf, read, 4 - read)
-                    if (n <= 0) break
-                    read += n
-                }
-                read == 4 && buf.decodeToString() == "ftyp"
-            } finally {
-                runCatching { h.close() }
-            }
-        }.getOrDefault(false)
-
-    // CDN Content-Type is unreliable (missing / binary/octet-stream / text/html error pages);
-    // body magic is the truth. ftyp at offset 4 ⇒ mp4-family; ID3 at 0 ⇒ mp3.
-    private fun sniffExt(p: okio.Path): String? =
-        when {
-            sniffFtyp(p) -> "m4a"
-            sniffId3(p) -> "mp3"
-            else -> null
+    private suspend fun onCancelled(
+        job: DownloadJob,
+        key: SongKey,
+        attempts: Int,
+    ) {
+        if (!preempted.load().contains(job.id)) {
+            publishTerminal(key, JobState.Cancelled, job.id)
+            progress.update { it - key }
+            return
         }
+        clearMark(preempted, job.id)
+        // Not terminal for the key: the same attempt goes back with its `.part` and its budget
+        // intact, so waiters and the UI keep seeing a live entry until the fresh Done lands.
+        log.i("dl", "preempted ${job.label} requeued attempt=$attempts")
+        queue.readmit(job.copy(attempts = attempts))
+        publish(key, JobState.Queued)
+    }
 
-    private fun sniffId3(p: okio.Path): Boolean =
-        runCatching {
-            val h = fs.openReadOnly(p)
-            try {
-                val buf = ByteArray(3)
-                var read = 0
-                while (read < 3) {
-                    val n = h.read(read.toLong(), buf, read, 3 - read)
-                    if (n <= 0) break
-                    read += n
-                }
-                read == 3 && buf.decodeToString() == "ID3"
-            } finally {
-                runCatching { h.close() }
+    private suspend fun commit(
+        key: SongKey,
+        quality: Quality,
+        ext: String,
+        t0: Long,
+        job: DownloadJob,
+    ) {
+        val part = parts.partOf(key, quality.bits)
+        val finalPath = paths.final(key, quality.bits, ext)
+        val finalSize = fileSize(fs, part)
+        val now = clock.nowMs()
+        val favorited = withContext(disp.dbLane) { db.dylanQueries.isFavorite(key.provider, key.songId).executeAsOne() }
+        val prev = library.previousRow(key)
+        if (prev?.isSameArtifact(quality.bits, ext, finalSize) == true) {
+            if (!renamePart(part.toString(), finalPath.toString(), log)) {
+                return fail(key, job, DylanFailure(ErrorCode.STORAGE, key), job.id)
             }
-        }.getOrDefault(false)
-
-    private fun extFor(
-        contentType: String?,
-        signedType: String?,
-    ): String? {
-        val ct = contentType?.substringBefore(';')?.trim()?.lowercase()
-        return when {
-            ct?.contains("mpeg") == true || ct?.contains("mp3") == true -> "mp3"
-            ct?.contains("mp4") == true || ct?.contains("m4a") == true -> "m4a"
-            signedType == "mp4" -> "m4a"
-            signedType == "mp3" -> "mp3"
-            else -> null
+            parts.forget(key)
+            log.i("dl", "done(refetch) ${job.label} bytes=$finalSize ms=${now - t0}")
+            return finish(key, JobState.Done(finalSize, quality.bits), job.id)
         }
+        if (!renamePart(part.toString(), finalPath.toString(), log)) {
+            return fail(key, job, DylanFailure(ErrorCode.STORAGE, key), job.id)
+        }
+        parts.forget(key)
+        if (!library.commit(key, quality, ext, finalSize, now, prev, favorited)) {
+            deleteQuietly(fs, finalPath)
+            return fail(key, job, DylanFailure(ErrorCode.STORAGE, key), job.id)
+        }
+        if (prev != null && prev.isOtherRendition(quality.bits, ext)) {
+            deleteQuietly(fs, paths.final(key, prev.bitrate, prev.ext))
+        }
+        cacheManager.enforceBudget(netNewBytes = 0, exemptKeys = setOf(key))
+        log.i("dl", "done ${job.label} bits=${quality.bits} ext=$ext bytes=$finalSize ms=${now - t0}")
+        finish(key, JobState.Done(finalSize, quality.bits), job.id)
+    }
+
+    /**
+     * `selectCached` reads a view over a table the cache wave is migrating, so this projects the six
+     * columns COMMIT needs instead of naming a generated row type: a download engine that fails to
+     * compile when a sibling renames a table is a worse coupling than six named columns.
+     */
+    private suspend fun finish(
+        key: SongKey,
+        state: JobState,
+        attempt: JobId,
+    ) {
+        progress.update { it - key }
+        publishTerminal(key, state, attempt)
+        dropIntent(key)
+    }
+
+    private suspend fun fail(
+        key: SongKey,
+        job: DownloadJob,
+        err: DylanFailure,
+        attempt: JobId,
+    ) {
+        log.e("dl", "failed ${job.label} code=${err.code} detail=${err.detail ?: "-"}")
+        // Resumable failures keep the `.part` so the next process resumes it; permanent ones must
+        // not leak bytes until the reconciler's grace window. CORRUPT_SIZE is deliberately *not* in
+        // this set any more: a size mismatch is a symptom of a truncated or spliced transfer, and
+        // deleting the only resumable bytes made recovery impossible (DL-2/DL-6).
+        if (err.code in NON_RESUMABLE_CODES) parts.deleteParts(key)
+        progress.update { it - key }
+        publishTerminal(key, state = JobState.Failed(err, willRetry = false), attempt = attempt)
+        dropIntent(key)
+    }
+
+    /**
+     * A refused signed URL is a geo-block only if the rest of the API is healthy; when it is not,
+     * the honest answer is that the URL expired.
+     */
+    private fun downgrade(code: ErrorCode): ErrorCode {
+        if (code != ErrorCode.FORBIDDEN_REGION || otherEndpointsHealthy()) return code
+        return ErrorCode.EXPIRED
+    }
+
+    private fun publish(
+        key: SongKey,
+        state: JobState,
+    ) {
+        // Re-insert on every publish so the map's iteration order is recency: that is what lets the
+        // retention pass drop the *oldest* entry rather than an arbitrary one.
+        states.update { bounded(it - key + (key to state), TERMINAL_RETENTION) }
+    }
+
+    private fun publishTerminal(
+        key: SongKey,
+        state: JobState,
+        attempt: JobId,
+    ) {
+        publish(key, state)
+        attemptStates.update { bounded(it - attempt + (attempt to state), TERMINAL_RETENTION) }
+    }
+
+    private companion object {
+        /**
+         * Two slots, not one. One slot means a `USER_NOW` cannot preempt an equal-priority
+         * `USER_NOW`, so a three-second skip costs the remainder of a whole transfer; two means one
+         * in flight and one queued, which is the minimum that makes a track boundary not stall.
+         */
+        const val WORKER_COUNT = 2
+        const val QUEUE_CAPACITY = 256
+        const val REQUEUE_MAX_DELAY_MS = 60_000L
+        const val MIN_REQUEUE_DELAY_MS = 250L
+        const val DEFAULT_EXT = "m4a"
+        const val TERMINAL_RETENTION = 128
+
+        /**
+         * Size mismatch is a *symptom*; only the magic sniff is genuinely non-resumable. CORRUPT_SIZE
+         * used to be in this set, which is how a short body deleted the very bytes a resume needed.
+         */
+        val NON_RESUMABLE_CODES =
+            setOf(
+                ErrorCode.NOT_CACHEABLE,
+                ErrorCode.NO_SOURCE,
+                ErrorCode.NOT_FOUND,
+                ErrorCode.UNSUPPORTED,
+                ErrorCode.CORRUPT_CONTAINER,
+            )
     }
 }
+
+/**
+ * Terminal-state retention. `states` and `attemptStates` used to grow for the life of the process
+ * with entries removed only on the next enqueue, and `MutableStateFlow.update` copies the whole map,
+ * so every transition cost O(songs ever downloaded) and every emission recomposed five Compose
+ * screens. The retention depth is far above the number of jobs that can settle inside a caller's
+ * timeout, and the awaited entry is always the most recent, so a waiter cannot miss it.
+ */
+internal fun <K, V> bounded(
+    next: Map<K, V>,
+    limit: Int,
+): Map<K, V> {
+    if (next.size <= limit) return next
+    val keep = LinkedHashMap<K, V>(limit * 2)
+    var drop = next.size - limit
+    for (e in next) {
+        if (drop > 0) {
+            drop--
+        } else {
+            keep[e.key] = e.value
+        }
+    }
+    return keep
+}
+
+private enum class Step { HYDRATE, QUALITY, DEDUPE, SIZE, RESOLVE, REQUEST, VERIFY, COMMIT }
+
+/** A preemption is a cancellation, but a *typed* one: the victim re-queues instead of reporting. */
+private class PreemptSignal : CancellationException("preempted")
+
+// Wall cap = time-to-download at a conservative 8 KB/s (expectedBytes/8 ms), floored.
+// Rate-based — a flowing-but-slow link is never killed; only a trickle below that
+// average rate is. Replaces the old `expectedB/20` bytes-as-ms accident.
+internal fun stallWallCapMs(
+    floorMs: Long,
+    expectedBytes: Long,
+): Long = max(floorMs, expectedBytes / 8)
+
+// Watchdog fires when EITHER the stream shows no fresh bytes for stallTimeoutMs
+// (true stall) OR the whole transfer outlives its rate-based wall cap (trickle).
+internal fun stallTripped(
+    sinceChunkMs: Long,
+    totalElapsedMs: Long,
+    wallCapMs: Long,
+    stallTimeoutMs: Long,
+): Boolean = sinceChunkMs > stallTimeoutMs || totalElapsedMs > wallCapMs
