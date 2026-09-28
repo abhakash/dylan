@@ -2,6 +2,7 @@ package dylan.provider
 
 import dylan.model.Album
 import dylan.model.Artist
+import dylan.model.ErrorCode
 import dylan.model.HomeFeed
 import dylan.model.MiniEntity
 import dylan.model.Paged
@@ -63,8 +64,10 @@ interface CatalogApi {
     ): CatalogResult<SignedStream> = unsupported("resolve")
 }
 
-private fun unsupported(op: String): CatalogResult.Err =
-    CatalogResult.Err(dylan.model.ErrorCode.UNSUPPORTED, "$op not offered by this catalog", retryable = false)
+private fun unsupported(op: String): CatalogResult.Err {
+    val why = "$op not offered by this catalog"
+    return CatalogResult.Err(ErrorCode.UNSUPPORTED, why, retryable = false)
+}
 
 /**
  * [CatalogApi] plus the **legacy null-returning views**, which exist only for the two call sites

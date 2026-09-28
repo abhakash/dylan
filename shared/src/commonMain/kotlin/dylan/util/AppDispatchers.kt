@@ -2,7 +2,6 @@ package dylan.util
 
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Runnable
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.AbstractCoroutineContextElement
 import kotlin.coroutines.CoroutineContext
@@ -31,14 +30,67 @@ internal expect class LaneThreadLocal() {
 }
 
 /**
- * Four lanes, still reachable as `disp.main` / `disp.io` / `disp.dbLane` / `disp.state`, but
- * each of those is a [LaneDispatcher]: it publishes the lane into a thread-local on every
- * dispatch, so the contract is checkable from ordinary non-suspending code.
+ * The element [AppDispatchers.on] folds in beside [LaneTag]: it republishes the lane into [slot] on
+ * every dispatch, which is what makes [AppDispatchers.assert] and [AppDispatchers.current]
+ * answerable from ordinary non-suspending code.
  *
- * [on] is the only *sanctioned* way to enter a lane; the raw properties stay so the existing
- * `scope.launch(disp.state)` call sites keep compiling. [assert] is the enforcement and costs
- * one thread-local read plus a static-boolean check; both asserts compile out with the
- * platform's assertion flag, which no release build sets.
+ * This is an `expect` because common code has no portable hook for "a coroutine is resuming on this
+ * thread". `kotlinx.coroutines.ThreadContextElement` is declared in coroutines' **JVM** source set —
+ * "ThreadContextElement for common" (kotlinx-coroutines#4208) is still an open PR — so common code
+ * that names it compiles for `jvm()`/`androidTarget()` and fails for the iOS targets. The jvm and
+ * android actuals implement it over the real thread-local; the iOS actual is an element that
+ * publishes nothing, because there is nothing it *could* publish into: Kotlin/Native's
+ * `kotlin.native.concurrent.ThreadLocal` gives a per-thread value but nothing calls `set` on it
+ * without that hook.
+ *
+ * The consequence is stated in [AppDispatchers.assert]: the thread-scoped view answers "no lane" on
+ * iOS, which is why production code asserts with [AppDispatchers.assertInContext].
+ */
+internal expect fun lanePublication(
+    lane: Lane,
+    slot: LaneThreadLocal,
+): CoroutineContext.Element
+
+/**
+ * Four lanes, reachable as `disp.main` / `disp.io` / `disp.dbLane` / `disp.state`.
+ *
+ * Those four properties are the **underlying dispatchers, unwrapped**. That is deliberate.
+ * An earlier version wrapped each one in a `CoroutineDispatcher` subclass that published the
+ * lane on every dispatch, which broke two things:
+ *
+ *  * `delay()` resolves its scheduler by casting the coroutine's `ContinuationInterceptor` to
+ *    `Delay`. `Delay` cannot be implemented outside kotlinx.coroutines (its one abstract member,
+ *    `scheduleResumeAfterDelay`, is `@InternalCoroutinesApi`), so a wrapper that is not a `Delay`
+ *    silently falls back to the global `DefaultDelay` — a real background timer. Every lane
+ *    `delay()` became wall-clock, which made virtual time impossible and forced the test suite to
+ *    sleep through its own timeouts, and it cost an extra dispatch hop per delay in production.
+ *  * a wrapper is invisible to `TestDispatcher`, so a test could not supply its own scheduler.
+ *
+ * Instead, the lane rides in the coroutine *context* via [LaneTag] (coroutine-scoped) and
+ * [lanePublication] (thread-scoped), both installed by [on]. That is the mechanism coroutines
+ * provides for exactly this purpose, and it composes with any dispatcher — a
+ * `limitedParallelism(1)` view, `Dispatchers.IO`, or a `TestDispatcher`, which the wrapper
+ * swallowed.
+ *
+ * **The contract.**
+ *
+ *  * [on] is required at every *entry point* into lane work that asserts, and nowhere else. A bare
+ *    `scope.launch(disp.io)` schedules on the io dispatcher and publishes no lane, so
+ *    [assertInContext] there honestly reports "no lane". A component whose own `CoroutineScope`
+ *    carries `disp.on(Lane.X)` — see `DownloadEngine` — satisfies the contract for every coroutine
+ *    it starts, by construction and at no per-launch cost.
+ *  * A bare `launch(disp.x)` / `withContext(disp.x)` is the right thing for plain scheduling: work
+ *    that never asserts. The 10 Hz position collector is the case that matters — it is entered from
+ *    the state lane, does no IO and asserts nothing, so a publication there would cost a save and a
+ *    restore on every tick to answer a question nobody asks.
+ *  * Production code asserts with [assertInContext], never with [assert]. [assert] needs the
+ *    dispatch hook that only exists on the JVM and Android, and a `limitedParallelism(1)` lane may
+ *    be served by more than one pool thread over a coroutine's life, so the coroutine view is both
+ *    the portable one and the stronger statement of the two.
+ *  * One `on` per lane is the shape, and nesting lanes is fine: a hop into a *different* lane is
+ *    the only way that lane gets published at all, and one extra save/restore is noise beside the
+ *    blocking SQLite or file work inside it. Nesting two publications for the *same* lane buys
+ *    nothing and costs two.
  */
 class AppDispatchers(
     main: CoroutineDispatcher,
@@ -48,15 +100,19 @@ class AppDispatchers(
 ) {
     private val slot = LaneThreadLocal()
 
-    val main: CoroutineDispatcher = LaneDispatcher(Lane.MAIN, main, slot)
-    val io: CoroutineDispatcher = LaneDispatcher(Lane.IO, io, slot)
-    val dbLane: CoroutineDispatcher = LaneDispatcher(Lane.DB, dbLane, slot)
-    val state: CoroutineDispatcher = LaneDispatcher(Lane.STATE, state, slot)
+    val main: CoroutineDispatcher = main
+    val io: CoroutineDispatcher = io
+    val dbLane: CoroutineDispatcher = dbLane
+    val state: CoroutineDispatcher = state
 
-    /** Dispatcher for [lane] with the lane tag attached, for `withContext(disp.on(Lane.IO))`. */
-    fun on(lane: Lane): CoroutineContext = dispatcherOf(lane) + LaneTag(lane)
+    /**
+     * Context for entering [lane]: the dispatcher, the coroutine-scoped [LaneTag] that
+     * [assertInContext] reads, and the thread-scoped publication that [assert] and [current] read.
+     * Use with `launch(disp.on(Lane.STATE))` or `withContext(disp.on(Lane.IO))`.
+     */
+    fun on(lane: Lane): CoroutineContext = dispatcherOf(lane) + LaneTag(lane) + lanePublication(lane, slot)
 
-    /** Dispatch onto [lane] and run [block] there with the lane tag in context. */
+    /** Dispatch onto [lane] and run [block] there with the lane published. */
     suspend fun <T> on(
         lane: Lane,
         block: suspend CoroutineScope.() -> T,
@@ -69,24 +125,29 @@ class AppDispatchers(
     suspend fun currentLane(): Lane? = coroutineContext[LaneTag]?.lane
 
     /**
-     * Lane-discipline tripwire for lane-confined entry points (`Orchestrator.process`,
-     * `CacheManager.enforceBudget`, `DownloadEngine.loop`, `WindowPreparer.sniffOk`).
-     * Thread-scoped: one thread-local read, no allocation, and the message is only built when
-     * platform assertions are on (never in release).
-     */
-    @OptIn(ExperimentalNativeApi::class)
-    fun assert(lane: Lane) {
-        val actual = slot.get()
-        kotlin.assert(actual == lane) { "expected $lane, on ${actual ?: "no lane"}" }
-    }
-
-    /**
-     * Coroutine-scoped [assert]: correct after a suspension moved the work to another thread,
-     * but only if the coroutine entered through [on] (or another `LaneTag`-carrying context).
+     * Coroutine-scoped [assert], and the one production code uses: correct after a suspension moved
+     * the work to another thread, and available on every target. Claims a lane only when the
+     * coroutine entered through [on]; otherwise it reports no lane, which is the honest answer for
+     * code that was scheduled without one.
      */
     @OptIn(ExperimentalNativeApi::class)
     suspend fun assertInContext(lane: Lane) {
         val actual = coroutineContext[LaneTag]?.lane
+        kotlin.assert(actual == lane) { "expected $lane, on ${actual ?: "no lane"}" }
+    }
+
+    /**
+     * Thread-scoped check, for non-suspending code running inside an [on] block. One thread-local
+     * read; the message is only built when assertions are on, which no release build sets.
+     *
+     * Answers "no lane" on iOS, where [lanePublication] has no hook to publish with, and it is
+     * weaker than [assertInContext] everywhere, because a `limitedParallelism(1)` lane can be
+     * served by more than one pool thread over a coroutine's life. Diagnostics and test
+     * scaffolding, not an invariant.
+     */
+    @OptIn(ExperimentalNativeApi::class)
+    fun assert(lane: Lane) {
+        val actual = slot.get()
         kotlin.assert(actual == lane) { "expected $lane, on ${actual ?: "no lane"}" }
     }
 
@@ -97,36 +158,4 @@ class AppDispatchers(
             Lane.DB -> dbLane
             Lane.STATE -> state
         }
-}
-
-private class LaneDispatcher(
-    private val lane: Lane,
-    private val delegate: CoroutineDispatcher,
-    private val slot: LaneThreadLocal,
-) : CoroutineDispatcher() {
-    // Must delegate: without it every withContext(disp.main) would post even when already on
-    // the UI thread, turning Main.immediate into a plain Main.
-    override fun isDispatchNeeded(context: CoroutineContext): Boolean = delegate.isDispatchNeeded(context)
-
-    // The wrapper deliberately does NOT implement Delay (its members are @InternalCoroutinesApi),
-    // so delay() inside a lane is scheduled by the global DefaultDelay and then dispatches back
-    // here — one extra hop per delay, which is why nothing hot may busy-delay on a lane.
-    override fun dispatch(
-        context: CoroutineContext,
-        block: Runnable,
-    ) {
-        delegate.dispatch(context) {
-            val prev = slot.get()
-            slot.set(lane)
-            try {
-                block.run()
-            } finally {
-                slot.set(prev)
-            }
-        }
-    }
-
-    // Lane name (not the delegate's) is what makes a thread dump readable; see the `name =`
-    // argument on limitedParallelism at the graph construction sites.
-    override fun toString(): String = "dylan.$lane"
 }

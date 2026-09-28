@@ -15,6 +15,7 @@ import dylan.model.SongKey
 import dylan.provider.MusicProvider
 import dylan.support.TestLanes
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.test.TestCoroutineScheduler
 import kotlinx.coroutines.test.runTest
 import okio.FileSystem
 import okio.Path.Companion.toPath
@@ -30,7 +31,10 @@ class ReconcilerTest {
     private lateinit var db: Dylan
     private lateinit var engine: DownloadEngine
     private lateinit var reconciler: Reconciler
-    private val disp = TestLanes().disp
+
+    // Virtual lanes: see `TestLanes.virtual`.
+    private val scheduler = TestCoroutineScheduler()
+    private val disp = TestLanes.virtual(scheduler).disp
     private val cfg = AppConfig()
     private val testLog = LogBuffer(minLevel = LogLevel.DEBUG)
 
@@ -109,7 +113,7 @@ class ReconcilerTest {
 
     @Test
     fun orphanFileDeletedOrphanRowDeleted() =
-        runTest {
+        runTest(scheduler) {
             val audio = (tmp + "/audio").toPath()
             val ghost = audio / "saavn_ghost_128.m4a"
             FileSystem.SYSTEM.write(ghost) { write(ByteArray(10)) }
@@ -124,7 +128,7 @@ class ReconcilerTest {
 
     @Test
     fun sizeMismatchDeletesBoth() =
-        runTest {
+        runTest(scheduler) {
             val k = SongKey("saavn", "mismatch")
             admit(k)
             val audio = (tmp + "/audio").toPath()
@@ -137,7 +141,7 @@ class ReconcilerTest {
 
     @Test
     fun intentWithoutFinalReenqueuedWithFinalDropped() =
-        runTest {
+        runTest(scheduler) {
             val pending = SongKey("saavn", "pending")
             val done = SongKey("saavn", "done")
             admit(pending)

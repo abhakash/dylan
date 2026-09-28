@@ -6,13 +6,15 @@ import dylan.model.ErrorCode
 import dylan.model.Quality
 import dylan.provider.CatalogResult
 import dylan.provider.ResilientClient
-import dylan.provider.dylanJson
-import dylan.provider.saavn.rowKey
 import dylan.provider.durationKnown
+import dylan.provider.dylanJson
 import dylan.provider.saavn.SaavnProvider
 import dylan.provider.saavn.artistRoute
 import dylan.provider.saavn.deliveredTotal
+import dylan.provider.saavn.dto.MoreInfoDto
+import dylan.provider.saavn.dto.ResultsDto
 import dylan.provider.saavn.mapSuggestions
+import dylan.provider.saavn.rowKey
 import dylan.support.MutableClock
 import dylan.support.TestLanes
 import dylan.util.Lane
@@ -29,6 +31,10 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -57,7 +63,8 @@ class SaavnProviderTest {
             ).readText()
 
     private fun client(
-        handler: suspend MockRequestHandleScope.(io.ktor.client.request.HttpRequestData) -> io.ktor.client.request.HttpResponseData,
+        handler: suspend MockRequestHandleScope
+        .(io.ktor.client.request.HttpRequestData) -> io.ktor.client.request.HttpResponseData,
     ): HttpClient = HttpClient(MockEngine(handler))
 
     private fun okClient(body: () -> String): HttpClient =
@@ -112,7 +119,8 @@ class SaavnProviderTest {
      */
     @Test
     fun rateLimitedIsItsOwnCodeAndHonoursRetryAfter() {
-        withProvider(statusClient(HttpStatusCode.TooManyRequests, fixture("rate_limited_429.json"), retryAfter = "7")) { p ->
+        val limited = fixture("rate_limited_429.json")
+        withProvider(statusClient(HttpStatusCode.TooManyRequests, limited, retryAfter = "7")) { p ->
             val r = p.searchPage("a", 1)
             val e = (r as CatalogResult.Err)
             assertEquals(ErrorCode.RATE_LIMITED, e.code, "a 429 is RATE_LIMITED, not NETWORK: ${e.detail}")
@@ -283,7 +291,8 @@ class SaavnProviderTest {
                 override fun changes() = kotlinx.coroutines.flow.MutableStateFlow(NetClass.UNMETERED)
             }
         val scope = CoroutineScope(lanes.disp.io + kotlinx.coroutines.SupervisorJob())
-        val p = SaavnProvider(okClient { fixture("search_getresults_p1.json") }, AppConfig(clock = clock), scope, lanes.disp, net, log)
+        val page = fixture("search_getresults_p1.json")
+        val p = SaavnProvider(okClient { page }, AppConfig(clock = clock), scope, lanes.disp, net, log)
         kotlinx.coroutines.runBlocking {
             net.up = false
             assertEquals(ErrorCode.OFFLINE, (p.searchPage("a", 1) as CatalogResult.Err).code)
@@ -338,7 +347,10 @@ class SaavnProviderTest {
         assertTrue(requests.isEmpty(), "refusing must not spend a request: $requests")
         assertTrue(artistRoute("610240") is dylan.provider.saavn.ArtistRoute.UnsupportedNumericId)
         assertTrue(artistRoute("-f6Su9-0agk_") is dylan.provider.saavn.ArtistRoute.WebapiToken)
-        assertTrue(artistRoute("  -f6Su9-0agk_  ") is dylan.provider.saavn.ArtistRoute.WebapiToken, "ids arrive untrimmed")
+        assertTrue(
+            artistRoute("  -f6Su9-0agk_  ") is dylan.provider.saavn.ArtistRoute.WebapiToken,
+            "ids arrive untrimmed",
+        )
     }
 
     @Test
@@ -371,9 +383,9 @@ class SaavnProviderTest {
                     id = "1",
                     title = "t",
                     moreInfo =
-                        kotlinx.serialization.json.Json.encodeToJsonElement(
-                            dylan.provider.saavn.dto.MoreInfoDto.serializer(),
-                            dylan.provider.saavn.dto.MoreInfoDto(duration = kotlinx.serialization.json.JsonPrimitive("not-a-number")),
+                        Json.encodeToJsonElement(
+                            MoreInfoDto.serializer(),
+                            MoreInfoDto(duration = JsonPrimitive("not-a-number")),
                         ),
                 ),
             )
@@ -604,10 +616,32 @@ class SaavnProviderTest {
     fun mappingOnePageCostsTheStateLaneThisMuch() {
         val page = fixture("search_getresults_p1.json")
         val real = dylan.provider.saavn.decodeSongPage(page, "bench", 1)
-        val synthetic = (0 until PAGE_CARDS).joinToString(",") { cardJson(it) }
-        val big = """{"total":"$PAGE_CARDS","start":"1","results":[$synthetic]}"""
+        // Four copies of the fixture's *own* cards, not `cardJson` stubs. A stub card is ~400 B
+        // against a real ~3.5 KB one (encrypted_media_url, encrypted_drm_media_url, album_url,
+        // copyright_text, trivia, a second artist), so five real cards were 19.7 KB and twenty
+        // stub cards 8.7 KB: the "20-card page" carried *less* payload, and the comparison
+        // measured payload weight while claiming to measure card count. Replicating the real
+        // cards leaves the number of cards as the only variable, which is the claim.
+        val cards =
+            Json
+                .parseToJsonElement(page)
+                .jsonObject
+                .getValue("results")
+                .jsonArray
+        val big =
+            buildString {
+                append("{\"total\":\"$PAGE_CARDS\",\"start\":\"1\",\"results\":[")
+                repeat(PAGE_CARDS / cards.size) {
+                    cards.forEach {
+                        append(it)
+                        append(",")
+                    }
+                }
+                setLength(length - 1)
+                append("]}")
+            }
         val rows = dylan.provider.saavn.decodeSongPage(big, "bench", 1)
-        assertEquals(PAGE_CARDS, rows.items.items.size, "the synthetic page must be complete: ${rows.drift}")
+        assertEquals(PAGE_CARDS, rows.items.items.size, "the replicated page must be complete: ${rows.drift}")
 
         val realNs =
             bench {
@@ -653,7 +687,8 @@ class SaavnProviderTest {
         // defaulted field no longer is: `coerceInputValues = true` turns it into the default, which
         // is the whole point of element-wise decode, so the control has to be a wrong TYPE.
         val withOneBad =
-            """{"total":"$PAGE_CARDS","start":"1","results":[{"id":{"unexpected":"object"},"title":null,"more_info":null},$good]}"""
+            """{"total":"$PAGE_CARDS","start":"1","results":[""" +
+                """{"id":{"unexpected":"object"},"title":null,"more_info":null},$good]}"""
         val ns =
             bench {
                 blackhole +=
@@ -672,10 +707,7 @@ class SaavnProviderTest {
         )
         val oldResult =
             runCatching {
-                dylanJson.decodeFromString(
-                    dylan.provider.saavn.dto.ResultsDto.serializer(),
-                    withOneBad,
-                )
+                dylanJson.decodeFromString(ResultsDto.serializer(), withOneBad)
             }
         assertTrue(oldResult.isFailure, "the whole-page shape must still be fatal for the same payload")
         println(
@@ -723,10 +755,16 @@ class SaavnProviderTest {
         println(
             "[bench] %-46s %s".format(
                 "OLD LinkedHashMap LRU under interleaved put/iterate",
-                if (control.isSuccess) "no throw this run (CME is timing-dependent)" else "threw ${control.exceptionOrNull()!!::class.simpleName}",
+                if (control.isSuccess) {
+                    "no throw this run (CME is timing-dependent)"
+                } else {
+                    "threw ${control.exceptionOrNull()!!::class.simpleName}"
+                },
             ),
         )
-        println("[bench] %-46s %8d writes, 0 throws".format("NEW snapshot-map LRU (ResilientClient)", CONCURRENT_OPENERS))
+        println(
+            "[bench] %-46s %8d writes, 0 throws".format("NEW snapshot-map LRU (ResilientClient)", CONCURRENT_OPENERS),
+        )
     }
 
     private fun cardJson(i: Int): String =

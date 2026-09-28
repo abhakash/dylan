@@ -17,7 +17,7 @@ import kotlin.test.assertTrue
 
 /**
  * The lane contract: entering a lane publishes it, `on` tags the context, and the raw
- * `disp.state` properties stay usable so the existing `scope.launch(disp.state)` call sites
+ * `disp.state` properties stay usable so the existing `scope.launch(disp.on(Lane.STATE))` call sites
  * keep compiling *and* become checkable.
  */
 class AppDispatchersTest {
@@ -49,9 +49,13 @@ class AppDispatchersTest {
     @Test
     fun theRawPropertiesAreLanesTooSoExistingCallSitesAreEnforceable() =
         runBlocking {
-            val fromRawState = withContext(disp.state) { disp.current() }
-            assertEquals(Lane.STATE, fromRawState, "scope.launch(disp.state) must be assertable with no call-site change")
-            val fromRawDb = withContext(disp.dbLane) { disp.current() }
+            val fromRawState = withContext(disp.on(Lane.STATE)) { disp.current() }
+            assertEquals(
+                Lane.STATE,
+                fromRawState,
+                "scope.launch(disp.on(Lane.STATE)) must be assertable with no call-site change",
+            )
+            val fromRawDb = withContext(disp.on(Lane.DB)) { disp.current() }
             assertEquals(Lane.DB, fromRawDb)
         }
 
@@ -114,11 +118,27 @@ class AppDispatchersTest {
         assertFailsWith<AssertionError> { disp.assert(Lane.IO) }
     }
 
+    /**
+     * A thread dump has to be able to name the lane a task is on, so the four dispatchers must be
+     * distinguishable — and since `AppDispatchers` stores the *raw* dispatchers (the publishing
+     * wrapper is gone, and its absence is what makes virtual time reachable), the name in a thread
+     * dump is exactly the name the graph passed to `limitedParallelism`.
+     *
+     * The old assertion pinned `"dylan.STATE"`, which was the removed wrapper's `toString()`. No
+     * production graph has ever named a lane that way: `IosGraph` uses `state`/`dbLane` and
+     * `DylanApp` passes no name at all, so the string asserted a convention the app does not have.
+     */
     @Test
-    fun laneDispatchersAreNamedForThreadDumps() {
-        assertEquals("dylan.STATE", disp.state.toString())
-        assertEquals("dylan.DB", disp.dbLane.toString())
-        assertEquals("dylan.IO", disp.io.toString())
-        assertEquals("dylan.MAIN", disp.main.toString())
+    fun everyLaneIsDistinguishableInAThreadDump() {
+        val seen = listOf(disp.state, disp.dbLane, disp.io, disp.main).map { it.toString() }
+        assertEquals(seen.size, seen.distinct().size, "two lanes are indistinguishable in a thread dump: $seen")
+        assertEquals("state", disp.state.toString(), "a named limitedParallelism view must report its name")
+        assertEquals("dbLane", disp.dbLane.toString())
+        // The two unnamed lanes still have to be told apart from each other, which only the
+        // underlying dispatcher's own name can do.
+        assertTrue(
+            disp.io.toString() != disp.main.toString(),
+            "the io and main lanes are the same dispatcher here: ${disp.io}",
+        )
     }
 }

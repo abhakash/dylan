@@ -60,7 +60,11 @@ class JobQueue(
     val size: Int get() = snap.load().pending.size
 
     val inFlight: List<DownloadJob>
-        get() = snap.load().owners.values.toList()
+        get() =
+            snap
+                .load()
+                .owners.values
+                .toList()
 
     /**
      * The only admission path. Allocates this request's attempt id, dedupes by key across both the
@@ -79,8 +83,13 @@ class JobQueue(
                 // Same key, strictly better: the incumbent yields the slot but keeps its `.part`
                 // and its attempt budget, because it is the same logical download.
                 val next = s.withPending(incoming)
-                val outcome = if (running != null) EnqueueResult.Preempted(running) else EnqueueResult.Queued(incoming.id)
-            return@mutate next to outcome
+                val outcome =
+                    if (running != null) {
+                        EnqueueResult.Preempted(running)
+                    } else {
+                        EnqueueResult.Queued(incoming.id)
+                    }
+                return@mutate next to outcome
             }
             // Displace the least valuable running attempt when the newcomer outranks it. This is
             // what makes a three-second skip cost a prefetch's remainder instead of a whole

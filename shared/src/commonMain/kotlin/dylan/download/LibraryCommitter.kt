@@ -1,12 +1,11 @@
 package dylan.download
 
-import dylan.cache.CacheManager
-import dylan.config.AppConfig
 import dylan.db.Dylan
+import dylan.diag.LogBuffer
 import dylan.model.Quality
 import dylan.model.SongKey
 import dylan.util.AppDispatchers
-import dylan.diag.LogBuffer
+import dylan.util.Lane
 import kotlinx.coroutines.withContext
 
 /**
@@ -24,9 +23,11 @@ internal class LibraryCommitter(
     private val log: LogBuffer,
 ) {
     suspend fun previousRow(key: SongKey): PrevRow? =
-        withContext(disp.dbLane) {
+        withContext(disp.on(Lane.DB)) {
+            val p = key.provider
+            val id = key.songId
             db.dylanQueries
-                .selectCached(key.provider, key.songId) { _, _, bits, ext, bytes, _, lastUsed, plays, pinned, pinnedAt ->
+                .selectCached(p, id) { _, _, bits, ext, bytes, _, lastUsed, plays, pinned, pinnedAt ->
                     PrevRow(bits.toInt(), ext, bytes, lastUsed, plays, pinned == 1L, pinnedAt)
                 }.executeAsOneOrNull()
         }
@@ -43,7 +44,7 @@ internal class LibraryCommitter(
     ): Boolean {
         val ok =
             runCatching {
-                withContext(disp.dbLane) {
+                withContext(disp.on(Lane.DB)) {
                     db.transaction {
                         db.dylanQueries.deleteCached(key.provider, key.songId)
                         db.dylanQueries.insertCached(
@@ -67,7 +68,7 @@ internal class LibraryCommitter(
 
     /** The reconciler's resume record: what was asked for, and why. */
     suspend fun writeIntent(job: DownloadJob) {
-        withContext(disp.dbLane) {
+        withContext(disp.on(Lane.DB)) {
             runCatching {
                 db.dylanQueries.upsertIntent(
                     job.key.provider,
@@ -81,7 +82,7 @@ internal class LibraryCommitter(
     }
 
     suspend fun dropIntent(key: SongKey) {
-        withContext(disp.dbLane) {
+        withContext(disp.on(Lane.DB)) {
             runCatching { db.dylanQueries.deleteIntent(key.provider, key.songId) }
         }
     }

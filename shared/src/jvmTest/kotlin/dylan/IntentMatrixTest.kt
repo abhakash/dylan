@@ -234,7 +234,11 @@ class IntentMatrixTest {
                 h.engine.setPositionMs(0L)
                 h.submit(Intent.Seek(12_345L))
                 h.settleIntents()
-                assertEquals(12_345L, h.state.posMs, "the state machine owns the position whether or not the engine does")
+                assertEquals(
+                    12_345L,
+                    h.state.posMs,
+                    "the state machine owns the position whether or not the engine does",
+                )
                 assertEquals(listOf(12_345L), h.engine.seeks)
             }
         }
@@ -299,10 +303,14 @@ class IntentMatrixTest {
                 h.submit(Intent.PlayNow(h.songs("a", "b"), 0))
                 h.awaitPlaying()
                 h.awaitWindow("saavn:a")
-                h.settleIntents()
+                // No `settleIntents()` here: the inbox barrier is three `CycleRepeat`s, and a
+                // ONE → OFF → ALL round-trip legitimately queues `b` as the up-next on the way. The
+                // barrier would have been the thing under test, and the rule would have been
+                // measured through a state the test had itself left.
                 assertTrue(
                     h.engine.preparedWindows.all { w -> w.size == 1 },
-                    "repeat ONE must prepare a one-item window, got ${h.engine.preparedWindows.map { it.map { t -> t.itemId } }}",
+                    "repeat ONE must prepare a one-item window, " +
+                        "got ${h.engine.preparedWindows.map { w -> w.map { t -> t.itemId } }}",
                 )
                 assertTrue(
                     h.engine.upNextHistory.none { it != null },

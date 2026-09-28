@@ -111,7 +111,7 @@ fun SearchScreen(
     // Fire-and-forget demand; answers render on arrival (never blocks typing).
     LaunchedEffect(Unit) {
         demand
-            .debounce(container.cfg.wsTypingDebounceMs)
+            .debounce(container.cfg.wsTypingDebounceMs.toLong())
             .distinctUntilChanged()
             .collect { q ->
                 if (submitted != null) return@collect

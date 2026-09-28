@@ -6,6 +6,7 @@ import dylan.diag.LogLevel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeoutOrNull
 import okio.FileSystem
 import okio.Path.Companion.toPath
 import okio.buffer
@@ -41,12 +42,21 @@ class FileLogSinkTest {
         ts: Long = 1_756_000_000_000L,
     ) = LogBuffer.Entry(ts, level, tag, msg)
 
+    /**
+     * Bounded wait for a condition. The sink writes on a real background scope, so this polls on a
+     * suspending `delay` against a failure ceiling. It returns the instant the condition holds, and
+     * throws rather than falling through, so a bounded wait can never silently assert nothing.
+     */
     private suspend fun await(
-        timeoutMs: Long = 10_000,
+        what: String,
         cond: () -> Boolean,
     ) {
-        val deadline = System.currentTimeMillis() + timeoutMs
-        while (System.currentTimeMillis() < deadline && !cond()) delay(25)
+        val ok =
+            withTimeoutOrNull(AWAIT_CEILING_MS) {
+                while (!cond()) delay(POLL_MS)
+                true
+            }
+        if (ok != true) throw AssertionError("timed out waiting for $what")
     }
 
     private fun read(name: String): String? =
@@ -62,7 +72,7 @@ class FileLogSinkTest {
     fun writesIsoTimestampedParseableLines() =
         kotlinx.coroutines.runBlocking {
             FileLogSink(fs, dir.toPath(), sinkScope).accept(entry("enqueue saavn:s1 bits=128"))
-            await { read("dylan.log.0") != null }
+            await("dylan.log.0 to exist") { read("dylan.log.0") != null }
             val text = awaitText("dylan.log.0") { it.contains("enqueue saavn:s1") }
             val line =
                 text
@@ -82,8 +92,8 @@ class FileLogSinkTest {
             val sink = FileLogSink(fs, dir.toPath(), sinkScope, maxBytesPerFile = 400L, filesToKeep = 2)
             repeat(120) { i -> sink.accept(entry("victim line $i payload-padding-aaaaaaaaaaaaaaaaaaaa")) }
             // Rotation done when at least one archive exists and live file is under budget.
-            await { exists("dylan.log.1") && (read("dylan.log.0")?.length ?: 0) < 400 }
-            await { !exists("dylan.log.3") }
+            await("rotation") { exists("dylan.log.1") && (read("dylan.log.0")?.length ?: 0) < 400 }
+            await("retention to drop the oldest archive") { !exists("dylan.log.3") }
             for (i in 0..3) {
                 val size = read("dylan.log.$i")?.encodeToByteArray()?.size
                 if (size != null) assertTrue(size <= 500, "dylan.log.$i exceeded per-file cap: $size")
@@ -95,12 +105,14 @@ class FileLogSinkTest {
         name: String,
         pred: (String) -> Boolean,
     ): String {
-        var text = ""
-        val deadline = System.currentTimeMillis() + 10_000
-        while (!pred(text) && System.currentTimeMillis() < deadline) {
+        var text = read(name) ?: ""
+        await("text in $name matching the predicate") {
             text = read(name) ?: ""
-            if (!pred(text)) delay(25)
+            pred(text)
         }
         return text
     }
 }
+
+private const val AWAIT_CEILING_MS = 10_000L
+private const val POLL_MS = 25L

@@ -10,6 +10,8 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.TestCoroutineScheduler
 import java.util.concurrent.CyclicBarrier
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -33,39 +35,46 @@ const val RENDEZVOUS_TIMEOUT_MS: Long = 250L
 const val PARALLEL_RENDEZVOUS_TIMEOUT_MS: Long = 2_000L
 
 /**
- * Test lanes with the *production* contract.
+ * Test lanes, in two profiles. Both are single-permit per lane, because single-permit is the
+ * production contract; they differ in *whose clock* the lanes run on.
  *
- * Production builds `state` and `dbLane` as `Dispatchers.Default.limitedParallelism(1, …)`: at
- * most one task in flight per lane, with the two lanes independent of each other. The pre-wave
+ * **Production builds `state` and `dbLane` as `Dispatchers.Default.limitedParallelism(1, …)`:**
+ * at most one task in flight per lane, with the two lanes independent of each other. The pre-wave
  * harness passed `Dispatchers.Default` for all four, so the serialization the whole architecture
  * rests on was not merely untested — the suite was a strictly *more permissive* system than the
  * app, which is why missing-hop bugs were masked by scheduling luck and only surfaced on device.
  *
- * These lanes are the production ones. That is the whole point: there is no longer a "test lane
- * configuration" to drift away from production, and [laneAdmitsOverlap] (asserted in
- * `TestLanesContractTest`, together with a `Dispatchers.Default` control) fails the moment a graph
- * is built with a multi-permit lane.
+ * ## Why a `StandardTestDispatcher` lane is viable at all
  *
- * [io] stays a real multi-permit dispatcher because `withContext(disp.io)` exists precisely to
- * overlap filesystem/network work; single-permitting it would remove the parallelism under test.
+ * `AppDispatchers` used to hand back a `CoroutineDispatcher` subclass that published the lane on
+ * every dispatch. `delay()` finds its scheduler by casting the coroutine's `ContinuationInterceptor`
+ * to `kotlinx.coroutines.Delay`, and that interface cannot be implemented outside kotlinx.coroutines
+ * (`scheduleResumeAfterDelay` is `@InternalCoroutinesApi`), so the wrapper silently forced every
+ * lane onto the global real-time `DefaultDelay` and the suite had to sleep through its own
+ * timeouts. `AppDispatchers` now stores the *raw* dispatchers and carries the lane in the
+ * coroutine context, so nothing stands between a lane and a `TestDispatcher`.
  *
- * **Why not a `StandardTestDispatcher`?** Two reasons, both established by
- * `TestLanesContractTest.laneDelayIsRealTimeWhileOnLaneIsVirtual`:
+ * The non-obvious part is that `limitedParallelism(1)` does not break this. `LimitedDispatcher`
+ * *is* a `Delay` and its constructor is
+ * `dispatcher as? Delay ?: DefaultDelay` — so
+ * `StandardTestDispatcher(scheduler).limitedParallelism(1, "state")` keeps the single-permit
+ * contract **and** routes `delay()` into the shared scheduler. (Against `Dispatchers.Default` the
+ * same call gets `DefaultDelay`, which is why the [production] profile is genuinely wall-clock and
+ * `TestLanesContractTest` measures it that way.)
  *
- *  1. `AppDispatchers.LaneDispatcher` deliberately does not implement `Delay`, so `delay()`
- *     reached through `disp.state` (or `disp.on(Lane.STATE)`, which returns the same wrapper) is
- *     scheduled by the global `DefaultDelay`. Virtual time is therefore **unreachable through
- *     `AppDispatchers` in any profile** — production or test — and a virtual-lane harness would
- *     buy no determinism the real lanes do not already give.
- *  2. A `StandardTestDispatcher` only runs when something drives the `TestCoroutineScheduler`
- *     (in a test, `runTest`'s work runner), and all dispatchers sharing one scheduler execute on
- *     that single driver thread. Two such "lanes" can never be in flight together, which is
- *     *stricter* than production's two independent `limitedParallelism(1)` lanes and would
- *     misreport a cross-lane interleaving as a hang.
+ * ## The trade-off this profile accepts
  *
- * Virtual time is still fully available where it belongs: to *test-owned* dispatchers such as
- * [FakePlayerEngine]'s event/position loop, which is where the 10 Hz position poll and the 30 s
- * "actually listened" heuristic live.
+ * All four lanes of a [virtual] profile share one `TestCoroutineScheduler`, and that scheduler has
+ * exactly one driver thread. Serialization is therefore *stricter* than production — two lanes can
+ * never be occupied at the same instant — and real filesystem work serializes behind the test
+ * thread instead of overlapping on `Dispatchers.IO`.
+ *
+ * That is acceptable for a test that is about behaviour under time (does the retry ladder stop
+ * after `dlRetries`? does the ready timeout land in `Phase.Error`?), and it is **not** acceptable
+ * for a test that is about cross-lane concurrency. So the overlap contract — one task per lane, two
+ * lanes occupiable together, `io` genuinely multi-permit — is asserted in `TestLanesContractTest`
+ * against the [production] profile, with a `Dispatchers.Default` control that proves the detector
+ * can see red. Use [production] there, [virtual] everywhere else.
  */
 class TestLanes(
     val state: CoroutineDispatcher = Dispatchers.Default.limitedParallelism(1, "state"),
@@ -77,6 +86,29 @@ class TestLanes(
 
     /** A scope whose coroutines all land on [lane] — the shape production `scope.launch` uses. */
     fun laneScope(lane: Lane): CoroutineScope = CoroutineScope(disp.on(lane) + SupervisorJob())
+
+    companion object {
+        /**
+         * The wall-clock profile: production's own `limitedParallelism(1)` lanes over
+         * `Dispatchers.Default`. `delay()` inside one of these is a real timer, so a test that
+         * waits on lane work must wait on the wall clock. This is what `TestLanesContractTest`
+         * audits, and the default everywhere a test is about scheduling.
+         */
+        fun production(): TestLanes = TestLanes()
+
+        /**
+         * The virtual-time profile: the same four single-permit lanes, but every one of them a
+         * `StandardTestDispatcher` on [scheduler]. Must be driven from inside a `runTest` (or an
+         * equivalent) that shares [scheduler], or nothing on a lane will ever run.
+         */
+        fun virtual(scheduler: TestCoroutineScheduler): TestLanes =
+            TestLanes(
+                state = StandardTestDispatcher(scheduler, "state").limitedParallelism(1, "state"),
+                dbLane = StandardTestDispatcher(scheduler, "dbLane").limitedParallelism(1, "dbLane"),
+                main = StandardTestDispatcher(scheduler, "main").limitedParallelism(1, "main"),
+                io = StandardTestDispatcher(scheduler, "io").limitedParallelism(1, "io"),
+            )
+    }
 }
 
 /**

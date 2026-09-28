@@ -241,13 +241,15 @@ class SaavnProvider(
         if (body is CatalogResult.Err) return body
         val ok = body as CatalogResult.Ok
         return withContext(disp.on(Lane.IO)) {
-            disp.assert(Lane.IO)
+            disp.assertInContext(Lane.IO)
             map(ok.value.text)
         }
     }
 
-    private fun endpointOf(request: List<Pair<String, String>>): String =
-        request.firstOrNull { it.first == CALL }?.second ?: "unknown"
+    private fun endpointOf(request: List<Pair<String, String>>): String {
+        val hit = request.firstOrNull { it.first == CALL }
+        return hit?.second ?: "unknown"
+    }
 
     companion object {
         internal const val CALL = "__call"
@@ -317,4 +319,8 @@ internal fun artistRequest(route: ArtistRoute): List<Pair<String, String>> =
  * tests import it from here, which is the same package.
  */
 fun mapAuth(a: dylan.provider.saavn.dto.AuthDto): SignedStream? =
-    if (a.status == "success" && !a.authUrl.isNullOrBlank()) SignedStream(a.authUrl, a.type ?: "mp4") else null
+    if (a.status == "success" && !a.authUrl.isNullOrBlank()) {
+        SignedStream(a.authUrl, a.type ?: "mp4")
+    } else {
+        null
+    }

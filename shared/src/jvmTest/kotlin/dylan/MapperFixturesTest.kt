@@ -8,6 +8,7 @@ import dylan.provider.saavn.coerceHas320
 import dylan.provider.saavn.dto.AlbumDto
 import dylan.provider.saavn.dto.ArtistDto
 import dylan.provider.saavn.dto.AuthDto
+import dylan.provider.saavn.dto.MoreInfoDto
 import dylan.provider.saavn.dto.ResultsDto
 import dylan.provider.saavn.dto.SongDto
 import dylan.provider.saavn.mapAlbum
@@ -157,7 +158,12 @@ class MapperFixturesTest {
         assertEquals(0L, s.durationS)
         assertFalse(durationKnown(s.durationS), "\"not-a-number\" is unknown, not zero-length")
         val drift = mutableListOf<dylan.provider.Drift>()
-        val again = dylan.provider.saavn.mapCard(json.parseToJsonElement(fixture("malformed_fields.json")), "test", drift)
+        val again =
+            dylan.provider.saavn.mapCard(
+                json.parseToJsonElement(fixture("malformed_fields.json")),
+                "test",
+                drift,
+            )
         assertNotNull(again)
         assertTrue(
             drift.any { it.reason == dylan.provider.saavn.DURATION_UNPARSED },
@@ -309,7 +315,7 @@ class MapperFixturesTest {
                 SongDto(
                     id = "a:b",
                     title = "t",
-                    moreInfo = kotlinx.serialization.json.Json.encodeToJsonElement(dylan.provider.saavn.dto.MoreInfoDto.serializer(), dylan.provider.saavn.dto.MoreInfoDto()),
+                    moreInfo = Json.encodeToJsonElement(MoreInfoDto.serializer(), MoreInfoDto()),
                 ),
             )
         assertNotNull(song)

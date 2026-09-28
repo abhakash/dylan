@@ -53,7 +53,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
-private class GatedProvider : MusicProvider {
+internal class GatedProvider : MusicProvider {
     var gate = CompletableDeferred<Unit>()
     var resolveCalls = 0
 
@@ -80,24 +80,28 @@ private class GatedProvider : MusicProvider {
     }
 }
 
-class OrchestratorEdgeTest {
-    private lateinit var tmp: String
-    private lateinit var db: Dylan
-    private lateinit var orchestrator: Orchestrator
-    private lateinit var downloadEngine: DownloadEngine
-    private lateinit var fakePlayer: dylan.support.FakePlayerEngine
-    private lateinit var provider: GatedProvider
-    private lateinit var scope: CoroutineScope
-    private lateinit var paths: Paths
-    private lateinit var disp: dylan.util.AppDispatchers
-    private lateinit var bulk: HttpClient
-    private lateinit var settings: SettingsStore
-    private val protectedKeys = MutableStateFlow<Set<SongKey>>(emptySet())
-    private var mockBody: ByteArray = ByteArray(0)
-    private var mockStatus: HttpStatusCode = HttpStatusCode.OK
-    private var cfg = AppConfig()
-    private val fakeNet = dylan.support.FakeNetMonitor(online = true, netClass = dylan.util.NetClass.UNMETERED)
-    private val testLog =
+abstract class OrchestratorEdgeFixture {
+    internal lateinit var tmp: String
+    internal lateinit var db: Dylan
+    internal lateinit var orchestrator: Orchestrator
+    internal lateinit var downloadEngine: DownloadEngine
+    internal lateinit var fakePlayer: dylan.support.FakePlayerEngine
+    internal lateinit var provider: GatedProvider
+    internal lateinit var scope: CoroutineScope
+    internal lateinit var paths: Paths
+    internal lateinit var disp: dylan.util.AppDispatchers
+    internal lateinit var bulk: HttpClient
+    internal lateinit var settings: SettingsStore
+    internal val protectedKeys = MutableStateFlow<Set<SongKey>>(emptySet())
+    internal var mockBody: ByteArray = ByteArray(0)
+    internal var mockStatus: HttpStatusCode = HttpStatusCode.OK
+
+    // See `DownloadEngineTest`: the retry ladder is policy, not a subject of any test here, and its
+    // default 800 ms x n spacing is what made `readyTimeoutLandsInPhaseErrorWithUserCopy` (a
+    // 400 ms ready timeout) take 3.6 s.
+    internal var cfg = AppConfig(dlBackoffBaseMs = DL_BACKOFF_MS)
+    internal val fakeNet = dylan.support.FakeNetMonitor(online = true, netClass = dylan.util.NetClass.UNMETERED)
+    internal val testLog =
         dylan.diag.LogBuffer(minLevel = dylan.diag.LogLevel.DEBUG).also { buf ->
             buf.bindSink { e -> println("[${e.level}] Dylan:${e.tag} ${e.msg}") }
         }
@@ -137,7 +141,7 @@ class OrchestratorEdgeTest {
         mockBody = ftypBody(1000)
     }
 
-    private fun buildGraph(newCfg: AppConfig) {
+    internal fun buildGraph(newCfg: AppConfig) {
         cfg = newCfg
         val fs = FileSystem.SYSTEM
         val paths = Paths(tmp.toPath() / "audio", fs)
@@ -152,7 +156,7 @@ class OrchestratorEdgeTest {
                 disp = disp,
                 provider = provider,
                 bulk = bulk,
-                breakers = Breakers(),
+                breakers = Breakers(baseCooldownMs = DL_COOLDOWN_MS),
                 cacheManager = cacheManager,
                 netClass = { fakeNet.current() },
                 qualityPref = { cfg.defaultQuality },
@@ -171,12 +175,11 @@ class OrchestratorEdgeTest {
                 cacheManager = cacheManager,
                 settings = settings,
                 net = fakeNet,
-                protectedKeys = protectedKeys,
                 log = testLog,
             )
     }
 
-    private fun rebuildGraph(newCfg: AppConfig) {
+    internal fun rebuildGraph(newCfg: AppConfig) {
         runCatching { orchestrator.detachEngine() }
         runCatching { downloadEngine.stop() }
         buildGraph(newCfg)
@@ -193,13 +196,19 @@ class OrchestratorEdgeTest {
         runCatching { FileSystem.SYSTEM.deleteRecursively(tmp.toPath()) }
     }
 
-    private fun ftypBody(size: Int): ByteArray {
+    /**
+     * A *real* mp4 head: `ftyp` at 4 and a printable major brand at 8. The brand is not decoration —
+     * `sniffContainer` requires it, so a fixture carrying `ftyp` alone is a body the engine rejects
+     * as `CORRUPT_CONTAINER`, and every test that expected a track to play reported the sniff.
+     */
+    internal fun ftypBody(size: Int): ByteArray {
         val b = ByteArray(size)
         "ftyp".encodeToByteArray().copyInto(b, 4)
+        "M4A ".encodeToByteArray().copyInto(b, 8)
         return b
     }
 
-    private fun song(
+    internal fun song(
         id: String,
         has320: Boolean = false,
     ) = Song(
@@ -216,7 +225,7 @@ class OrchestratorEdgeTest {
         permaToken = null,
     )
 
-    private fun seedCached(id: String) {
+    internal fun seedCached(id: String) {
         val key = SongKey("saavn", id)
         val fs = FileSystem.SYSTEM
         val file = paths.final(key, 128, "m4a")
@@ -225,11 +234,34 @@ class OrchestratorEdgeTest {
         db.dylanQueries.insertCached("saavn", id, 128L, "m4a", 1000L, 0L, null, 0L, 0L, null)
     }
 
-    private suspend fun awaitPhase(
+    internal suspend fun awaitPhase(
         timeoutMs: Long = 15_000,
         predicate: (PlayerState) -> Boolean,
     ): PlayerState = withTimeout(timeoutMs) { orchestrator.state.first { predicate(it) } }
 
+    /**
+     * On a timeout, dump every thread before rethrowing. A 20 s `withTimeout` that fires with no
+     * clue which of four lanes is wedged is the least actionable failure in the suite.
+     */
+    internal suspend fun <T> withDumpOnTimeout(
+        ms: Long,
+        block: suspend () -> T,
+    ): T =
+        try {
+            withTimeout(ms) { block() }
+        } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
+            println("=== THREAD DUMP (timeout after ${ms}ms) ===")
+            Thread
+                .getAllStackTraces()
+                .forEach { (t, st) ->
+                    println("--- ${t.name} state=${t.state}")
+                    st.take(15).forEach { println("    at $it") }
+                }
+            throw e
+        }
+}
+
+class OrchestratorEdgeTest : OrchestratorEdgeFixture() {
     @Test
     fun playNowResolvesThroughRealPipelineAndPlays() =
         runBlocking {
@@ -318,23 +350,6 @@ class OrchestratorEdgeTest {
                     downloadEngine.states.first { s -> s[key] is JobState.Done || s[key] is JobState.Failed }
                 }
             assertTrue(done[key] is JobState.Done, "retry after transient failure must reach Done, got ${done[key]}")
-        }
-
-    private suspend fun <T> withDumpOnTimeout(
-        ms: Long,
-        block: suspend () -> T,
-    ): T =
-        try {
-            withTimeout(ms) { block() }
-        } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
-            println("=== THREAD DUMP (timeout after ${ms}ms) ===")
-            Thread
-                .getAllStackTraces()
-                .forEach { (t, st) ->
-                    println("--- ${t.name} state=${t.state}")
-                    st.take(15).forEach { println("    at $it") }
-                }
-            throw e
         }
 
     @Test
@@ -430,7 +445,7 @@ class OrchestratorEdgeTest {
     @Test
     fun offlineNetworkSurfacesOfflineFastPathWithoutWaitingForTheDownload() =
         runBlocking {
-            rebuildGraph(AppConfig(readyTimeoutMs = 30_000))
+            rebuildGraph(AppConfig(readyTimeoutMs = 30_000, dlBackoffBaseMs = DL_BACKOFF_MS))
             fakeNet.pushOnline(false)
             val t0 = System.nanoTime()
             orchestrator.submit(PlayNow(listOf(song("a")), 0))
@@ -482,7 +497,7 @@ class OrchestratorEdgeTest {
     @Test
     fun readyTimeoutLandsInPhaseErrorWithUserCopy() =
         runBlocking {
-            rebuildGraph(AppConfig(readyTimeoutMs = 400))
+            rebuildGraph(AppConfig(readyTimeoutMs = 400, dlBackoffBaseMs = DL_BACKOFF_MS))
             provider.gate = CompletableDeferred() // resolve never returns ⇒ job never Done/Failed
             var toast: String? = null
             orchestrator.toast = { toast = it }
@@ -543,7 +558,7 @@ class OrchestratorEdgeTest {
                 listOf("a", "b"),
                 fakePlayer.preparedWindows
                     .last()
-                    .map { it.itemId.substringAfter(":").substringBeforeLast(":") },
+                    .map { it.itemId.split(':').getOrElse(2) { "" } },
                 "attach onto a restored PAUSED state must hand the engine its window",
             )
             assertTrue(
@@ -596,7 +611,9 @@ class OrchestratorEdgeTest {
                 "and the newer PlayNow's own queue must be intact, not the superseded one",
             )
         }
+}
 
+class OrchestratorRecoveryTest : OrchestratorEdgeFixture() {
     @Test
     fun consecutiveErrorsResetPerSuccessfulTrackNotPerPhaseTransition() =
         runBlocking {
@@ -628,7 +645,7 @@ class OrchestratorEdgeTest {
     @Test
     fun oneFailedMessageDoesNotEndPlayback() =
         runBlocking {
-            rebuildGraph(AppConfig(navDebounceMs = 0L))
+            rebuildGraph(AppConfig(navDebounceMs = 0L, dlBackoffBaseMs = DL_BACKOFF_MS))
             seedCached("a")
             seedCached("b")
             orchestrator.submit(PlayNow(listOf(song("a"), song("b")), 0))
@@ -779,7 +796,9 @@ class OrchestratorEdgeTest {
     fun restoreOfALargeQueueIsLinearNotQuadratic() =
         runBlocking {
             val n = 1_000
-            repeat(n) { db.dylanQueries.insertSong("saavn", "s$it", "s$it", "", null, null, "", "", 100L, 1L, "e$it", null, 0L) }
+            repeat(n) {
+                db.dylanQueries.insertSong("saavn", "s$it", "s$it", "", null, null, "", "", 100L, 1L, "e$it", null, 0L)
+            }
             val refs = (0 until n).map { dylan.playback.ItemRef("saavn", "s$it") }
             val snap = dylan.playback.ResumeSnapshot(items = refs, index = n - 1, posMs = 1_000L)
             val encoded = dylan.playback.encodeSnapshot(snap)
@@ -820,7 +839,8 @@ class OrchestratorEdgeTest {
             val newNs = System.nanoTime() - t0
             blackhole += restored.index.toLong()
             println(
-                "[bench] restore($n items): OLD ${"%.1f".format(oldNs / 1e6)} ms  NEW ${"%.1f".format(newNs / 1e6)} ms  " +
+                "[bench] restore($n items): " +
+                    "OLD ${"%.1f".format(oldNs / 1e6)} ms  NEW ${"%.1f".format(newNs / 1e6)} ms  " +
                     "(${"%.1f".format(oldNs.toDouble() / newNs)}x)  blackhole=$blackhole",
             )
             assertEquals(n, restored.queue.size)
@@ -832,6 +852,10 @@ class OrchestratorEdgeTest {
         }
 }
 
+private const val DL_BACKOFF_MS = 5L
+
+/** See `DownloadEngineTest`: the breaker cooldown is policy; no test here asserts a duration. */
+private const val DL_COOLDOWN_MS = 5L
 private const val FAILED_MESSAGE_SETTLE_MS = 300L
 private const val DETACHED_SETTLE_MS = 400L
 private const val RESUME_SETTLE_MS = 400L

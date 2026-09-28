@@ -177,7 +177,11 @@ class ResilientClient(
             val ttl = if (hit.result is CatalogResult.Ok) ttlMs else cfg.catalogNegativeTtlMs
             if (now - hit.at <= ttl) {
                 // LRU reorder: drop then re-insert so iteration order stays least-recent-first.
-                entries = LinkedHashMap(entries).also { it.remove(key); it[key] = hit }
+                entries =
+                    LinkedHashMap(entries).also {
+                        it.remove(key)
+                        it[key] = hit
+                    }
                 return Decision.Hit(hit.result as CatalogResult<T>)
             }
             entries = LinkedHashMap(entries).also { it.remove(key) }

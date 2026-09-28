@@ -28,6 +28,7 @@ import io.ktor.websocket.close
 import io.ktor.websocket.readText
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.serialization.DeserializationStrategy
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -578,11 +579,14 @@ object ContractDrift {
      * `topSongs`. These are the two decodes the mapper itself does, so the probe reads the same
      * fields the app does instead of a re-typed view of them.
      */
-    private fun moreInfoOf(dto: SongDto): MoreInfoDto? =
-        dto.moreInfo?.let { runCatching { json.decodeFromJsonElement(MoreInfoDto.serializer(), it) }.getOrNull() }
+    private fun moreInfoOf(dto: SongDto): MoreInfoDto? = dto.moreInfo?.let { decode(MoreInfoDto.serializer(), it) }
 
-    private fun moreInfoOfCard(card: JsonElement): MoreInfoDto? =
-        runCatching { json.decodeFromJsonElement(SongDto.serializer(), card) }.getOrNull()?.let(::moreInfoOf)
+    private fun moreInfoOfCard(card: JsonElement): MoreInfoDto? = decode(SongDto.serializer(), card)?.let(::moreInfoOf)
+
+    private fun <T> decode(
+        strategy: DeserializationStrategy<T>,
+        el: JsonElement,
+    ): T? = runCatching { json.decodeFromJsonElement(strategy, el) }.getOrNull()
 
     /** Everything the album/artist/auth probes need to derive their request tokens. */
     private class Tokens(

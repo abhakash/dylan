@@ -19,13 +19,12 @@ data class AppConfig(
     val wsPingIntervalMs: Int = 25_000,
     val wsBackoffBaseMs: Long = 1_000,
     val wsBackoffCapMs: Long = 16_000,
-
     // ── WS budget, split in two (audit SE-2 / §3.5) ───────────────────────────────────────
     // The socket is a *latency optimisation only*: the frame carries no query echo and no
     // request id, so FIFO position is strictly weaker correlation than HTTP's implicit
     // correlation. Budget therefore has two independent parts, because a cold TLS connect
     // (hundreds of ms to seconds on mobile) must not be charged against the answer window.
-    /** Ktor deliberately skips `requestTimeoutMillis` for `wss://`, so the upgrade needs its own. */
+    // Ktor deliberately skips `requestTimeoutMillis` for `wss://`, so the upgrade needs its own.
     val wsHandshakeTimeoutMs: Long = 5_000,
     /** Hard ceiling on `webSocketSession()`; a blackholed upgrade otherwise pins the engine. */
     val wsHandshakeAttempts: Int = 2,
@@ -41,9 +40,10 @@ data class AppConfig(
     val wsCooldownBaseMs: Long = 30_000,
     /** Ceiling for a repeatedly-failing cooldown (each post-cooldown failure doubles it). */
     val wsCooldownCapMs: Long = 600_000,
-
-    // ── catalog resilience (audit §3.5: null-returning provider) ─────────────────────────
-    /** In-memory LRU entries for album/artist/home/topSearches. */
+    /**
+     * ── catalog resilience (audit §3.5: null-returning provider) ──
+     * In-memory LRU entries for album/artist/home/topSearches.
+     */
     val catalogLruEntries: Int = 24,
     /** How long a failed endpoint is answered from cache instead of re-requested. */
     val catalogNegativeTtlMs: Long = 30_000,

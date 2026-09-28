@@ -165,7 +165,10 @@ class QueueStatePropertyTest {
                                 null
                             }
                         }
-                        else -> QueueInvariants.repeatAllIsBijection(s) { st, _ -> QueueAlgebra.nextUpIndex(maintain(st)) }
+                        else ->
+                            QueueInvariants.repeatAllIsBijection(s) { st, _ ->
+                                QueueAlgebra.nextUpIndex(maintain(st))
+                            }
                     }
                 if (v != null) {
                     violations++
@@ -217,7 +220,6 @@ class QueueStatePropertyTest {
                 queue = listOf(queue[0], queue[2]).toPersistentList(),
                 index = 0,
                 current = queue[1],
-                remap = true,
             )
         assertEquals(1, after.nextIndex, "next must be c, not the slot that now holds c under b's index")
         assertEquals("c", after.nextUp?.key?.songId)

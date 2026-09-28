@@ -5,11 +5,12 @@ package dylan.download
 import dylan.cache.Paths
 import dylan.config.AppConfig
 import dylan.db.Dylan
+import dylan.diag.LogBuffer
 import dylan.model.Quality
 import dylan.model.SongKey
 import dylan.util.AppDispatchers
 import dylan.util.Clock
-import dylan.diag.LogBuffer
+import dylan.util.Lane
 import kotlinx.coroutines.withContext
 import okio.FileSystem
 import okio.Path
@@ -151,14 +152,13 @@ internal class PartStore(
         swept.store(true)
         val parts = listDir().filter { it.name.endsWith(PART_SUFFIX) }
         val reasons =
-            withContext(disp.dbLane) {
+            withContext(disp.on(Lane.DB)) {
                 db.dylanQueries
                     .allIntents()
                     .executeAsList()
                     .mapNotNull { row ->
                         Priority.fromWire(row.reason)?.let { SongKey(row.provider, row.song_id) to it }
-                    }
-                    .toMap()
+                    }.toMap()
             }
         val refs =
             parts.mapNotNull { path ->
@@ -212,8 +212,10 @@ internal class PartStore(
         bp: Breakpoint,
     ) = PartRef(key, path, reason, mtime, bp)
 
-    private fun bitsOf(name: String): Int =
-        name.substringAfterLast('_').substringBefore('.').toIntOrNull() ?: DEFAULT_BITS
+    private fun bitsOf(name: String): Int {
+        val tail = name.substringAfterLast('_').substringBefore('.')
+        return tail.toIntOrNull() ?: DEFAULT_BITS
+    }
 
     private fun resumed(
         key: SongKey,

@@ -13,6 +13,7 @@ import dylan.util.Lane
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withContext
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -24,7 +25,7 @@ import kotlin.test.assertTrue
  *
  * What they buy: before this, `state`/`dbLane` were `Dispatchers.Default` in every test, so the
  * single-task-at-a-time invariant the architecture rests on was not merely untested, it was
- * actively *violated* by the harness. A missing `withContext(disp.state)` hop was therefore
+ * actively *violated* by the harness. A missing `withContext(disp.on(Lane.STATE))` hop was therefore
  * invisible in CI and only surfaced on device. [aMultiPermitLaneIsDetected] is the control that
  * proves the detector can see red.
  */
@@ -96,8 +97,16 @@ class TestLanesContractTest {
 
     @Test
     fun oneSerializedLaneIsNotIndependentOfItself() {
+        // The single-lane ceiling, not the multi-lane one. This is a *negative*: two tasks on one
+        // lane would overlap the moment the first released the permit, which
+        // `stateLaneIsSinglePermit` already shows happens inside `RENDEZVOUS_TIMEOUT_MS`. Paying
+        // the 2 s multi-lane ceiling here bought no extra confidence and cost 1.75 s of wall clock.
         assertFalse(
-            lanesOverlapBlocking(lanes.disp, listOf(Lane.STATE to 1, Lane.STATE to 1)),
+            lanesOverlapBlocking(
+                lanes.disp,
+                listOf(Lane.STATE to 1, Lane.STATE to 1),
+                timeoutMs = dylan.support.RENDEZVOUS_TIMEOUT_MS,
+            ),
             "a single limitedParallelism(1) lane cannot hold two tasks",
         )
     }
@@ -106,28 +115,53 @@ class TestLanesContractTest {
     fun ioOverlapsTheSerializedLanesOnRealThreads() {
         assertTrue(
             lanesOverlapBlocking(lanes.disp, listOf(Lane.STATE to 1, Lane.IO to 1)),
-            "withContext(disp.io) genuinely overlaps the state lane, as on device",
+            "withContext(disp.on(Lane.IO)) genuinely overlaps the state lane, as on device",
         )
     }
 
     /**
-     * Pinned, and load-bearing: `AppDispatchers.LaneDispatcher` deliberately does not implement
-     * `Delay`, and `on(lane)` hands back that same wrapper, so **no** `delay()` inside a lane is
-     * virtual — production or test. Every lane delay is a real `DefaultDelay` wake-up plus an
-     * extra dispatch hop. Virtual time is therefore available only to *test-owned* dispatchers;
-     * [FakePlayerEngine]'s event/position loop is one, which is how the 10 Hz position poll and
-     * the 30 s listen heuristic became reachable at all.
+     * The production profile runs on the wall clock, and this is *why* it has to.
+     *
+     * `Dispatchers.Default` is not a `Delay`, so `limitedParallelism(1)` over it falls back to the
+     * global `DefaultDelay` and a 25 ms lane delay really costs 25 ms. Pinned because it is the
+     * reason a test on this profile must never assert on elapsed time, and because the virtual
+     * profile below is only a different answer to the same question, not a different question.
      */
     @Test
-    fun laneDelaysAreRealTimeNotVirtual() =
+    fun productionLaneDelaysAreRealTime() =
         runBlocking {
             val before = System.nanoTime()
             withContext(lanes.disp.state) { delay(REAL_LANE_DELAY_MS) }
             val elapsedMs = (System.nanoTime() - before) / 1_000_000
             assertTrue(
                 elapsedMs >= REAL_LANE_DELAY_MS,
-                "a state-lane delay is real time today (LaneDispatcher has no Delay); got ${elapsedMs}ms",
+                "a production-profile state-lane delay is real time; got ${elapsedMs}ms",
             )
+        }
+
+    /**
+     * The fix, pinned in the direction that matters. `AppDispatchers` hands back the *raw*
+     * dispatcher, so a `TestDispatcher` can be installed and `LimitedDispatcher` — which *is* a
+     * `Delay`, constructed as `dispatcher as? Delay ?: DefaultDelay` — routes the delay into the
+     * shared scheduler. The same `limitedParallelism(1)` that buys the serialization contract also
+     * keeps virtual time reachable, which it did not when `AppDispatchers` wrapped its lanes.
+     *
+     * Without this the whole suite has to sleep through its own timeouts; with it a 10-minute
+     * backoff is ten microseconds of scheduler. The single-permit claim is checked here too, so
+     * "virtual" can never quietly mean "unserialised".
+     */
+    @Test
+    fun aVirtualLaneIsStillSinglePermitAndItsDelaysAreFree() =
+        runTest {
+            val virtual = TestLanes.virtual(testScheduler)
+            // The barrier can only trip if two tasks are in the lane at once, which one driver
+            // thread makes impossible. A short ceiling is therefore the whole proof.
+            assertFalse(
+                laneAdmitsOverlap(virtual.disp, Lane.STATE, timeoutMs = VIRTUAL_RENDEZVOUS_MS),
+                "virtual time must not cost the single-permit contract",
+            )
+            withContext(virtual.disp.state) { delay(REAL_LANE_DELAY_MS) }
+            assertEquals(REAL_LANE_DELAY_MS, testScheduler.currentTime, "the lane delay is virtual, not wall clock")
         }
 
     /**
@@ -162,6 +196,9 @@ private const val REAL_LANE_DELAY_MS = 25L
 private const val LONG_TRACK_MS = 180_000L
 private const val POLL_ITERATIONS_FLOOR = 1_000
 private const val WALL_CLOCK_CEILING_NS = 5_000_000_000L
+
+/** A virtual lane has one driver thread, so "no overlap" needs no time at all to establish. */
+private const val VIRTUAL_RENDEZVOUS_MS = 25L
 
 private fun laneAdmitsOverlapBlocking(
     disp: AppDispatchers,

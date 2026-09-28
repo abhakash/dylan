@@ -21,9 +21,11 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonPrimitive
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -151,18 +153,20 @@ class SearchChannelTest {
         scope = null
     }
 
-    /** Bounded wait for a condition. Not an assertion about timing — a failing condition fails. */
-    private fun waitFor(
+    /**
+     * Bounded wait for a condition. Not an assertion about timing — a failing condition fails.
+     * The channel's engine runs on a real lane (that is the thing under test), so this polls on a
+     * suspending `delay` rather than a `Thread.sleep`, and the ceiling is a failure bound only.
+     */
+    private suspend fun waitFor(
         what: String,
         ceilingMs: Long = CEILING_MS,
         cond: () -> Boolean,
     ) {
-        val end = System.nanoTime() + ceilingMs * 1_000_000
-        while (System.nanoTime() < end) {
-            if (cond()) return
-            Thread.sleep(POLL_MS)
-        }
-        throw AssertionError("timed out waiting for $what")
+        withTimeoutOrNull(ceilingMs) {
+            while (!cond()) delay(POLL_MS)
+            true
+        } ?: throw AssertionError("timed out waiting for $what")
     }
 
     private fun titles(items: List<MiniEntity>) = items.map { it.title }
@@ -204,7 +208,11 @@ class SearchChannelTest {
                 answer.via,
                 "a mispair must be answered from HTTP, which correlates implicitly, not guessed at",
             )
-            assertTrue(ch.stateForTest().divergence >= 1, "the mispair must be detected, not absorbed: ${ch.debugState()}")
+            // The mispair must leave a trace. `SaavnSearchChannel.dropSocket` zeroes `divergence`
+            // as it tears the socket down, so the counter cannot be read after the fact — the
+            // durable evidence that the FIFO was distrusted is that the socket was *closed*, which
+            // is the whole remedy the class documents.
+            assertTrue(aSent.closeCount > 0, "a mispair must close the socket, not absorb it: ${ch.debugState()}")
         }
         closeChannel()
     }
@@ -249,8 +257,8 @@ class SearchChannelTest {
             waitFor("an answer for ab") { ch.answerForTest()?.epoch == epochB }
 
             assertTrue(
-                ch.stateForTest().divergence >= 1,
-                "reordering must increment the divergence counter: ${ch.debugState()}",
+                s.closeCount > 0,
+                "reordering must close the socket, not absorb it: ${ch.debugState()}",
             )
             assertEquals(
                 AnswerSource.HTTP,
@@ -362,8 +370,14 @@ class SearchChannelTest {
             val s = sessions.last()
             val epoch = ch.stateForTest().epoch
             s.incoming.trySend(frameFor("good-result"))
-            waitFor("the ws answer") { ch.answerForTest()?.epoch == epoch && ch.answerForTest()?.via == AnswerSource.WS }
-            assertEquals(0, ch.stateForTest().cooldownRemainingMs, "a good answer must clear the cooldown: ${ch.debugState()}")
+            waitFor("the ws answer") {
+                ch.answerForTest()?.epoch == epoch && ch.answerForTest()?.via == AnswerSource.WS
+            }
+            assertEquals(
+                0,
+                ch.stateForTest().cooldownRemainingMs,
+                "a good answer must clear the cooldown: ${ch.debugState()}",
+            )
         }
         closeChannel()
     }
@@ -380,7 +394,10 @@ class SearchChannelTest {
             ch.request("arijit")
             waitFor("the demand to be sent") { first.sent.isNotEmpty() }
             ch.warmUp()
-            Thread.sleep(QUIET_MS)
+            // No quiet period needed: a second demand that *is* answered proves the engine finished
+            // with the first, and `session()` can only run again if the socket had been replaced.
+            ch.request("ari2")
+            waitFor("the second demand on the same socket") { first.sent.size == 2 }
             assertEquals(1, sessions.size, "a live socket must be reused, not replaced: ${sessions.size} opened")
             assertEquals(0, first.closeCount, "a replaced socket is leaked; a reused one is not closed")
         }
@@ -393,10 +410,13 @@ class SearchChannelTest {
     fun queriesAreNormalisedOnceAtTheBoundary() {
         val ch = channel()
         runBlocking {
+            // `publish` trims and CASes a StateFlow, so the second `request` hands back the *same*
+            // Demand without launching anything. Once the first frame is on the wire there is
+            // therefore no sender left that could put a second one there, and a quiet period would
+            // be waiting on nothing.
             ch.request("  ari  ")
             ch.request("ari")
             waitFor("the query on the wire") { sessions.any { s -> s.sent.isNotEmpty() } }
-            Thread.sleep(QUIET_MS)
             assertEquals(
                 1,
                 sessions.sumOf { it.sent.size },
@@ -429,7 +449,11 @@ class SearchChannelTest {
             val epochBefore = ch.stateForTest().epoch
             ch.request("")
             waitFor("the socket to be released") { s.closeCount > 0 }
-            assertNotEquals(epochBefore, ch.stateForTest().epoch, "clearing must advance the epoch, or an in-flight answer is still renderable")
+            assertNotEquals(
+                epochBefore,
+                ch.stateForTest().epoch,
+                "clearing must advance the epoch, or an in-flight answer is still renderable",
+            )
             assertTrue(ch.stampsForTest().isEmpty(), "the FIFO must not keep stamps for a cleared demand")
         }
         closeChannel()
@@ -459,7 +483,12 @@ class SearchChannelTest {
             SaavnSearchChannel(
                 http = http(),
                 wsClient = HttpClient(MockEngine { error("unused") }),
-                cfg = AppConfig(clock = clock, wsTypingDebounceMs = TEST_DEBOUNCE_MS, wsSearchBudgetMs = TEST_BUDGET_MS),
+                cfg =
+                    AppConfig(
+                        clock = clock,
+                        wsTypingDebounceMs = TEST_DEBOUNCE_MS,
+                        wsSearchBudgetMs = TEST_BUDGET_MS,
+                    ),
                 scope = CoroutineScope(lanes.disp.io + SupervisorJob()).also { scope = it },
                 disp = lanes.disp,
                 log = LogBuffer(),
@@ -483,6 +512,5 @@ class SearchChannelTest {
         const val TEST_BUDGET_MS = 3_000L
         const val CEILING_MS = 5_000L
         const val POLL_MS = 5L
-        const val QUIET_MS = 150L
     }
 }

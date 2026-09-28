@@ -147,7 +147,6 @@ class GraphHarness(
                 cacheManager = cacheManager,
                 settings = settings,
                 net = net,
-                protectedKeys = protectedKeys,
                 log = log,
             )
         engine = FakePlayerEngine.onRealLooper(scope)
@@ -209,12 +208,19 @@ class GraphHarness(
         check(state.repeat == target) { "could not reach $target from ${state.repeat}" }
     }
 
-    /** Wait until the engine has been handed a window containing an itemId starting with [prefix]. */
+    /**
+     * Wait until the engine has been handed a window containing [songRef], as `provider:songId`.
+     *
+     * itemIds are generation-stamped — `g<gen>:<provider>:<songId>:<bits>` (`SongKey.itemId`) — so
+     * there is no `saavn:a` prefix left to match: the selector is matched inside the id, and the
+     * generation is deliberately not part of the selector.
+     */
     suspend fun awaitWindow(
-        prefix: String,
+        songRef: String,
         ceiling: Long = CEILING_MS,
     ) {
-        wallClock { withTimeout(ceiling) { engine.awaitWindow(prefix) } }
+        val needle = ":$songRef:"
+        wallClock { withTimeout(ceiling) { engine.awaitWindow { it.contains(needle) } } }
     }
 
     suspend fun awaitCachedRow(
@@ -300,9 +306,16 @@ class GraphHarness(
         /** `CycleRepeat` is a 3-cycle: OFF → ALL → ONE → OFF. */
         const val REPEAT_CYCLE_LENGTH = 3
 
+        /**
+         * A *real* mp4 head: `ftyp` at 4 and a printable major brand at 8. The brand is not
+         * decoration — `sniffContainer` requires it, so a fixture carrying `ftyp` alone is a body
+         * the engine rejects as `CORRUPT_CONTAINER`, and every graph test that expected a track to
+         * play reported the sniff and then timed out waiting for `Playing`.
+         */
         fun ftypBody(size: Int): ByteArray {
             val b = ByteArray(size)
-            "ftyp".encodeToByteArray().copyInto(b, 4)
+            "ftyp".encodeToByteArray().copyInto(b, 4, 0, minOf(4, size - 4).coerceAtLeast(0))
+            "M4A ".encodeToByteArray().copyInto(b, 8, 0, minOf(4, size - 8).coerceAtLeast(0))
             return b
         }
     }

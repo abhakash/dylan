@@ -4,7 +4,6 @@ package dylan.download
 
 import dylan.config.AppConfig
 import dylan.diag.LogBuffer
-import dylan.model.DylanFailure
 import dylan.model.ErrorCode
 import dylan.model.Quality
 import dylan.model.SongKey
@@ -26,9 +25,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.supervisorScope
-import kotlinx.coroutines.withContext
 import okio.FileHandle
 import okio.FileSystem
+import okio.IOException
 import okio.Path
 import kotlin.concurrent.atomics.AtomicReference
 import kotlin.time.TimeSource
@@ -172,29 +171,29 @@ internal class Transfer(
         held = true
         try {
             bulk
-                    .prepareGet(origin.url) {
-                        header(HttpHeaders.AcceptEncoding, "identity")
-                        if (bp.resumable) header(HttpHeaders.Range, "bytes=${bp.partBytes}-")
-                        // The persisted validator is what makes a cold resume — the normal path,
-                        // since the reconciler re-enqueues `.part` files from previous processes —
-                        // safe rather than a blind byte-offset append.
-                        bp.etag?.let { header(HttpHeaders.IfRange, it) }
-                        header(HttpHeaders.UserAgent, cfg.userAgent)
-                        header(HttpHeaders.Referrer, cfg.apiBaseUrl.substringBefore("/api.php") + "/")
-                    }.execute { r ->
-                        val parsed = r.toReply(clock.nowMs())
-                        contentType = parsed.contentType
-                        val outcome = serve(r, parsed, bp, live, partPath, ctx, throttle, startedAt, lastMark, restarts)
-                        restarts = outcome.restarts
-                        when (outcome) {
-                            is Serve.Rejected -> {
-                                rejected = outcome.fail
-                                retryAfterMs = parsed.retryAfterMs
-                            }
-                            is Serve.Copied -> copied = outcome.outcome
-                            is Serve.Refetch -> refetch = true
+                .prepareGet(origin.url) {
+                    header(HttpHeaders.AcceptEncoding, "identity")
+                    if (bp.resumable) header(HttpHeaders.Range, "bytes=${bp.partBytes}-")
+                    // The persisted validator is what makes a cold resume — the normal path,
+                    // since the reconciler re-enqueues `.part` files from previous processes —
+                    // safe rather than a blind byte-offset append.
+                    bp.etag?.let { header(HttpHeaders.IfRange, it) }
+                    header(HttpHeaders.UserAgent, cfg.userAgent)
+                    header(HttpHeaders.Referrer, cfg.apiBaseUrl.substringBefore("/api.php") + "/")
+                }.execute { r ->
+                    val parsed = r.toReply(clock.nowMs())
+                    contentType = parsed.contentType
+                    val outcome = serve(r, parsed, bp, live, partPath, ctx, throttle, startedAt, lastMark, restarts)
+                    restarts = outcome.restarts
+                    when (outcome) {
+                        is Serve.Rejected -> {
+                            rejected = outcome.fail
+                            retryAfterMs = parsed.retryAfterMs
                         }
+                        is Serve.Copied -> copied = outcome.outcome
+                        is Serve.Refetch -> refetch = true
                     }
+                }
             settled = true
         } catch (e: CancellationException) {
             throw e
@@ -205,6 +204,12 @@ internal class Transfer(
             currentCoroutineContext().ensureActive()
             hostFailure = expected.message ?: expected::class.simpleName
             log.w("dl", "request failed ${key.label}: $hostFailure")
+            // The write-set is folded in per chunk, but a reset can land between a flush and its
+            // fold, and then the resume offset is behind the file. One `stat` per *failed* attempt
+            // is the cheap correction, and the filesystem — not a local — is the authority on what
+            // is on disk, which is the same rule `PartStore.note` follows.
+            val onDisk = fileSize(fs, partPath)
+            if (onDisk > live.load().partBytes) live.store(live.load().wrote(onDisk))
         } finally {
             if (!settled) breaker.release()
             if (held) gate.release()
@@ -297,7 +302,10 @@ internal class Transfer(
     private fun unparseable(
         ctx: AttemptCtx,
         contentType: String?,
-    ): TransferResult = TransferResult.Failed(ErrorCode.NETWORK, "unparseable stream url", ctx.rangeRestarts, ctx.attempts, contentType)
+    ): TransferResult {
+        val why = "unparseable stream url"
+        return TransferResult.Failed(ErrorCode.NETWORK, why, ctx.rangeRestarts, ctx.attempts, contentType)
+    }
 
     private fun countRestart(
         bp: Breakpoint,
@@ -359,9 +367,13 @@ internal class Transfer(
                 if (ctx.resolveCount < cfg.resolveCapPerJob) {
                     TransferResult.Retry(ctx.rangeRestarts, ctx.attempts, contentType, reResolve = true)
                 } else {
-                    val refused = "origin refused the signed url"
-                    val ctx2 = ctx
-                    TransferResult.Failed(ErrorCode.FORBIDDEN_REGION, refused, ctx2.rangeRestarts, ctx2.attempts, contentType)
+                    TransferResult.Failed(
+                        ErrorCode.FORBIDDEN_REGION,
+                        "origin refused the signed url",
+                        ctx.rangeRestarts,
+                        ctx.attempts,
+                        contentType,
+                    )
                 }
             ErrorCode.NOT_FOUND -> {
                 val missing = "no such object"
@@ -463,6 +475,16 @@ internal class Transfer(
             }
         }
 
+    /**
+     * Copy the body and report what reached the disk.
+     *
+     * The end offset is read back from [live] — the [Breakpoint] the copy loop folds every flushed
+     * chunk into — rather than from a local. A local in *this* function is not the one `pump`
+     * advances, so it stayed at `segment.startAt`: every transfer reported `written = 0` and, since
+     * `pos < expectedEnd`, every *complete* body was classified `Truncated`. That made a clean
+     * 200 with a correct `Content-Length` retry until the range-restart cap tripped and fail as
+     * `NETWORK: origin would not Range`.
+     */
     private suspend fun drain(
         ch: ByteReadChannel,
         segment: Segment,
@@ -472,28 +494,32 @@ internal class Transfer(
         throttle: ProgressThrottle,
     ): CopyOutcome {
         val buf = ByteArray(COPY_BUFFER_BYTES)
-        var pos = segment.startAt
         var failure: StreamErr? = null
-        var stalled: StallSignal? = null
+        var pumped = PumpResult(null, null)
         val sink =
             try {
                 fs.openReadWrite(segment.partPath, mustCreate = false, mustExist = false)
-            } catch (e: Exception) {
+            } catch (e: IOException) {
                 log.w("dl", "open for write failed ${key.provider}:${key.songId}: ${e.message}")
                 failure = StreamErr.Storage
                 null
             }
         if (sink != null) {
-            stalled = pump(sink, ch, buf, segment, live, key, lastMark, throttle, failure)
+            pumped = pump(sink, ch, buf, segment, live, key, lastMark, throttle, failure)
         }
-        val err = failure ?: verdict(stalled, pos, segment.expectedEnd)
-        return CopyOutcome(pos - segment.startAt, err)
+        val end = live.load().partBytes
+        val err = failure ?: pumped.failure ?: verdict(pumped.signal, end, segment.expectedEnd)
+        return CopyOutcome(end - segment.startAt, err)
     }
 
     /**
-     * The copy loop. A `StallSignal` is returned rather than thrown so the caller can tell a
+     * The copy loop. A [StallSignal] is returned rather than thrown so the caller can tell a
      * watchdog trip (retryable, NETWORK_TIMEOUT) from a real I/O failure; an external cancellation
      * is not caught here at all, so it propagates untouched.
+     *
+     * The flush is inside the `try` on purpose: a `flush` that fails after every byte was accepted
+     * is a storage failure, and swallowing it reported the transfer as complete — the truncation-
+     * equals-success ambiguity the whole [Breakpoint] contract exists to remove.
      */
     private suspend fun pump(
         sink: FileHandle,
@@ -505,30 +531,71 @@ internal class Transfer(
         lastMark: AtomicReference<TimeSource.Monotonic.ValueTimeMark>,
         throttle: ProgressThrottle,
         openFailure: StreamErr?,
-    ): StallSignal? {
-        var pos = segment.startAt
+    ): PumpResult {
+        val written = Written(segment.startAt)
         var failure = openFailure
+        var signal: StallSignal? = null
         try {
-            while (failure == null) {
-                val n = readChunk(ch, buf) ?: continue
-                if (n < 0) break
-                if (write(sink, pos, buf, n, key)) {
-                    pos += n
-                    live.store(live.load().wrote(pos))
-                    lastMark.store(TimeSource.Monotonic.markNow())
-                    throttle.take(pos, segment.displayTotal)?.let { pct -> publishProgress(key, pct) }
-                } else {
-                    failure = StreamErr.Storage
-                }
+            failure = copyChunks(sink, ch, buf, segment, live, key, lastMark, throttle, written, failure)
+            if (failure == null) {
+                sink.flush()
             }
-        } catch (signal: StallSignal) {
-            return signal
+        } catch (stall: StallSignal) {
+            signal = stall
         } finally {
-            runCatching { sink.flush() }
-            runCatching { sink.close() }
+            closeQuietly(sink)
         }
-        return null
+        return PumpResult(failure, signal)
     }
+
+    /**
+     * One loop, one early exit per condition and no `break`/`continue` pair: `null` from
+     * [readChunk] means the channel woke with nothing, which is not an end of body.
+     */
+    private suspend fun copyChunks(
+        sink: FileHandle,
+        ch: ByteReadChannel,
+        buf: ByteArray,
+        segment: Segment,
+        live: AtomicReference<Breakpoint>,
+        key: SongKey,
+        lastMark: AtomicReference<TimeSource.Monotonic.ValueTimeMark>,
+        throttle: ProgressThrottle,
+        written: Written,
+        openFailure: StreamErr?,
+    ): StreamErr? {
+        var failure = openFailure
+        while (failure == null) {
+            val n = readChunk(ch, buf)
+            if (n == null) continue
+            if (n < 0) return failure
+            if (!write(sink, written.at, buf, n, key)) {
+                failure = StreamErr.Storage
+            } else {
+                written.at += n
+                live.store(live.load().wrote(written.at))
+                lastMark.store(TimeSource.Monotonic.markNow())
+                throttle.take(written.at, segment.displayTotal)?.let { pct -> publishProgress(key, pct) }
+            }
+        }
+        return failure
+    }
+
+    /** The mutable copy cursor, in one place so the loop above has no second `pos`. */
+    private class Written(
+        var at: Long,
+    )
+
+    private fun closeQuietly(sink: FileHandle) {
+        // A close failure after a clean flush is not actionable and must not mask the verdict.
+        runCatching { sink.close() }
+    }
+
+    /** What the copy loop left behind: an I/O failure, a watchdog trip, or neither. */
+    private class PumpResult(
+        val failure: StreamErr?,
+        val signal: StallSignal?,
+    )
 
     private fun write(
         sink: FileHandle,

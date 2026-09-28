@@ -13,9 +13,6 @@ private const val DEFAULT_MAX_COOLDOWN_MS = 120_000L
 private const val DEFAULT_MAX_HOSTS = 32
 private const val COOLDOWN_DOUBLINGS = 10
 
-/** A half-open probe that never settles would wedge a host open forever; this is the backstop. */
-private const val PROBE_LEASE_MS = 30_000L
-
 /**
  * A real per-host breaker: failure counting, a threshold, a half-open single probe, exponential
  * backoff, and a deadline measured on the caller's **monotonic** clock.
@@ -75,7 +72,10 @@ class Breaker(
                 BreakerState.HALF_OPEN -> return false
                 BreakerState.OPEN -> {
                     if (nowMs < s.openUntilMs) return false
-                    if (nowMs < s.openUntilMs + PROBE_LEASE_MS) return false
+                    // The deadline reached is the only way out of OPEN. An earlier version also
+                    // required `nowMs >= openUntilMs + PROBE_LEASE_MS`, which no clock ever
+                    // satisfies before the *next* trip pushes the deadline out again — so an OPEN
+                    // breaker was permanent and a single 5xx host could never be retried.
                     if (snap.compareAndSet(s, s.copy(state = BreakerState.HALF_OPEN))) return true
                 }
             }
@@ -129,12 +129,22 @@ class Breaker(
         while (true) {
             val s = snap.load()
             val failures = if (counted) s.failures + 1 else s.failures
-            if (s.state == BreakerState.CLOSED && failures < failureThreshold) {
+            // A health failure has to reach the threshold to open; a rate limit is already a fact
+            // about the account and opens at once. The early return used to be
+            // `state == CLOSED && failures < threshold`, which a rate limit satisfies *forever* —
+            // it never increments `failures` — so a 429 opened nothing and every later request
+            // hit the same host immediately.
+            if (counted && s.state == BreakerState.CLOSED && failures < failureThreshold) {
                 if (snap.compareAndSet(s, s.copy(failures = failures))) return
                 continue
             }
             val cooldown = nextCooldown(s)
-            val wait = maxOf(jitter(cooldown), retryAfterMs ?: 0L).coerceIn(0L, maxCooldownMs)
+            // [maxCooldownMs] bounds the cooldown *we* compute, not the wait the server asked for:
+            // clamping a `Retry-After: 3600` to two minutes means retrying against a server that
+            // said "not for an hour". Honoured literally, it is still bounded where it matters —
+            // `Transfer.breakerWait` defers anything past a few seconds, so the wait costs a queue
+            // re-admission, not an engine slot.
+            val wait = maxOf(jitter(cooldown), retryAfterMs ?: 0L).coerceAtLeast(0L)
             val next =
                 s.copy(
                     state = BreakerState.OPEN,

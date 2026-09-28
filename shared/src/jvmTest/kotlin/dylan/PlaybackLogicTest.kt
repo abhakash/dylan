@@ -243,13 +243,18 @@ class ShuffleOrderTest {
     @Test
     fun anEditThatGrowsTheQueueRebuildsTheOrderAroundTheAnchor() {
         val queue = listOf(song("a"), song("b"), song("c"))
-        val base = PlayerState().withQueueMutation(queue = queue.toPersistentList(), index = 1, current = queue[1], shuffleOn = true)
+        val base =
+            PlayerState().withQueueMutation(
+                queue = queue.toPersistentList(),
+                index = 1,
+                current = queue[1],
+                shuffleOn = true,
+            )
         val grown =
             base.withQueueMutation(
                 queue = (queue + song("z")).toPersistentList(),
                 index = 1,
                 current = base.current,
-                remap = true,
             )
         assertEquals(1, grown.shuffleOrder?.first(), "the item the user is on keeps playing first")
         assertEquals(listOf(0, 1, 2, 3), grown.shuffleOrder?.sorted())

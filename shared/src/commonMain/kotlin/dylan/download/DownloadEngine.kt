@@ -39,7 +39,6 @@ import okio.Path
 import kotlin.concurrent.atomics.AtomicBoolean
 import kotlin.concurrent.atomics.AtomicReference
 import kotlin.math.max
-import kotlin.time.TimeSource
 
 /** Size verdicts, split so the two-sided band is only consulted when the origin declared nothing. */
 internal enum class SizeVerdict { Exact, Short, Oversize, BandOk, BandLow, BandHigh }
@@ -177,12 +176,25 @@ class DownloadEngine(
             log.c("dl", "engine job crashed: ${t.message ?: t::class.simpleName}")
             dylan.util.logErr("dylan-engine: ${t.message ?: t::class.simpleName}")
         }
-    private var scope: CoroutineScope = CoroutineScope(SupervisorJob() + disp.io + engineFailure)
+
+    // The scope *is* the IO lane, so the workers' `assertInContext(Lane.IO)` holds by construction
+    // rather than by remembering to write `disp.on(Lane.IO)` at each launch. It used to carry the
+    // bare `disp.io`, which scheduled them on the io dispatcher but published no lane.
+    private var scope: CoroutineScope = CoroutineScope(SupervisorJob() + disp.on(Lane.IO) + engineFailure)
 
     private val clock: Clock = cfg.clock
     private val wake = Channel<Unit>(Channel.CONFLATED)
     private val queue = JobQueue(QUEUE_CAPACITY)
-    private val gate = TransferGate(minOf(WORKER_COUNT, cfg.maxConcurrentParts.coerceAtLeast(1)))
+
+    /**
+     * The bounded resource is the byte copy, so the gate is the parts budget and nothing else.
+     * It used to be `minOf(WORKER_COUNT, maxConcurrentParts)`, which with the shipped defaults is
+     * `minOf(2, 3)` = 2 — exactly the worker count, so a two-permit gate in front of two workers
+     * bounded nothing while two comments claimed it reserved "one in flight and one queued". That
+     * reservation is [WORKER_COUNT]; this is the concurrency of open response bodies, and with
+     * `maxConcurrentParts = 1` it is the only thing that stops two workers copying at once.
+     */
+    private val gate = TransferGate(cfg.maxConcurrentParts.coerceAtLeast(1))
     private val started = AtomicBoolean(false)
     private val parts = PartStore(db, fs, paths, cfg, disp, log)
     private val library = LibraryCommitter(db, disp, log)
@@ -195,7 +207,7 @@ class DownloadEngine(
             gate = gate,
             clock = clock,
             log = log,
-            publishProgress = { key, pct -> progress.update { it + (key to pct) } },
+            publishProgress = { key, pct -> progress.update { bounded(it + (key to pct), PROGRESS_RETENTION) } },
             defer = { job, delayMs -> requeueLater(job, delayMs) },
         )
 
@@ -204,6 +216,9 @@ class DownloadEngine(
 
     /** Coroutine handles of the jobs in flight, so a preemption can cancel the right one. */
     private val handles = AtomicReference<Map<SongKey, Job>>(emptyMap())
+
+    /** At most one part sweep in flight, however many enqueues arrive. */
+    private val sweepPending = AtomicBoolean(false)
 
     val states = MutableStateFlow<Map<SongKey, JobState>>(emptyMap())
     val progress = MutableStateFlow<Map<SongKey, Int>>(emptyMap())
@@ -220,7 +235,7 @@ class DownloadEngine(
 
     fun start() {
         if (!scope.isActive) {
-            scope = CoroutineScope(SupervisorJob() + disp.io + engineFailure)
+            scope = CoroutineScope(SupervisorJob() + disp.on(Lane.IO) + engineFailure)
         }
         if (!started.compareAndSet(false, true)) return
         parts.loadFromDisk()
@@ -254,21 +269,45 @@ class DownloadEngine(
             EnqueueResult.Dropped ->
                 log.w("dl", "enqueue dropped (queue full) ${job.label} prio=${job.reason}")
         }
-        // The part sweep is fire-and-forget: it is gated and incremental, so an enqueue never blocks
-        // the caller's lane on a directory walk.
-        scope.launch { enforcePartCap() }
+        // The part sweep is fire-and-forget, and *coalesced*: one enqueue used to launch one
+        // coroutine, so a 5 000-row enqueue burst queued 5 000 suspended coroutines that all woke
+        // and did the same gated work. One sweep at a time, and a burst asks for one more after it.
+        if (sweepPending.compareAndSet(false, true)) {
+            scope.launch { sweepParts() }
+        }
         return result
     }
 
-    /** Cancel every attempt for [key], running or queued. */
+    private suspend fun sweepParts() {
+        try {
+            enforcePartCap()
+        } finally {
+            sweepPending.store(false)
+        }
+    }
+
+    /**
+     * Cancel every attempt for [key], running or queued, and report the cancellation.
+     *
+     * This is *not* a preemption, so it deliberately does not mark the attempt displaced: a
+     * displaced attempt goes back on the queue with its `.part` and its budget, which is right when
+     * a better-priority job took its slot and wrong when the user skipped the track — that
+     * combination re-queued the abandoned download *and* published `Cancelled` for it, so the
+     * abandoned job ran again and overwrote the cancellation. Playback's generation change cancels;
+     * [EnqueueResult.Preempted] requeues.
+     */
     fun cancel(
         key: SongKey,
         keepPart: Boolean,
     ) {
+        // A stopped engine has no live attempt to cancel, so it has nothing to report. Publishing
+        // `Cancelled` from a stopped engine is not merely noise: it is indistinguishable from a real
+        // cancellation, and `stop()`/`start()` is the one window where a caller can observe it.
+        if (!started.load()) return
         val target = queue.remove(key) ?: queue.ownerOf(key)
-        target?.let { markPreempted(preempted, it.id) }
         target?.let { cancelWorker(it.key) }
         states.update { it + (key to JobState.Cancelled) }
+        attemptStates.update { m -> target?.let { m + (it.id to JobState.Cancelled) } ?: m }
         progress.update { it - key }
         if (!keepPart) scope.launch { parts.deleteParts(key) }
     }
@@ -276,16 +315,18 @@ class DownloadEngine(
     /**
      * Cancel exactly the attempt [id] names. This is what a generation change in playback wants: it
      * knows the id it was handed and must be able to abandon that attempt without touching a newer
-     * one for the same song.
+     * one for the same song. The attempt settles as [JobState.Cancelled] — see [cancel] for why it
+     * is not a preemption.
      */
     fun cancelAttempt(
         id: JobId,
         keepPart: Boolean,
     ) {
+        if (!started.load()) return
         val job = queue.byId(id) ?: return
         queue.remove(job.key)
-        markPreempted(preempted, job.id)
         cancelWorker(job.key)
+        attemptStates.update { it + (id to JobState.Cancelled) }
         if (!keepPart) scope.launch { parts.deleteParts(job.key) }
     }
 
@@ -318,7 +359,7 @@ class DownloadEngine(
     // ---- workers ---------------------------------------------------------------------------
 
     private suspend fun worker(index: Int) {
-        disp.assert(Lane.IO)
+        disp.assertInContext(Lane.IO)
         while (true) {
             val job = queue.claimNext()
             if (job == null) {
@@ -345,7 +386,7 @@ class DownloadEngine(
         if (wake.trySend(Unit).isFailure) log.w("dl", "wake channel closed, workers may stall")
     }
 
-        private fun cancelWorker(key: SongKey) {
+    private fun cancelWorker(key: SongKey) {
         handles.load()[key]?.cancel(PreemptSignal())
     }
 
@@ -364,7 +405,7 @@ class DownloadEngine(
     // ---- the job ---------------------------------------------------------------------------
 
     private suspend fun runJob(job: DownloadJob) {
-        disp.assert(Lane.IO)
+        disp.assertInContext(Lane.IO)
         val key = job.key
         val t0 = clock.nowMs()
         log.d("dl", "exec ${job.label} attempt=${job.attempts}")
@@ -392,7 +433,7 @@ class DownloadEngine(
                     Step.HYDRATE -> {
                         publish(key, JobState.Queued)
                         val row =
-                            withContext(disp.dbLane) {
+                            withContext(disp.on(Lane.DB)) {
                                 db.dylanQueries.selectSong(key.provider, key.songId).executeAsOneOrNull()
                             }
                         songRow = row
@@ -411,7 +452,7 @@ class DownloadEngine(
                         // A cached entry at or above the wanted bitrate IS the deliverable:
                         // re-fetching burns bandwidth, and on metered it spends cellular.
                         val entry =
-                            withContext(disp.dbLane) {
+                            withContext(disp.on(Lane.DB)) {
                                 db.dylanQueries.selectCached(key.provider, key.songId).executeAsOneOrNull()
                             }
                         val metered = netClass() == NetClass.METERED
@@ -465,14 +506,19 @@ class DownloadEngine(
                         val outcome = transfer.run(job, origin, parts.partOf(key, quality.bits), live, ctx, contentType)
                         contentType = outcome.contentType ?: contentType
                         rangeRestarts = outcome.rangeRestarts
+                        // Read the counter off the outcome *before* it is overwritten: the backoff is
+                        // the attempt number the transfer just settled on, and the old code read it
+                        // as `outcome.attempts - attempts` after the assignment below, which is zero
+                        // by construction — so every retry re-issued instantly under a comment that
+                        // claimed a backoff.
                         attempts = outcome.attempts
                         when (outcome) {
                             is TransferResult.Done -> step = Step.VERIFY
                             is TransferResult.Retry -> {
-                                // Linear, deterministic, bounded: the breaker owns the backoff shape
-                                // for a sick host, this only spaces out an immediate retry.
-                                val spent = outcome.attempts - attempts
-                                if (spent > 0) delay(cfg.dlBackoffBaseMs * spent)
+                                // Linear in the cumulative attempt count, so the n-th re-issue waits
+                                // n × base; `cfg.dlRetries` is what bounds it. The breaker owns the
+                                // backoff shape for a sick host, this only spaces out a re-issue.
+                                if (attempts > 0) delay(cfg.dlBackoffBaseMs * attempts)
                                 step = if (outcome.reResolve) Step.RESOLVE else Step.REQUEST
                             }
                             is TransferResult.Defer -> {
@@ -492,8 +538,12 @@ class DownloadEngine(
                         val (lo, hi) = sizeBand(estimateBytes(songRow, quality))
                         val verdict = sizeVerdict(finalSize, bp.totalBytes, lo, hi)
                         if (verdict != SizeVerdict.Exact && verdict != SizeVerdict.BandOk) {
+                            // A size mismatch spends an attempt like any other retry: the body has to
+                            // be fetched again. `attempts = attempts` incremented nothing, so
+                            // `attempts + 1 > cfg.dlRetries` never advanced and this loop was
+                            // unbounded.
                             step = onSizeMismatch(verdict, part, live, key, job, attempts)
-                            attempts = attempts
+                            attempts++
                             if (step == Step.VERIFY) {
                                 return fail(key, job, DylanFailure(ErrorCode.CORRUPT_SIZE, key), job.id)
                             }
@@ -510,7 +560,7 @@ class DownloadEngine(
                             val code = if (claimed) ErrorCode.CORRUPT_CONTAINER else ErrorCode.UNSUPPORTED
                             return fail(key, job, DylanFailure(code, key), job.id)
                         }
-                        ext = container.name.lowercase()
+                        ext = container.ext
                         step = Step.COMMIT
                     }
 
@@ -535,8 +585,6 @@ class DownloadEngine(
             fail(key, job, DylanFailure(ErrorCode.NETWORK, key, what), job.id)
         } finally {
             parts.persist(key, live.load())
-            cacheManager.inFlightJobKeys.update { it - key }
-            cacheManager.upgradeSourceKeys.update { it - key }
         }
     }
 
@@ -591,7 +639,8 @@ class DownloadEngine(
         val finalPath = paths.final(key, quality.bits, ext)
         val finalSize = fileSize(fs, part)
         val now = clock.nowMs()
-        val favorited = withContext(disp.dbLane) { db.dylanQueries.isFavorite(key.provider, key.songId).executeAsOne() }
+        val favorited =
+            withContext(disp.on(Lane.DB)) { db.dylanQueries.isFavorite(key.provider, key.songId).executeAsOne() }
         val prev = library.previousRow(key)
         if (prev?.isSameArtifact(quality.bits, ext, finalSize) == true) {
             if (!renamePart(part.toString(), finalPath.toString(), log)) {
@@ -628,8 +677,11 @@ class DownloadEngine(
         attempt: JobId,
     ) {
         progress.update { it - key }
-        publishTerminal(key, state, attempt)
+        // Drop the reconciler's record *before* the terminal state is published. A `Done` that still
+        // has an intent row is a download the reconciler will re-enqueue on the next boot, and a
+        // waiter woken by the state saw exactly that for as long as the write took.
         dropIntent(key)
+        publishTerminal(key, state, attempt)
     }
 
     private suspend fun fail(
@@ -645,8 +697,8 @@ class DownloadEngine(
         // deleting the only resumable bytes made recovery impossible (DL-2/DL-6).
         if (err.code in NON_RESUMABLE_CODES) parts.deleteParts(key)
         progress.update { it - key }
-        publishTerminal(key, state = JobState.Failed(err, willRetry = false), attempt = attempt)
         dropIntent(key)
+        publishTerminal(key, state = JobState.Failed(err, willRetry = false), attempt = attempt)
     }
 
     /**
@@ -672,6 +724,17 @@ class DownloadEngine(
         state: JobState,
         attempt: JobId,
     ) {
+        // Release the guards *before* the state is published. A waiter woken by the terminal state
+        // must not still see this attempt as in flight: the `finally` that used to do it ran after
+        // the publish, so `upgradeSourceKeys` held the source file of a completed upgrade for an
+        // unbounded moment and a caller could not trust the guard it had just been told was over.
+        cacheManager.inFlightJobKeys.update { it - key }
+        cacheManager.upgradeSourceKeys.update { it - key }
+        // And release the key. The worker released it in its own `finally`, which runs *after* this
+        // publish, so an immediate retry of a just-failed key found the key still owned and was
+        // silently answered `SupersededByHigherPriority` — the "a failed track can never be retried"
+        // class, one microtask wide.
+        queue.release(key)
         publish(key, state)
         attemptStates.update { bounded(it - attempt + (attempt to state), TERMINAL_RETENTION) }
     }
@@ -688,6 +751,16 @@ class DownloadEngine(
         const val MIN_REQUEUE_DELAY_MS = 250L
         const val DEFAULT_EXT = "m4a"
         const val TERMINAL_RETENTION = 128
+
+        /**
+         * The progress map is keyed by song and its entries are removed on a terminal state, so in
+         * steady state it holds one entry per *active* download. The retention is the backstop for
+         * the case that removal misses — a preemption, a `stop()` mid-transfer — because
+         * `MutableStateFlow.update` copies the whole map and every emission recomposes the UI, so
+         * an unbounded map makes every chunk more expensive than the last. Same bound and same
+         * rationale as [TERMINAL_RETENTION] for the two state maps; they are one policy, not two.
+         */
+        const val PROGRESS_RETENTION = 128
 
         /**
          * Size mismatch is a *symptom*; only the magic sniff is genuinely non-resumable. CORRUPT_SIZE

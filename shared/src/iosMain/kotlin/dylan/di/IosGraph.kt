@@ -27,6 +27,7 @@ import dylan.repo.toSong
 import dylan.search.SaavnSearchChannel
 import dylan.util.AppDispatchers
 import dylan.util.IosNetMonitor
+import dylan.util.Lane
 import io.ktor.client.engine.darwin.Darwin
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -50,8 +51,9 @@ data class CachedSongInfo(
 
 /**
  * Swift-facing surface over [SaavnSearchChannel] (§6.4): fire-and-forget demand + render-on-arrival.
- * The channel's `suggestions` StateFlow carries an unexported Pair type, so this bridge delivers
- * a plain (query, items) closure instead — same conflate/flowOn/Main.immediate pipeline via FlowAdapter.
+ * The channel's `suggestions` StateFlow carries an [Answer], whose [Answer.epoch] is meaningless to
+ * Swift, so this bridge delivers a plain (query, items) closure instead — same conflate, no
+ * `flowOn`, main-lane delivery via [FlowAdapter].
  */
 class IosSearchBridge internal constructor(
     private val channel: SaavnSearchChannel,
@@ -72,7 +74,7 @@ class IosSearchBridge internal constructor(
 
     /** Latest answered query with its suggestions; empty pair until the first answer lands. */
     fun subscribeSuggestions(onEach: (String, List<MiniEntity>) -> Unit): KotlinSubscription =
-        FlowAdapter(channel.suggestions.map { it ?: ("" to emptyList()) }, scope, lanes)
+        FlowAdapter(channel.suggestions.map { a -> (a?.query ?: "") to (a?.items ?: emptyList()) }, scope, lanes)
             .subscribe(onEach = { p -> onEach(p.first, p.second) })
 }
 
@@ -90,8 +92,9 @@ class IosSearchBridge internal constructor(
  * concrete-closure subscriptions and helpers below — the §9.11 "concrete adapters" decision applied
  * at graph level. [queueAsList]/[shuffleOrderAsList] exist because PersistentList does not bridge to
  * Swift collections (R4-F14).
+ *
+ * A flat Swift-facing facade by design: the threshold counts the Swift API surface, not logic.
  */
-// A flat Swift-facing facade by design: the threshold counts the Swift API surface, not logic.
 @Suppress("TooManyFunctions")
 class IosGraph private constructor(
     val cfg: AppConfig,
@@ -237,7 +240,7 @@ class IosGraph private constructor(
     }
 
     suspend fun cachedStats(): CacheStats =
-        withContext(disp.dbLane) {
+        withContext(disp.on(Lane.DB)) {
             val r =
                 container.db.dylanQueries
                     .cachedCountAndBytes()
@@ -246,7 +249,7 @@ class IosGraph private constructor(
         }
 
     suspend fun libraryDownloads(): List<CachedSongInfo> =
-        withContext(disp.dbLane) {
+        withContext(disp.on(Lane.DB)) {
             container.db.dylanQueries.selectAllCached().executeAsList().mapNotNull { row ->
                 val s =
                     container.db.dylanQueries
@@ -282,7 +285,7 @@ class IosGraph private constructor(
 
     /** Now-Playing quality chip: real cached bitrate of the current key; 0 when uncached. */
     suspend fun cachedBitrateOf(key: SongKey): Int =
-        withContext(disp.dbLane) {
+        withContext(disp.on(Lane.DB)) {
             container.db.dylanQueries
                 .selectCached(key.provider, key.songId)
                 .executeAsOneOrNull()
@@ -293,12 +296,12 @@ class IosGraph private constructor(
     /** Library > Downloads swipe-remove: drop the cached row + its file; favorites/pins untouched. */
     suspend fun removeDownload(key: SongKey) {
         val row =
-            withContext(disp.dbLane) {
+            withContext(disp.on(Lane.DB)) {
                 container.db.dylanQueries
                     .selectCached(key.provider, key.songId)
                     .executeAsOneOrNull()
             }
-        withContext(disp.dbLane) { container.db.dylanQueries.deleteCached(key.provider, key.songId) }
+        withContext(disp.on(Lane.DB)) { container.db.dylanQueries.deleteCached(key.provider, key.songId) }
         if (row != null) {
             val f = container.paths.final(key, row.bitrate.toInt(), row.ext)
             runCatching { container.fs.delete(f) }
@@ -351,7 +354,7 @@ class IosGraph private constructor(
                             disp = disp,
                             scope = sharedScope,
                             baseDir = baseDir,
-                            driverFactory = DriverFactory(baseDir, log),
+                            driverFactory = DriverFactory(log),
                             netMonitor = net,
                             httpEngine = Darwin.create(),
                             engineFactory = {

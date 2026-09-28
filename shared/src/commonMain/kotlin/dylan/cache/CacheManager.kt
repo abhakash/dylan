@@ -1,6 +1,7 @@
 package dylan.cache
 
 import dylan.config.AppConfig
+import dylan.db.ClaimAllUnprotected
 import dylan.db.Dylan
 import dylan.model.Song
 import dylan.model.SongKey
@@ -112,7 +113,7 @@ class CacheManager(
         netNewBytes: Long = 0,
         pendingRows: Int = 0,
         exemptKeys: Set<SongKey> = emptySet(),
-    ) = withContext(disp.io) {
+    ) = withContext(disp.on(Lane.IO)) {
         disp.assertInContext(Lane.IO)
         check(pendingRows >= 0) { "pendingRows must not be negative" }
         val demoted = demotePins()
@@ -131,10 +132,10 @@ class CacheManager(
 
     /** Tapping "clear cache" then hitting play must not delete the file that just became current. */
     suspend fun clearCacheExcludingProtected(): Long =
-        withContext(disp.io) {
+        withContext(disp.on(Lane.IO)) {
             disp.assertInContext(Lane.IO)
             val doomed =
-                withContext(disp.dbLane) {
+                withContext(disp.on(Lane.DB)) {
                     db.transactionWithResult { db.dylanQueries.claimAllUnprotected().executeAsList() }
                 }.map { it.toClaim() }
             if (doomed.isEmpty()) return@withContext 0L
@@ -156,10 +157,10 @@ class CacheManager(
      * cannot delete the file it is currently playing.
      */
     suspend fun evictOne(key: SongKey): Boolean =
-        withContext(disp.io) {
+        withContext(disp.on(Lane.IO)) {
             disp.assertInContext(Lane.IO)
             val claimed =
-                withContext(disp.dbLane) {
+                withContext(disp.on(Lane.DB)) {
                     db.transactionWithResult {
                         publishProtection(emptySet())
                         db.dylanQueries.claimOne(key.provider, key.songId).executeAsList()
@@ -179,7 +180,7 @@ class CacheManager(
     suspend fun touch(
         key: SongKey,
         nowMs: Long,
-    ) = withContext(disp.dbLane) {
+    ) = withContext(disp.on(Lane.DB)) {
         db.dylanQueries.touchUsed(nowMs, key.provider, key.songId)
     }
 
@@ -188,23 +189,23 @@ class CacheManager(
      * is walked for part bytes: v0 walked it on every single budget check.
      */
     suspend fun refreshPartTotals() =
-        withContext(disp.io) {
+        withContext(disp.on(Lane.IO)) {
             val sizes =
                 runCatching { fs.list(paths.audioDir) }
                     .getOrDefault(emptyList<Path>())
                     .filter { CachePath.isPart(it.name) }
                     .mapNotNull { p -> fs.metadataOrNull(p)?.size }
-            withContext(disp.dbLane) { db.dylanQueries.setPartTotals(sizes.sum(), sizes.size.toLong()) }
+            withContext(disp.on(Lane.DB)) { db.dylanQueries.setPartTotals(sizes.sum(), sizes.size.toLong()) }
         }
 
     /** For a caller that already tracks its own parts (the download engine): O(1), no directory walk. */
     suspend fun setPartTotals(
         bytes: Long,
         count: Int,
-    ) = withContext(disp.dbLane) { db.dylanQueries.setPartTotals(bytes, count.toLong()) }
+    ) = withContext(disp.on(Lane.DB)) { db.dylanQueries.setPartTotals(bytes, count.toLong()) }
 
     /** Recomputes the materialised totals from the rows themselves. Boot-sweep self-heal. */
-    suspend fun syncTotals() = withContext(disp.dbLane) { db.dylanQueries.syncTotals() }
+    suspend fun syncTotals() = withContext(disp.on(Lane.DB)) { db.dylanQueries.syncTotals() }
 
     /**
      * Crash recovery for the EVICTING half of the state machine: a process death between the claim
@@ -213,9 +214,9 @@ class CacheManager(
      * Idempotent, so a second call is a no-op.
      */
     suspend fun reapEvicting(limit: Int = REAP_BATCH): Int =
-        withContext(disp.io) {
+        withContext(disp.on(Lane.IO)) {
             val stale =
-                withContext(disp.dbLane) { db.dylanQueries.evictingObjects().executeAsList() }
+                withContext(disp.on(Lane.DB)) { db.dylanQueries.evictingObjects().executeAsList() }
                     .take(limit)
                     .map { it.toClaim() }
             if (stale.isEmpty()) return@withContext 0
@@ -242,10 +243,10 @@ class CacheManager(
     ): List<Claim> {
         val out = mutableListOf<Claim>()
         while (true) {
-            val totals = withContext(disp.dbLane) { db.dylanQueries.cachedCountAndBytes().executeAsOne() }
+            val totals = withContext(disp.on(Lane.DB)) { db.dylanQueries.cachedCountAndBytes().executeAsOne() }
             val rowCount = totals.song_count
             val byteCount = totals.total_bytes
-            val partBytes = withContext(disp.dbLane) { db.dylanQueries.partTotals().executeAsOne() }
+            val partBytes = withContext(disp.on(Lane.DB)) { db.dylanQueries.partTotals().executeAsOne() }
             val usage = byteCount + partBytes.part_bytes + netNewBytes
             val rows = rowCount + pendingRows
             val overRows = rows - fileBudget
@@ -266,7 +267,7 @@ class CacheManager(
     ): List<Claim> {
         val mean = if (rowCount > 0) (byteCount / rowCount).coerceAtLeast(1L) else 1L
         val need = maxOf(overRows, ceilDiv(overBytes, mean)).coerceIn(1L, EVICT_BATCH.toLong())
-        return withContext(disp.dbLane) {
+        return withContext(disp.on(Lane.DB)) {
             db.transactionWithResult {
                 publishProtection(exempt)
                 db.dylanQueries.lruVictims(need).executeAsList()
@@ -286,7 +287,7 @@ class CacheManager(
         var demoted = 0
         while (true) {
             val (pinnedCount, pinnedBytes) =
-                withContext(disp.dbLane) {
+                withContext(disp.on(Lane.DB)) {
                     db.dylanQueries.pinnedCount().executeAsOne() to db.dylanQueries.pinnedBytes().executeAsOne()
                 }
             if (pinnedCount <= pinnedRowBudget && pinnedBytes <= pinnedByteBudget) return demoted
@@ -295,14 +296,14 @@ class CacheManager(
                 return demoted
             }
             val victims =
-                withContext(disp.dbLane) {
+                withContext(disp.on(Lane.DB)) {
                     db.transactionWithResult {
                         publishProtection(emptySet())
                         db.dylanQueries.oldestPinned(1L).executeAsList()
                     }
                 }
             if (victims.isEmpty()) return demoted
-            withContext(disp.dbLane) { db.dylanQueries.demotePin(victims[0].provider, victims[0].song_id) }
+            withContext(disp.on(Lane.DB)) { db.dylanQueries.demotePin(victims[0].provider, victims[0].song_id) }
             demoted++
         }
     }
@@ -328,7 +329,7 @@ class CacheManager(
         failed: List<Claim>,
     ) {
         if (unlinked.isEmpty() && failed.isEmpty()) return
-        withContext(disp.dbLane) {
+        withContext(disp.on(Lane.DB)) {
             db.transaction {
                 unlinked.forEach { drop(it) }
                 failed.forEach { db.dylanQueries.restoreObject(it.key.provider, it.key.songId, it.bits(), it.ext) }
@@ -346,7 +347,8 @@ class CacheManager(
     private fun Claim.bits(): Long = bitrate.toLong()
 
     private fun liveProtection(exempt: Set<SongKey>): Set<SongKey> {
-        return protectedKeys.value + inFlightJobKeys.value + upgradeSourceKeys.value + exempt
+        val published = protectedKeys.value
+        return published + inFlightJobKeys.value + upgradeSourceKeys.value + exempt
     }
 
     /**
@@ -363,7 +365,7 @@ class CacheManager(
 
     private suspend fun readDownloads(): List<DownloadEntry> {
         val protection = liveProtection(emptySet())
-        return withContext(disp.dbLane) {
+        return withContext(disp.on(Lane.DB)) {
             db.dylanQueries
                 .selectDownloads()
                 .executeAsList()
@@ -428,10 +430,6 @@ private fun dylan.db.Media_objects.toClaim(): Claim = Claim(SongKey(provider, so
 
 private fun dylan.db.LruVictims.toClaim(): Claim = Claim(SongKey(provider, song_id), bitrate.toInt(), ext, bytes)
 
-private fun dylan.db.ClaimAllUnprotected.toClaim(): Claim {
-    return Claim(SongKey(provider, song_id), bitrate.toInt(), ext, bytes)
-}
+private fun ClaimAllUnprotected.toClaim(): Claim = Claim(SongKey(provider, song_id), bitrate.toInt(), ext, bytes)
 
-private fun dylan.db.ClaimOne.toClaim(): Claim {
-    return Claim(SongKey(provider, song_id), bitrate.toInt(), ext, bytes)
-}
+private fun dylan.db.ClaimOne.toClaim(): Claim = Claim(SongKey(provider, song_id), bitrate.toInt(), ext, bytes)

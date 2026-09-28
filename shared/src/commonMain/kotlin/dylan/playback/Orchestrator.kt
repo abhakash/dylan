@@ -7,6 +7,7 @@ import dylan.db.Dylan
 import dylan.db.Songs
 import dylan.download.DownloadEngine
 import dylan.download.DownloadJob
+import dylan.download.EnqueueResult
 import dylan.download.JobState
 import dylan.download.Priority
 import dylan.model.DylanFailure
@@ -56,7 +57,7 @@ import kotlin.time.TimeSource
  * and then suspends, so there is no window in which a second message can interleave between a
  * read and the write derived from it.
  *
- * Suspension still happens — inside `withContext(disp.dbLane)` / `withContext(disp.io)` blocks that
+ * Suspension still happens — inside `withContext(disp.on(Lane.DB))` / `withContext(disp.on(Lane.IO))` blocks that
  * return *values* the reducer then applies. What is forbidden, and absent, is a `suspend` between
  * a state read and the state write that consumes it.
  */
@@ -71,13 +72,6 @@ class Orchestrator(
     private val cacheManager: CacheManager,
     private val settings: SettingsStore,
     private val net: NetMonitor,
-    /**
-     * Not written from here. `AppContainer.publishProtectedKeys` is the single writer of the
-     * protected set; the only thing this component does with it is release it in [dispose]. The
-     * deleted second writer published a strict subset of that combine's and raced the eviction
-     * guard `CacheManager` documents.
-     */
-    private val protectedKeys: MutableStateFlow<Set<SongKey>>,
     private val log: dylan.diag.LogBuffer,
 ) {
     private val clock = cfg.clock
@@ -114,7 +108,7 @@ class Orchestrator(
     private var resumeAppliedGen: Long = -1L
     private var snapshotFingerprint: Long = Long.MIN_VALUE
     private val navMark = TimeSource.Monotonic.markNow()
-    private var lastNavAt: Duration = Duration.INFINITE
+    private var lastNavAt: Duration? = null
     private val transientFailCounts = mutableMapOf<SongKey, Int>()
 
     /** `key -> queue slot`, rebuilt with the queue. Makes an engine itemId a hash lookup. */
@@ -141,13 +135,6 @@ class Orchestrator(
         const val LISTENED_MS = 30_000L
         const val HISTORY_WINDOW_MS = 30 * 60_000L
         const val PREFETCH_AT_PERCENT = 95
-
-        /**
-         * A terminal `JobState` for a key can predate the enqueue being awaited: `states` is a
-         * `StateFlow`, so a late subscriber is handed the previous attempt's `Failed` and would
-         * report it for a job that has not run yet.
-         */
-        const val FRESH_TERMINAL_MS = 2_000L
 
         /** `SQLITE_MAX_VARIABLE_NUMBER` is 999 on Android; stay well under it. */
         const val DB_IN_CHUNK = 400
@@ -225,7 +212,7 @@ class Orchestrator(
         scope.launch(disp.on(Lane.STATE)) { inbox.send(Msg.Restore) }
     }
 
-    /** Terminal teardown: no inbox, no collectors, no engine, nothing left protected. */
+    /** Terminal teardown: no inbox, no collectors, no engine. */
     fun dispose() {
         scope.launch(disp.on(Lane.STATE)) { guard("dispose") { disposeOnState() } }
     }
@@ -240,7 +227,6 @@ class Orchestrator(
         engine?.release()
         engine = null
         engineFlow.value = null
-        protectedKeys.value = emptySet()
     }
 
     /** After a detach, a stale event advanced the queue with no engine (audit AN-2). */
@@ -278,7 +264,7 @@ class Orchestrator(
     }
 
     private suspend fun process(m: Msg) {
-        disp.assert(Lane.STATE)
+        disp.assertInContext(Lane.STATE)
         when (m) {
             is Msg.I -> handleIntent(m.intent)
             is Msg.E -> handleEvent(m.event)
@@ -371,9 +357,9 @@ class Orchestrator(
             current = i.songs[idx],
             phase = Phase.Resolving(i.songs[idx].key),
             posMs = 0L,
-            remap = false,
+            shuffleOrder = null,
         )
-        prepareJob = scope.launch(disp.state) { guard("ensureReady") { ensureReadyAndPlay(idx, gen) } }
+        prepareJob = scope.launch(disp.on(Lane.STATE)) { guard("ensureReady") { ensureReadyAndPlay(idx, gen) } }
     }
 
     private suspend fun addToQueue(
@@ -385,7 +371,7 @@ class Orchestrator(
         val q = s.queue.toMutableList()
         val at = if (afterCurrent && s.index in -1 until q.size) s.index + 1 else q.size
         q.add(at, song)
-        commitQueue(queue = q.toPersistentList(), remap = true)
+        commitQueue(queue = q.toPersistentList())
         refreshUpNext()
     }
 
@@ -403,8 +389,8 @@ class Orchestrator(
                 queuePos == s.index -> s.index.coerceAtMost(q.size - 1)
                 else -> s.index
             }
-        commitQueue(queue = q.toPersistentList(), index = idx, current = s.current, remap = true)
-        scope.launch(disp.state) { guard("window refresh") { refreshUpNext() } }
+        commitQueue(queue = q.toPersistentList(), index = idx, current = s.current)
+        scope.launch(disp.on(Lane.STATE)) { guard("window refresh") { refreshUpNext() } }
     }
 
     private fun moveWithinQueue(
@@ -423,15 +409,15 @@ class Orchestrator(
                 to < from && s.index in to until from -> s.index + 1
                 else -> s.index
             }
-        commitQueue(queue = q.toPersistentList(), index = idx, remap = true)
-        scope.launch(disp.state) { guard("window refresh") { refreshUpNext() } }
+        commitQueue(queue = q.toPersistentList(), index = idx)
+        scope.launch(disp.on(Lane.STATE)) { guard("window refresh") { refreshUpNext() } }
     }
 
     private fun clearUpNext() {
         val s = _state.value
         if (s.index < 0 || s.index + 1 > s.queue.lastIndex) return
-        commitQueue(queue = s.queue.take(s.index + 1).toPersistentList(), remap = true)
-        scope.launch(disp.state) { guard("window refresh") { refreshUpNext() } }
+        commitQueue(queue = s.queue.take(s.index + 1).toPersistentList())
+        scope.launch(disp.on(Lane.STATE)) { guard("window refresh") { refreshUpNext() } }
     }
 
     private suspend fun setQuality(q: Quality) {
@@ -513,17 +499,15 @@ class Orchestrator(
                 return
             }
             cancelPrepare()
-            if (resolveAdvance(dir) != null) advanceOptimistic(dir) else exhaustedNext()
+            if (resolveAdvance(dir) != null) advanceOptimistic(dir) else exhausted(dir)
             return
         }
         cancelPrepare()
         cancelSettle()
         if (resolveAdvance(dir) != null) {
             advanceOptimistic(dir)
-        } else if (dir > 0) {
-            exhaustedNext()
         } else {
-            toast?.invoke("Start of queue")
+            exhausted(dir)
         }
     }
 
@@ -533,11 +517,16 @@ class Orchestrator(
      * comparison made after `resolveAdvance` had already decided exhaustion in the *order*, which is
      * how a shuffled queue with unplayed slots toasted "End of queue". A single-track queue restarts
      * instead, so Next is never a dead button.
+     *
+     * The message follows the *direction*. The transportable branch used to call the Next-only
+     * version unconditionally, so Previous at the head of a playing queue told the user they had
+     * reached the end.
      */
-    private suspend fun exhaustedNext() {
+    private suspend fun exhausted(dir: Int) {
         val s = _state.value
         when {
             s.queue.isEmpty() -> {}
+            dir < 0 -> toast?.invoke("Start of queue")
             s.index < 0 || s.queue.size == 1 -> advanceToIndex(0)
             else -> toast?.invoke("End of queue")
         }
@@ -552,7 +541,7 @@ class Orchestrator(
         _state.value =
             s.withQueueMutation(index = target, current = song, phase = Phase.Resolving(song.key), posMs = 0L)
         settleJob =
-            scope.launch(disp.state) {
+            scope.launch(disp.on(Lane.STATE)) {
                 delay(cfg.skipSettleMs.toLong())
                 guard("settle advance") { if (gen == playGeneration) ensureReadyAndPlay(target, gen) }
             }
@@ -597,40 +586,59 @@ class Orchestrator(
         gen: Long,
         song: Song,
     ): Boolean {
-        var row = windowPreparer.cachedRow(song.key)
-        if (row != null && windowPreparer.sniffOk(row)) return gen == playGeneration
+        val cached = windowPreparer.cachedRow(song.key)
+        if (cached != null && windowPreparer.sniffOk(cached)) return gen == playGeneration
+        return fetchAndVerify(index, gen, song)
+    }
+
+    /**
+     * Cached-and-playable was false, so the track has to be fetched. Every hop happens here, before
+     * the caller's state write, so the phase transitions are contiguous.
+     */
+    private suspend fun fetchAndVerify(
+        index: Int,
+        gen: Long,
+        song: Song,
+    ): Boolean {
         // Offline fast-path: never spin the 120s download wait without a network.
         if (!net.isOnline()) {
             failWith(DylanFailure(ErrorCode.OFFLINE, song.key), gen)
             return false
         }
         val bits = targetBits()
-        downloads.enqueue(DownloadJob(song.key, Priority.USER_NOW, bits, clock.nowMs()))
+        val attempt = downloads.enqueue(DownloadJob(song.key, Priority.USER_NOW, bits, clock.nowMs()))
         if (gen != playGeneration) return false
         _state.value = _state.value.copy(phase = Phase.Downloading(song.key))
         log.d("play", "downloading gen=$gen idx=$index key=${song.key.provider}:${song.key.songId} bits=$bits")
-        val outcome = awaitTerminal(song.key)
+        val outcome = awaitDownload(song.key, attempt)
         if (gen != playGeneration) return false
-        if (outcome == null) {
-            onPrepareFailed(DylanFailure(ErrorCode.NETWORK_TIMEOUT, song.key), song, index, gen)
-            return false
-        }
         if (outcome !is JobState.Done) {
+            // null = the attempt never settled inside the ceiling; anything else is a reported failure.
+            val timedOut = outcome == null
             val failure = (outcome as? JobState.Failed)?.err ?: DylanFailure(ErrorCode.NETWORK_TIMEOUT, song.key)
-            log.w("play", "ensureReady failed gen=$gen idx=$index code=${failure.code}")
+            if (!timedOut) log.w("play", "ensureReady failed gen=$gen idx=$index code=${failure.code}")
             onPrepareFailed(failure, song, index, gen)
             return false
         }
         transientFailCounts.remove(song.key)
-        row = windowPreparer.cachedRow(song.key)
+        return playableAfterDownload(song, gen)
+    }
+
+    /**
+     * A `Done` is a claim, not a fact: the row can be gone and the file can be unplayable, and both
+     * used to leave the player in `Ready` on a track it could never start — no error, no skip.
+     */
+    private suspend fun playableAfterDownload(
+        song: Song,
+        gen: Long,
+    ): Boolean {
+        val row = windowPreparer.cachedRow(song.key)
         if (row == null) {
             // A Done whose row did not survive; the old shape blamed the file for a cache miss.
             failWith(DylanFailure(ErrorCode.CORRUPT_SIZE, song.key), gen)
             return false
         }
         if (!windowPreparer.sniffOk(row)) {
-            // A Done row whose file is not playable used to build an empty window, so the player
-            // sat in Ready on a track it could never start, with no error and no skip.
             failWith(DylanFailure(ErrorCode.CORRUPT_CONTAINER, song.key), gen)
             return false
         }
@@ -643,7 +651,7 @@ class Orchestrator(
         gen: Long,
         key: SongKey,
     ) {
-        scope.launch(disp.state) {
+        scope.launch(disp.on(Lane.STATE)) {
             delay(cfg.ensureReadyWatchdogMs)
             if (gen != playGeneration) return@launch
             val ph = _state.value.phase
@@ -658,8 +666,26 @@ class Orchestrator(
         return if (metered) cfg.meteredQuality.bits else settings.qualityPref().bits
     }
 
-    private suspend fun awaitTerminal(key: SongKey): JobState? {
-        withTimeoutOrNull(FRESH_TERMINAL_MS) { downloads.states.first { !it[key].isTerminal() } }
+    /**
+     * Wait for the attempt this enqueue produced, not for "some terminal state for this key".
+     *
+     * The key-keyed wait needed a 2 s `FRESH_TERMINAL_MS` guard in front of it: `states` is a
+     * `StateFlow`, so a subscriber that arrives after the download has already finished is handed
+     * the *previous* attempt's `Failed` and reports it for a job that never ran. That guard was a
+     * dead 2 s on every download that finished faster, charged to playback. Awaiting the
+     * [EnqueueResult.Queued] attempt id removes the ambiguity outright, and it also makes a retry
+     * after a preemption waitable — a displaced attempt is not terminal for the key, so the
+     * key-keyed wait could only ever be satisfied by the *new* attempt's state.
+     *
+     * An enqueue that was dropped or superseded never produced an attempt to await, so that case
+     * falls back to the key-keyed wait and reports the same NETWORK_TIMEOUT it always did.
+     */
+    private suspend fun awaitDownload(
+        key: SongKey,
+        admitted: EnqueueResult,
+    ): JobState? {
+        val id = (admitted as? EnqueueResult.Queued)?.id
+        if (id != null) return downloads.awaitAttempt(id, cfg.readyTimeoutMs)
         return withTimeoutOrNull(cfg.readyTimeoutMs) { downloads.states.first { it[key].isTerminal() }[key] }
     }
 
@@ -758,8 +784,7 @@ class Orchestrator(
     private suspend fun refreshUpNext() {
         val e = engine ?: return
         val s = _state.value
-        if (s.phase is Phase.Idle || s.phase is Phase.Error) return
-        val next = s.nextUp ?: return
+        val next = joinableUpNext(s) ?: return
         val gen = playGeneration
         val candidate = trackFor(next, gen, windowPreparer.cachedRows(listOf(next.key)))
         // Never ask the engine to replace a slot with the item it is already playing: on iOS
@@ -773,13 +798,28 @@ class Orchestrator(
         e.replaceUpNext(want)
     }
 
+    /**
+     * The track the up-next slot may hold right now, or null when it may hold nothing.
+     *
+     * Repeat-ONE pins the transport, so `nextUp` *is* the current item. The engine must never be
+     * asked to queue the track it is playing, and comparing [WindowPreparer.currentItemId] cannot see
+     * that on its own: before the engine's first `TrackChanged` there is no current id to compare
+     * against, so the guard silently did nothing for exactly the window in which the first window is
+     * built. Key identity is the check that does not depend on engine bookkeeping.
+     */
+    private fun joinableUpNext(s: PlayerState): Song? {
+        if (s.phase is Phase.Idle || s.phase is Phase.Error) return null
+        val next = s.nextUp ?: return null
+        return if (next.key == s.current?.key) null else next
+    }
+
     private fun syncPendingNext() {
         val s = _state.value
         val next = s.nextUp ?: return
         if (s.phase is Phase.Idle || s.phase is Phase.Error) return
         if (next.key == doneJoinedKey) return
         if (downloads.states.value[next.key] !is JobState.Done) return
-        scope.launch(disp.state) { guard("window join") { refreshUpNext() } }
+        scope.launch(disp.on(Lane.STATE)) { guard("window join") { refreshUpNext() } }
     }
 
     /**
@@ -825,7 +865,6 @@ class Orchestrator(
         shuffleOn: Boolean = _state.value.shuffleOn,
         shuffleOrder: PersistentList<Int>? = _state.value.shuffleOrder,
         repeat: Repeat = _state.value.repeat,
-        remap: Boolean = true,
     ) {
         commit(
             _state.value.withQueueMutation(
@@ -837,7 +876,6 @@ class Orchestrator(
                 shuffleOn = shuffleOn,
                 shuffleOrder = shuffleOrder,
                 repeat = repeat,
-                remap = remap,
             ),
         )
     }
@@ -845,7 +883,12 @@ class Orchestrator(
     private fun slotIndexOf(s: PlayerState): Map<SongKey, Int> {
         if (s.queue.isEmpty()) return emptyMap()
         val out = HashMap<SongKey, Int>()
-        for (i in s.queue.indices.reversed()) out.putIfAbsent(s.queue[i].key, i)
+        // Ascending, keeping the first sighting: a key queued twice maps to its earlier slot, which
+        // is the one the engine can still be holding a window for.
+        for (i in s.queue.indices) {
+            val key = s.queue[i].key
+            if (key !in out) out[key] = i
+        }
         return out
     }
 
@@ -927,13 +970,13 @@ class Orchestrator(
         val s = _state.value
         if (!countedThisSession && s.current != null) {
             val key = s.current.key
-            scope.launch(disp.state) { guard("bump play count") { bumpPlayCount(key) } }
+            scope.launch(disp.on(Lane.STATE)) { guard("bump play count") { bumpPlayCount(key) } }
         }
         // Fallback: some engines report ItemEnded with no TrackChanged or QueueExhausted follow-up.
         val genAtEnd = playGeneration
         val keyAtEnd = s.current?.key ?: return
         if (s.phase !is Phase.Playing) return
-        scope.launch(disp.state) {
+        scope.launch(disp.on(Lane.STATE)) {
             delay(ITEM_ENDED_FALLBACK_MS)
             if (genAtEnd != playGeneration) return@launch
             val cur = _state.value
@@ -970,8 +1013,9 @@ class Orchestrator(
         // uncached track down now so playback continues.
         val song = s.queue[target]
         val gen = bumpGeneration()
-        _state.value = s.withQueueMutation(index = target, current = song, phase = Phase.Resolving(song.key), posMs = 0L)
-        prepareJob = scope.launch(disp.state) { guard("ensureReady") { ensureReadyAndPlay(target, gen) } }
+        _state.value =
+            s.withQueueMutation(index = target, current = song, phase = Phase.Resolving(song.key), posMs = 0L)
+        prepareJob = scope.launch(disp.on(Lane.STATE)) { guard("ensureReady") { ensureReadyAndPlay(target, gen) } }
     }
 
     /**
@@ -993,7 +1037,7 @@ class Orchestrator(
             return
         }
         log.w("play", "resyncFault item=$itemId strike=$resyncStrikes")
-        scope.launch(disp.state) { guard("resync re-prepare") { prepareWindow(_state.value.index) } }
+        scope.launch(disp.on(Lane.STATE)) { guard("resync re-prepare") { prepareWindow(_state.value.index) } }
     }
 
     /**
@@ -1016,11 +1060,11 @@ class Orchestrator(
     private fun onTrackStarted(song: Song) {
         val now = clock.nowMs()
         if (!(lastHistoryKey == song.key && now - lastHistoryAt < HISTORY_WINDOW_MS)) {
-            scope.launch(disp.state) { guard("history") { recordHistory(song, now) } }
+            scope.launch(disp.on(Lane.STATE)) { guard("history") { recordHistory(song, now) } }
             lastHistoryKey = song.key
             lastHistoryAt = now
         }
-        scope.launch(disp.state) { guard("cache touch") { cacheManager.touch(song.key, now) } }
+        scope.launch(disp.on(Lane.STATE)) { guard("cache touch") { cacheManager.touch(song.key, now) } }
         startTicking()
         watchSession(song)
     }
@@ -1029,7 +1073,7 @@ class Orchestrator(
         song: Song,
         now: Long,
     ) {
-        withContext(disp.dbLane) {
+        withContext(disp.on(Lane.DB)) {
             db.transaction {
                 db.dylanQueries.insertHistory(song.key.provider, song.key.songId, now)
                 db.dylanQueries.trimHistory(cfg.historyLimit.toLong())
@@ -1038,7 +1082,7 @@ class Orchestrator(
     }
 
     private suspend fun bumpPlayCount(key: SongKey) {
-        withContext(disp.dbLane) { db.dylanQueries.bumpPlayCount(key.provider, key.songId) }
+        withContext(disp.on(Lane.DB)) { db.dylanQueries.bumpPlayCount(key.provider, key.songId) }
     }
 
     private fun watchSession(song: Song) {
@@ -1072,7 +1116,7 @@ class Orchestrator(
 
     private fun prefetchHook() {
         if (!cfg.prefetchEnabled) return
-        scope.launch(disp.state) {
+        scope.launch(disp.on(Lane.STATE)) {
             guard("prefetch") {
                 val s = _state.value
                 val next = s.nextUp ?: return@guard
@@ -1099,13 +1143,13 @@ class Orchestrator(
     // ── resume artifact ────────────────────────────────────────────────────────────────────
 
     private fun saveSnapshotAsync(force: Boolean = false) {
-        scope.launch(disp.state) { guard("snapshot write") { saveSnapshot(force) } }
+        scope.launch(disp.on(Lane.STATE)) { guard("snapshot write") { saveSnapshot(force) } }
     }
 
     private fun startTicking() {
         snapshotJob?.cancel()
         snapshotJob =
-            scope.launch(disp.state) {
+            scope.launch(disp.on(Lane.STATE)) {
                 while (currentCoroutineContext().isActive) {
                     delay(cfg.snapshotIntervalMs)
                     if (!currentCoroutineContext().isActive) return@launch
@@ -1178,19 +1222,33 @@ class Orchestrator(
      * [AppConfig.resumeMaxAgeMs] describes a track the user had already paused, not one that was
      * playing when the process died.
      */
-    private fun freshPosition(snap: ResumeSnapshot): Boolean =
-        snap.playedAtMs <= 0L || clock.nowMs() - snap.playedAtMs <= cfg.resumeMaxAgeMs
+    private fun freshPosition(snap: ResumeSnapshot): Boolean {
+        val age = clock.nowMs() - snap.playedAtMs
+        return snap.playedAtMs <= 0L || age <= cfg.resumeMaxAgeMs
+    }
 
-    /** One batched pass per chunk plus one `HashMap`; the old shape was O(n²) with 2 allocations per compare. */
+    /**
+     * One batched pass, one `HashSet`, one `HashMap`: `ceil(n / DB_IN_CHUNK)` `dbLane` round-trips
+     * and O(n) work.
+     *
+     * The old shape was O(n·m) — one `dbLane` hop per item, and a `key in keys` linear scan of a
+     * `List<SongKey>` for every returned row. The membership test is a set lookup here; nothing in
+     * this function scales with the square of the queue any more.
+     */
     private suspend fun loadSongs(keys: List<SongKey>): Map<SongKey, Song> {
         if (keys.isEmpty()) return emptyMap()
         val out = HashMap<SongKey, Song>(keys.size)
-        withContext(disp.dbLane) {
-            for (chunk in keys.map { it.songId }.distinct().chunked(DB_IN_CHUNK)) {
+        val wanted = HashSet(keys)
+        withContext(disp.on(Lane.DB)) {
+            for (chunk in keys
+                .asSequence()
+                .map { it.songId }
+                .distinct()
+                .chunked(DB_IN_CHUNK)) {
                 if (chunk.isEmpty()) continue
                 for (row in db.dylanQueries.selectSongsByIds(chunk).executeAsList()) {
                     val key = SongKey(row.provider, row.song_id)
-                    if (key in keys) out[key] = toSong(row)
+                    if (key in wanted) out[key] = toSong(row)
                 }
             }
         }
@@ -1201,10 +1259,19 @@ class Orchestrator(
 
     private fun transportable(p: Phase) = QueueStateMachine.transportable(p)
 
-    /** Monotonic: a wall-clock correction must not permanently permit or permanently block navigation. */
+    /**
+     * Monotonic: a wall-clock correction must not permanently permit or permanently block navigation.
+     *
+     * The "no previous tap" state is `null`, not `Duration.INFINITE`: `now - INFINITE` is
+     * `-INFINITE`, which is less than any debounce window, so the *first* tap after any process
+     * start was always dropped — and because a dropped tap never updates the mark, every later tap
+     * was dropped too. Next and Previous did nothing at all unless the caller set
+     * `navDebounceMs = 0`.
+     */
     private fun debounceNav(): Boolean {
         val now = navMark.elapsedNow()
-        if (now - lastNavAt < cfg.navDebounceMs.milliseconds) return true
+        val since = lastNavAt?.let { now - it }
+        if (since != null && since < cfg.navDebounceMs.milliseconds) return true
         lastNavAt = now
         return false
     }
@@ -1221,7 +1288,9 @@ class Orchestrator(
         cancelSettle()
         val s = _state.value
         val phase = s.phase
-        if (phase is Phase.Downloading || phase is Phase.Resolving) s.current?.key?.let { downloads.cancel(it, keepPart = true) }
+        if (phase is Phase.Downloading || phase is Phase.Resolving) {
+            s.current?.key?.let { downloads.cancel(it, keepPart = true) }
+        }
         return ++playGeneration
     }
 
@@ -1240,11 +1309,11 @@ class Orchestrator(
         if (songs.isEmpty()) return
         val keys = songs.map { it.key }
         val known =
-            withContext(disp.dbLane) { knownSongKeys(keys) }
+            withContext(disp.on(Lane.DB)) { knownSongKeys(keys) }
         val missing = songs.filter { it.key !in known }
         if (missing.isEmpty()) return
         val now = clock.nowMs()
-        withContext(disp.dbLane) {
+        withContext(disp.on(Lane.DB)) {
             db.transaction {
                 for (song in missing) {
                     db.dylanQueries.insertSong(
@@ -1269,7 +1338,11 @@ class Orchestrator(
 
     private fun knownSongKeys(keys: List<SongKey>): Set<SongKey> {
         val out = HashSet<SongKey>(keys.size)
-        for (chunk in keys.map { it.songId }.distinct().chunked(DB_IN_CHUNK)) {
+        for (chunk in keys
+            .asSequence()
+            .map { it.songId }
+            .distinct()
+            .chunked(DB_IN_CHUNK)) {
             if (chunk.isEmpty()) continue
             for (row in db.dylanQueries.selectSongsByIds(chunk).executeAsList()) {
                 out.add(SongKey(row.provider, row.song_id))

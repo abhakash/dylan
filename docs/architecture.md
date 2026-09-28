@@ -51,10 +51,18 @@ still belongs in the container).
 
 ## Lanes (dispatchers)
 
-`AppDispatchers(main, io, dbLane, state)`. Each property is a `LaneDispatcher` that
-publishes the lane to a thread-local on every dispatch, so `disp.assert(Lane.X)` checks a
-lane from ordinary non-suspending code and `disp.assertInContext(Lane.X)` checks it from a
-coroutine that entered through `disp.on(Lane.X)`. Both compile out in release.
+`AppDispatchers(main, io, dbLane, state)`. The four properties are the **raw**
+dispatchers — they are not wrapped. A lane is entered with `disp.on(Lane.X)`, which is
+`dispatcher + LaneTag + the thread-scoped publication`, so `disp.assertInContext(Lane.X)`
+checks the lane from a coroutine that entered through `on` (portable, and the check
+production code uses) and `disp.assert(Lane.X)` / `disp.current()` check it from ordinary
+non-suspending code on the JVM and Android. Both asserts compile out in release.
+
+Wrapping each dispatcher in a `LaneDispatcher` was tried and removed: it published the
+lane from `dispatch()` by allocating a wrapper `Runnable` per dispatch, and because the
+wrapper is not a `Delay`, every lane `delay()` fell back to the global real-time
+`DefaultDelay` — an extra dispatch hop per delay and no virtual time in tests. `on`
+composes with any dispatcher, `TestDispatcher` included.
 
 - `state` — single-threaded (`limitedParallelism(1)`); owns queue/orchestrator state.
   **No `runBlocking` on this lane.** Every `scope` handed to a component is

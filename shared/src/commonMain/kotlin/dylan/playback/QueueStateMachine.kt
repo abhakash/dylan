@@ -2,7 +2,6 @@ package dylan.playback
 
 import dylan.model.Phase
 import dylan.model.PlayerState
-import dylan.model.Repeat
 
 internal object QueueStateMachine {
     fun transportable(phase: Phase): Boolean = phase is Phase.Playing || phase is Phase.Paused || phase is Phase.Ready

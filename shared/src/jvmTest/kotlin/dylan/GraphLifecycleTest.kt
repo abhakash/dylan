@@ -52,6 +52,9 @@ import kotlin.test.assertTrue
  * file.
  */
 class GraphLifecycleTest {
+    // `System.nanoTime()` is a uniqueness seed, not a time assertion: this class never deletes its
+    // temp dirs, so the prefix has to be unique across JVM runs too, which a per-class counter is
+    // not.
     private val tmp: String = FileSystem.SYSTEM_TEMPORARY_DIRECTORY.toString() + "/dylan-graph-${System.nanoTime()}"
     private val log = LogBuffer(minLevel = LogLevel.DEBUG)
     private val built = mutableListOf<AppContainer>()
@@ -187,8 +190,16 @@ class GraphLifecycleTest {
         val dead = SongKey("saavn", "dead")
         val alive = SongKey("saavn", "alive")
 
+        // Wait for the container's own boot before probing it. `AppContainer.bootComponents` is
+        // launched by `start()` and calls `downloads.start()` after `opened.await()`, so stopping
+        // the engine first races the graph's own start-up: the boot can flip `started` back to true
+        // after the `stop()`, and `DownloadEngine.cancel` is deliberately inert only while it is
+        // false (`if (!started.load()) return`). This was the flake, not the engine.
+        runBlocking { awaitUntil("boot sweep", atLeast = 1) }
         engine.stop()
         engine.cancel(dead, keepPart = true)
+        // The window is the assertion: `stop()` is a `cancel()`, not a join, so there is nothing to
+        // await — the only way to show a cancel did not run is to outlive the scope.
         runBlocking { delay(SETTLE_MS) }
         assertFalse(dead in engine.states.value, "stop() left the engine scope live")
 
@@ -244,7 +255,7 @@ class GraphLifecycleTest {
                     delivered.incrementAndGet()
                 },
             )
-        waitFor(delivered, 1)
+        runBlocking { waitFor(delivered, 1) }
         sub.cancel()
         scope.cancel()
         assertTrue(threads.isNotEmpty(), "nothing was delivered")
@@ -262,10 +273,10 @@ class GraphLifecycleTest {
             FlowAdapter(source, scope, lanes, Conflation.KEEP_EVERY).subscribe(
                 onEach = { delivered.incrementAndGet() },
             )
-        waitFor(delivered, 1)
+        runBlocking { waitFor(delivered, 1) }
         val playing = PlayerState(repeat = Repeat.ONE)
         source.value = playing
-        waitFor(delivered, 2)
+        runBlocking { waitFor(delivered, 2) }
         // A burst of structurally identical states: StateFlow conflates by equals, so a data
         // class payload means SwiftUI is handed each phase change once and never a stale frame.
         repeat(BURST) { source.value = playing }
@@ -287,10 +298,13 @@ class GraphLifecycleTest {
                 onEach = {
                     delivered.incrementAndGet()
                     last.set(it.toInt())
-                    Thread.sleep(BURST_SLEEP_MS)
+                    // The consumer is deliberately slower than the producer, so the adapter has
+                    // something to conflate. `runBlocking` here blocks the *sink's own* lane
+                    // thread, not a test thread, and the cost it buys is a real one.
+                    runBlocking { delay(BURST_CONSUME_MS) }
                 },
             )
-        waitFor(delivered, 1)
+        runBlocking { waitFor(delivered, 1) }
         repeat(BURST) { source.value = it.toLong() }
         runBlocking { delay(SETTLE_MS) }
         sub.cancel()
@@ -350,14 +364,21 @@ class GraphLifecycleTest {
         return true
     }
 
-    private fun waitFor(
+    /**
+     * Bounded wait for a counter to reach [target]. The bridge delivers on a real `main` lane, so
+     * this is a suspending poll against a failure ceiling rather than a wall-clock loop: it returns
+     * the instant the counter moves, and the ceiling is only reached by a test that is already wrong.
+     */
+    private suspend fun waitFor(
         counter: AtomicInteger,
         target: Int,
     ) {
-        val deadline = System.nanoTime() + RESTART_TIMEOUT_MS * MS
-        while (counter.get() < target && System.nanoTime() < deadline) {
-            Thread.sleep(POLL_MS)
-        }
+        val reached =
+            withTimeoutOrNull(RESTART_TIMEOUT_MS) {
+                while (counter.get() < target) delay(POLL_MS)
+                true
+            }
+        assertEquals(true, reached, "timed out waiting for $counter to reach $target")
     }
 
     private fun median(
@@ -376,7 +397,7 @@ class GraphLifecycleTest {
     private companion object {
         const val COLD_SAMPLES = 7
         const val BURST = 200
-        const val BURST_SLEEP_MS = 2L
+        const val BURST_CONSUME_MS = 2L
         const val POLL_MS = 5L
         const val SETTLE_MS = 300L
         const val RESTART_TIMEOUT_MS = 10_000L

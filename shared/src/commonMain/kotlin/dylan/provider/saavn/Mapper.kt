@@ -25,12 +25,8 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.doubleOrNull
-import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
-import kotlinx.serialization.json.longOrNull
 
 private val json = dylanJson
 
@@ -84,7 +80,11 @@ fun mapSong(
     // post-cacheable-removal every mapped song is treated as downloadable, and resolveRef presence
     // (not rights) decides NO_SOURCE vs resolvable downstream. The DTO keeps `rights` so lenient
     // parsing of live payloads is unaffected.
-    val img150 = d.image.str()?.takeIf { it.isNotBlank() }.orEmpty()
+    val img150 =
+        d.image
+            .str()
+            ?.takeIf { it.isNotBlank() }
+            .orEmpty()
     val primary = primaryArtist(mi.artistMap)
     return Song(
         key = SongKey("saavn", CachePath.segment(d.id)),
@@ -104,8 +104,10 @@ fun mapSong(
 }
 
 /** One card, one decode attempt. A card that will not decode costs only itself. */
-private fun JsonElement.toDto(): SongDto? =
-    runCatching { json.decodeFromJsonElement(SongDto.serializer(), this) }.getOrNull()
+private fun JsonElement.toDto(): SongDto? {
+    val serializer = SongDto.serializer()
+    return runCatching { json.decodeFromJsonElement(serializer, this) }.getOrNull()
+}
 
 /**
  * One card to a [MiniEntity], with its navigable type.
@@ -164,8 +166,9 @@ fun decodeSongPage(
     endpoint: String,
     fallbackPage: Int,
 ): Rows<Paged<Song>> {
-    val root = runCatching { json.parseToJsonElement(text) }.getOrNull() as? JsonObject
-        ?: return Rows(Paged(emptyList(), 0L, fallbackPage), bodyNotJson(endpoint, text))
+    val root =
+        runCatching { json.parseToJsonElement(text) }.getOrNull() as? JsonObject
+            ?: return Rows(Paged(emptyList(), 0L, fallbackPage), bodyNotJson(endpoint, text))
     val drift = mutableListOf<Drift>()
     val songs = root.resultsArray().mapNotNull { mapCard(it, endpoint, drift) }
     return Rows(
@@ -184,8 +187,9 @@ fun decodeMiniPage(
     endpoint: String,
     fallbackPage: Int,
 ): Rows<Paged<MiniEntity>> {
-    val root = runCatching { json.parseToJsonElement(text) }.getOrNull() as? JsonObject
-        ?: return Rows(Paged(emptyList(), 0L, fallbackPage), bodyNotJson(endpoint, text))
+    val root =
+        runCatching { json.parseToJsonElement(text) }.getOrNull() as? JsonObject
+            ?: return Rows(Paged(emptyList(), 0L, fallbackPage), bodyNotJson(endpoint, text))
     val drift = mutableListOf<Drift>()
     val raw = root.resultsArray()
     val items =
@@ -343,21 +347,22 @@ fun decodeMinis(
             ?: return Rows<List<MiniEntity>>(emptyList(), bodyNotJson(endpoint, text))
     val drift = mutableListOf<Drift>()
     val items =
-        arr.mapNotNull { el ->
-            val dto =
-                el.toDto()
-                    ?: run {
-                        drift += Drift(endpoint, CARD_DECODE, el.toString().take(DRIFT_DETAIL_CHARS))
-                        return@mapNotNull null
-                    }
-            val why = miniDropReason(dto)
-            if (why.isNotEmpty()) {
-                drift += Drift(endpoint, why, "${dto.type}:${dto.id}")
-                null
-            } else {
-                mapMini(dto)
-            }
-        }.distinctBy { dedupKey(it) }
+        arr
+            .mapNotNull { el ->
+                val dto =
+                    el.toDto()
+                        ?: run {
+                            drift += Drift(endpoint, CARD_DECODE, el.toString().take(DRIFT_DETAIL_CHARS))
+                            return@mapNotNull null
+                        }
+                val why = miniDropReason(dto)
+                if (why.isNotEmpty()) {
+                    drift += Drift(endpoint, why, "${dto.type}:${dto.id}")
+                    null
+                } else {
+                    mapMini(dto)
+                }
+            }.distinctBy { dedupKey(it) }
     return Rows(items, drift)
 }
 
@@ -381,7 +386,8 @@ fun mapSuggestionPayload(
             ?: return Rows<List<MiniEntity>>(emptyList(), bodyNotJson(endpoint, innerJson))
     val drift = mutableListOf<Drift>()
     val items =
-        root.cardBuckets()
+        root
+            .cardBuckets()
             .mapNotNull { it.toMini(endpoint, drift) }
             .distinctBy { dedupKey(it) }
     return Rows(items, drift)
@@ -450,6 +456,7 @@ fun mapSuggestions(
         }
     return mapSuggestionPayload(inner, endpoint)
 }
+
 /** Stable [Drift] reasons. Tests assert on these strings, so they are part of the contract. */
 internal const val CARD_DECODE = "CARD_DECODE"
 internal const val NO_MORE_INFO = "NO_MORE_INFO"

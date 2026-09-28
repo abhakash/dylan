@@ -12,6 +12,7 @@ import dylan.model.SongKey
 import dylan.support.TestLanes
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.test.TestCoroutineScheduler
 import kotlinx.coroutines.test.runTest
 import okio.FileSystem
 import okio.Path.Companion.toPath
@@ -30,8 +31,13 @@ class CacheManagerTest {
     private lateinit var db: Dylan
     private lateinit var cacheManager: CacheManager
     private val protectedKeys = MutableStateFlow<Set<SongKey>>(emptySet())
-    private val lanes = TestLanes()
-    private val disp = lanes.disp
+
+    // Virtual lanes: `enforceBudget` reaches the database through a `withContext` per batch, and
+    // on a real `limitedParallelism(1)` lane every one of those is a thread hop with its own
+    // dispatch latency — several hundred of them for the 300-pin wave. Sharing the runTest
+    // scheduler makes them scheduler steps instead, with the single-permit contract intact.
+    private val scheduler = TestCoroutineScheduler()
+    private val disp = TestLanes.virtual(scheduler).disp
     private val cfg = AppConfig(cacheMaxBytes = 25L * 1024 * 1024)
     private val log = LogBuffer(minLevel = LogLevel.DEBUG)
 
@@ -84,7 +90,7 @@ class CacheManagerTest {
 
     @Test
     fun unplayedEvictsBeforeRecentlyPlayed() =
-        runTest {
+        runTest(scheduler) {
             cacheManager.enforceBudget(netNewBytes = 9_000_000L)
             val rows =
                 db.dylanQueries
@@ -103,7 +109,7 @@ class CacheManagerTest {
      */
     @Test
     fun aPinLargerThanTheCapIsDemotedEvenThoughItIsTheOnlyOfflineCopy() =
-        runTest {
+        runTest(scheduler) {
             db.dylanQueries.setPin(1L, 100L, "saavn", "n1")
             db.dylanQueries.setPin(1L, 200L, "saavn", "p1")
             repeat(3) { idx ->
@@ -154,7 +160,7 @@ class CacheManagerTest {
 
     @Test
     fun pinnedDemotionRespectsThePinnedCapAndDemotesOldestPinFirst() =
-        runTest {
+        runTest(scheduler) {
             db.dylanQueries.setPin(1L, 100L, "saavn", "n1")
             db.dylanQueries.setPin(1L, 200L, "saavn", "p1")
             var notified = false
@@ -225,10 +231,16 @@ class CacheManagerTest {
      * 300 favourites x 4 MB is 1.2 GB, comfortably under a byte cap, so the v0 byte-only loop ran
      * zero iterations, `lruVictim` (WHERE pinned = 0) matched nothing, and `?: break` exited with
      * the cap permanently unenforceable and no user-visible signal.
+     *
+     * The rows are sized to isolate the *row* budget. `CacheManager.byteBudget` is derived —
+     * `min(cacheMaxBytes, cacheMaxFiles x 1 MB)` — not `cacheMaxBytes`, so 12 x 4 MB against a
+     * 10-file cap put the pool 6x over the pinned byte budget and the loop correctly ran to its
+     * one-survivor floor: a true result, but of the byte cap rather than of the row cap under test.
+     * 12 x 500 KB is 6 MB against a 7.5 MB pinned byte budget, so only the row budget can bind.
      */
     @Test
     fun thePinnedPoolHasARowBudgetSoTheFileCapStaysEnforceable() =
-        runTest {
+        runTest(scheduler) {
             withFreshCache(cfg = AppConfig(cacheMaxBytes = 2_000_000_000L, cacheMaxFiles = 10)) { db2, cm2, _ ->
                 repeat(12) { idx ->
                     val k = SongKey("saavn", "fav$idx")
@@ -239,7 +251,7 @@ class CacheManagerTest {
                         k.songId,
                         128L,
                         "m4a",
-                        4_000_000L,
+                        PINNED_FIXTURE_BYTES,
                         idx.toLong(),
                         null,
                         0L,
@@ -248,6 +260,11 @@ class CacheManagerTest {
                     )
                 }
                 assertEquals(12L, db2.dylanQueries.pinnedCount().executeAsOne())
+                assertTrue(
+                    12 * PINNED_FIXTURE_BYTES <= cm2.pinnedByteBudget,
+                    "precondition: the pool must sit inside its pinned byte budget, or the row budget is " +
+                        "not what is under test (${12 * PINNED_FIXTURE_BYTES} > ${cm2.pinnedByteBudget})",
+                )
 
                 cm2.enforceBudget()
 
@@ -255,7 +272,7 @@ class CacheManagerTest {
                 assertEquals(
                     cm2.pinnedRowBudget.toLong(),
                     pinned,
-                    "12 pins x 4 MB is under a 2 GB byte cap, so only a ROW budget can hold the pool",
+                    "12 pins x 500 KB is under the pinned byte budget, so only a ROW budget can hold the pool",
                 )
                 assertTrue(pinned >= 1L, "the pool must keep at least one favourite")
             }
@@ -263,7 +280,7 @@ class CacheManagerTest {
 
     @Test
     fun exemptKeyNeverEvictedInOwnPass() =
-        runTest {
+        runTest(scheduler) {
             val key = SongKey("saavn", "fresh")
             db.dylanQueries.insertSong(
                 key.provider,
@@ -299,7 +316,7 @@ class CacheManagerTest {
      */
     @Test
     fun atTheFileCapWithNoPendingRowNothingIsEvicted() =
-        runTest {
+        runTest(scheduler) {
             val capCfg = AppConfig(cacheMaxBytes = 1_000_000_000L, cacheMaxFiles = 5)
             withFreshCache(cfg = capCfg) { db2, cm2, _ ->
                 repeat(5) { idx ->
@@ -324,7 +341,7 @@ class CacheManagerTest {
 
     @Test
     fun partBytesCountTowardUsageOnlyAfterTheyAreReported() =
-        runTest {
+        runTest(scheduler) {
             withFreshCache { db2, cm2, root2 ->
                 fun seed(
                     id: String,
@@ -382,7 +399,7 @@ class CacheManagerTest {
 
     @Test
     fun clearCacheKeepsProtected() =
-        runTest {
+        runTest(scheduler) {
             protectedKeys.value = setOf(SongKey("saavn", "p1"))
             cacheManager.clearCacheExcludingProtected()
             val rows =
@@ -423,7 +440,7 @@ class CacheManagerTest {
         fs.createDirectories(paths.audioDir)
         fs.write(paths.final(SongKey("saavn", "n1"), 128, "m4a")) { write(ByteArray(10_000_000)) }
         protectedKeys.value = setOf(SongKey("saavn", "n1"))
-        runTest {
+        runTest(scheduler) {
             assertFalse(cacheManager.evictOne(SongKey("saavn", "n1")), "a protected key must be refused")
             assertTrue(fs.exists(paths.final(SongKey("saavn", "n1"), 128, "m4a")), "and its file must survive")
         }
@@ -436,7 +453,7 @@ class CacheManagerTest {
         fs.createDirectories(paths.audioDir)
         val file = paths.final(SongKey("saavn", "n1"), 128, "m4a")
         fs.write(file) { write(ByteArray(10_000_000)) }
-        runTest {
+        runTest(scheduler) {
             assertTrue(cacheManager.evictOne(SongKey("saavn", "n1")))
             assertFalse(fs.exists(file))
             assertEquals(null, db.dylanQueries.selectCached("saavn", "n1").executeAsOneOrNull())
@@ -456,7 +473,7 @@ class CacheManagerTest {
         val blocked = paths.final(key, 128, "m4a")
         fs.createDirectories(blocked)
         fs.write(blocked / "occupied") { write(ByteArray(8)) }
-        runTest {
+        runTest(scheduler) {
             cacheManager.enforceBudget(netNewBytes = 90_000_000L)
             assertTrue(
                 db.dylanQueries.selectCached("saavn", "n1").executeAsOneOrNull() != null,
@@ -485,14 +502,17 @@ class CacheManagerTest {
         val paths = Paths(tmp.toPath() / "audio", fs)
         fs.createDirectories(paths.audioDir)
         val key = SongKey("saavn", "n1")
+        // Narrowed to one cached row: `setup` leaves four, and `claimAllUnprotected` claims every
+        // one of them, so a test that says "one interrupted eviction" has to say so in its fixture.
+        listOf("p1", "p2", "n2").forEach { db.dylanQueries.deleteCached("saavn", it) }
         fs.write(paths.final(key, 128, "m4a")) { write(ByteArray(10_000_000)) }
         db.transaction { db.dylanQueries.clearProtectedKeys() }
         val claimed = db.dylanQueries.claimAllUnprotected().executeAsList()
-        assertTrue(claimed.any { it.song_id == "n1" }, "precondition: the row is claimed and its file still there")
+        assertEquals(1, claimed.size, "precondition: exactly one row is claimed")
         assertTrue(fs.exists(paths.final(key, 128, "m4a")), "precondition: claimed, not yet unlinked")
 
-        runTest {
-            assertEquals(1, cacheManager.reapEvicting())
+        runTest(scheduler) {
+            assertEquals(1, cacheManager.reapEvicting(), "the interrupted eviction must be finished, not re-claimed")
             assertFalse(fs.exists(paths.final(key, 128, "m4a")))
             assertEquals(0, cacheManager.reapEvicting(), "a second reap must be a no-op")
         }
@@ -500,7 +520,7 @@ class CacheManagerTest {
 
     @Test
     fun intentUpsertNeverDowngradesPriority() =
-        runTest {
+        runTest(scheduler) {
             db.dylanQueries.upsertIntent("saavn", "x", "USER_BULK", 320L, 1L)
             db.dylanQueries.upsertIntent("saavn", "x", "PREFETCH_NEXT", 128L, 2L)
             val intent =
@@ -522,7 +542,7 @@ class CacheManagerTest {
 
     @Test
     fun removableKeysFollowTheProtectionFlows() =
-        runTest {
+        runTest(scheduler) {
             val before =
                 cacheManager.downloads
                     .first()
@@ -597,6 +617,12 @@ class CacheManagerTest {
         }
 }
 
+/**
+ * Small enough that 12 pins sit inside the pinned byte budget, so the row budget is the binding
+ * constraint. See `thePinnedPoolHasARowBudgetSoTheFileCapStaysEnforceable`.
+ */
+private const val PINNED_FIXTURE_BYTES = 500_000L
+
 private data class CacheFileNameAssert(
     val provider: String,
     val songId: String,
@@ -604,7 +630,8 @@ private data class CacheFileNameAssert(
     val ext: String,
 ) {
     companion object {
-        fun of(parsed: dylan.cache.CacheFileName?): CacheFileNameAssert? =
-            parsed?.let { CacheFileNameAssert(it.provider, it.songId, it.bitrate, it.ext) }
+        fun of(parsed: dylan.cache.CacheFileName?): CacheFileNameAssert? = parsed?.let(::from)
+
+        private fun from(n: dylan.cache.CacheFileName) = CacheFileNameAssert(n.provider, n.songId, n.bitrate, n.ext)
     }
 }

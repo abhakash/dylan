@@ -3,18 +3,26 @@
 package dylan.download
 
 import dylan.config.AppConfig
-import kotlin.concurrent.atomics.AtomicReference
 import dylan.model.Quality
 import dylan.model.SongKey
+import kotlin.concurrent.atomics.AtomicReference
 
 /**
  * The quality decision, as a pure-ish function so it is testable without a graph.
  *
- * `job.bitrate` is a *request* and it is honoured (M-5). It used to be read exactly once, for an
- * intent row, and the rendition was then recomputed from the user's preference — so the idle
- * `QUALITY_UPGRADE` scanner enqueued 320, `Step.QUALITY` answered 128 from the pref, and
- * `Step.DEDUPE` short-circuited to `Done` without touching the network. The upgrade scanner was a
- * no-op for exactly the users who had not manually chosen 320.
+ * Two callers, two answers, and both are pinned by tests so they cannot drift:
+ *  - an explicit [Priority.QUALITY_UPGRADE] is authoritative — `job.bitrate` is a *request* and it is
+ *    honoured. It used to be read exactly once, for an intent row, and the rendition recomputed
+ *    from the user's preference, so the idle `QUALITY_UPGRADE` scanner enqueued 320, `Step.QUALITY`
+ *    answered 128 from the pref, and `Step.DEDUPE` short-circuited to `Done` without touching the
+ *    network. The upgrade scanner was a no-op for exactly the users who had not manually chosen 320.
+ *  - everything else takes the *session's* quality, floored by the request: the metered ceiling on
+ *    a metered link, the preference otherwise, never below what the caller asked for. Every
+ *    playback-path caller already derives its request from that same policy (`targetBits()`), so
+ *    this changes nothing in production — and it means a stale or over-cautious request bitrate can
+ *    never hand the user a rendition below the one their own setting names.
+ *
+ * Metered never upgrades, whatever the reason.
  */
 internal suspend fun chooseQuality(
     job: DownloadJob,
@@ -24,14 +32,16 @@ internal suspend fun chooseQuality(
     qualityPref: suspend () -> Quality,
 ): Quality {
     if (songRow?.has_320 != 1L) return Quality.BITRATE_128
-    val requested = Quality.of(job.bitrate)
     val metered = netClass() == dylan.util.NetClass.METERED
-    val policy = if (metered) cfg.meteredQuality else qualityPref()
-    // An explicit upgrade request is authoritative; anything else is capped by policy, so a
-    // prefetch can never spend more than the session is worth. Metered never upgrades at all.
-    val wanted = if (job.reason == Priority.QUALITY_UPGRADE) requested else minQuality(policy, requested)
-    return if (metered) minQuality(policy, wanted) else wanted
+    if (metered) return minQuality(cfg.meteredQuality, Quality.of(job.bitrate))
+    if (job.reason == Priority.QUALITY_UPGRADE) return Quality.of(job.bitrate)
+    return maxQuality(qualityPref(), Quality.of(job.bitrate))
 }
+
+private fun maxQuality(
+    a: Quality,
+    b: Quality,
+): Quality = if (a.bits >= b.bits) a else b
 
 private fun minQuality(
     a: Quality,
@@ -57,8 +67,11 @@ internal fun paddedEstimate(
 ): Long = (estimateBytes(songRow, quality) * cfg.estimatePadding).toLong()
 
 /** The low and high edges of the sanity band, as a fraction of `duration × bps`. */
-internal fun sizeBand(rawEstimate: Long): Pair<Long, Long> =
-    rawEstimate * BAND_LO_NUM / BAND_DEN to rawEstimate * BAND_HI_NUM / BAND_DEN
+internal fun sizeBand(rawEstimate: Long): Pair<Long, Long> {
+    val lo = rawEstimate * BAND_LO_NUM / BAND_DEN
+    val hi = rawEstimate * BAND_HI_NUM / BAND_DEN
+    return lo to hi
+}
 
 private const val BAND_LO_NUM = 4L
 private const val BAND_HI_NUM = 13L
@@ -77,11 +90,6 @@ internal inline fun <K, V> AtomicReference<Map<K, V>>.mutate(block: (Map<K, V>) 
     }
 }
 
-/**
- * The set of attempts that were displaced, so a cancellation can tell "I was preempted, re-queue
- * me" from "I was cancelled, report it". A *set* and not a single key: preemption is no longer
- * single-slot, so one global key is no longer the truth.
- */
 /** `saavn:s1` — the key half of [DownloadJob.label], for the lines that only hold a key. */
 internal val SongKey.label: String get() = "$provider:$songId"
 
@@ -155,8 +163,11 @@ internal fun hostOf(
     url: String,
     log: dylan.diag.LogBuffer,
 ): String? =
-    runCatching { io.ktor.http.Url(url).host }
-        .onFailure { log.w("dl", "unparseable stream url: ${url.take(URL_LOG_CHARS)}") }
+    runCatching {
+        io.ktor.http
+            .Url(url)
+            .host
+    }.onFailure { log.w("dl", "unparseable stream url: ${url.take(URL_LOG_CHARS)}") }
         .getOrNull()
         ?.takeIf { it.isNotEmpty() }
 

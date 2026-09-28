@@ -172,7 +172,7 @@ class SaavnSearchChannel(
      * iOS calls this from `.inactive`, so it runs on the caller's (main) thread. Nothing here needs
      * a lane any more: the channel's state is behind [engineLock] and the socket behind
      * [socketOwner], so the body cannot race the engine. (The previous fix was
-     * `scope.launch(disp.state)`, which parked a main-thread event on the orchestrator's lane.)
+     * `scope.launch(disp.on(Lane.STATE))`, which parked a main-thread event on the orchestrator's lane.)
      */
     fun onBackground() {
         scope.launch(disp.on(Lane.IO)) { dropSocket() }
@@ -567,8 +567,11 @@ internal class HttpSuggest(
             is CatalogResult.Err -> body
             is CatalogResult.Ok -> {
                 val rows = mapSuggestionPayload(body.value.text, ENDPOINT)
-                if (rows.items.isEmpty() && rows.drift.isNotEmpty()) CatalogResult.Ok(emptyList(), rows.drift)
-                else CatalogResult.Ok(rows.items, rows.drift)
+                if (rows.items.isEmpty() && rows.drift.isNotEmpty()) {
+                    CatalogResult.Ok(emptyList(), rows.drift)
+                } else {
+                    CatalogResult.Ok(rows.items, rows.drift)
+                }
             }
         }
     }

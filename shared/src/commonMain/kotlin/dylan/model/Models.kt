@@ -214,12 +214,69 @@ data class PlayerState(
     /** Position to resume the item at [at] at, for the window being handed to the engine. */
     fun resumePosMsFor(at: Int): Long = if (at == index) posMs else 0L
 
-    /** Keeps the order being walked across a re-anchor; `null` means the caller must rebuild it. */
-    private fun stableOrder(
-        order: PersistentList<Int>?,
+    /**
+     * The order to walk after a mutation: the caller's, if it is still a navigable permutation of
+     * the queue being committed; otherwise the one the previous queue's order maps onto, if every
+     * row still identifies unambiguously; otherwise a fresh one anchored at [index].
+     */
+    private fun anchoredOrder(
         queue: PersistentList<Song>,
         index: Int,
-    ): PersistentList<Int>? = order?.takeIf { it.size == queue.size && isPermutationOf(it, queue.size) && index in it }
+        shuffleOn: Boolean,
+        shuffleOrder: PersistentList<Int>?,
+    ): PersistentList<Int>? {
+        if (!shuffleOn || queue.isEmpty()) return null
+        if (shuffleOrder != null && isPermutationOf(shuffleOrder, queue.size) && index in shuffleOrder) {
+            return shuffleOrder
+        }
+        val carried = carriedOrder(shuffleOrder, this.queue, queue, index)
+        return carried ?: newShuffleOrder(queue.size, index)
+    }
+
+    /**
+     * Carry a permutation across an edit that changed the queue's shape.
+     *
+     * A shuffle the user arranged has to survive "remove one row" and "add one row": the previous
+     * answer handed back `null` for any size change, which left `shuffleOn` with no order at all —
+     * a queue with no next track — and would otherwise have had to rebuild, replacing the user's
+     * shuffle on every edit. Slots are matched by song identity, so surviving rows keep their
+     * relative playback order.
+     *
+     * Any row whose identity is missing or ambiguous (the same song queued twice) returns `null` and
+     * the caller rebuilds: a permutation that crowns a song as its own successor is worse than a
+     * fresh shuffle. O(queue), one map, no per-entry allocation.
+     */
+    private fun carriedOrder(
+        order: PersistentList<Int>?,
+        from: List<Song>,
+        to: List<Song>,
+        index: Int,
+    ): PersistentList<Int>? {
+        if (order == null || from.isEmpty() || order.size != from.size) return null
+        val slots = HashMap<Song, Int>(to.size)
+        for (j in to.indices) {
+            val song = to[j]
+            if (song in slots) return null
+            slots[song] = j
+        }
+        val carried = ArrayList<Int>(to.size)
+        val taken = BooleanArray(to.size)
+        for (i in order) {
+            val at = slots[from.getOrNull(i)] ?: return null
+            if (taken[at]) return null
+            taken[at] = true
+            carried.add(at)
+        }
+        // Rows the edit added are in no carried slot. Splice them in directly after the current item
+        // so the track the user is on keeps playing first and the new rows are the ones that follow.
+        val added = ArrayList<Int>(to.size - carried.size)
+        for (j in 0 until to.size) {
+            if (!taken[j]) added.add(j)
+        }
+        val at = carried.indexOf(if (index in to.indices) index else -1)
+        carried.addAll(if (at < 0) carried.size else at + 1, added)
+        return carried.toPersistentList()
+    }
 
     /** The only assignment site for the queue's shape and the phase that reads it. */
     fun withQueueMutation(
@@ -231,18 +288,8 @@ data class PlayerState(
         repeat: Repeat = this.repeat,
         phase: Phase = this.phase,
         posMs: Long? = null,
-        remap: Boolean = false,
     ): PlayerState {
-        val anchored =
-            if (!shuffleOn || queue.isEmpty()) {
-                null
-            } else if (remap) {
-                // An edit that dropped or added a row invalidates the order; a fresh one is anchored
-                // so the item the user is on keeps playing next-in-order, not "slot zero".
-                shuffleOrder?.takeIf { it.size == queue.size }
-            } else {
-                stableOrder(shuffleOrder, queue, index) ?: newShuffleOrder(queue.size, index)
-            }
+        val anchored = anchoredOrder(queue, index, shuffleOn, shuffleOrder)
         val out =
             PlayerState(
                 phase = phase,
@@ -258,21 +305,6 @@ data class PlayerState(
             )
         validate(out)
         return out
-    }
-
-    private fun isPermutationOf(
-        order: List<Int>,
-        size: Int,
-    ): Boolean {
-        if (order.size != size || size == 0) return false
-        var seen = 0L
-        for (i in order) {
-            if (i < 0 || i >= size) return false
-            val bit = 1L shl i
-            if (seen and bit != 0L) return false
-            seen = seen or bit
-        }
-        return true
     }
 
     companion object {
@@ -311,6 +343,17 @@ data class PlayerState(
          * The one implementation of "what plays next". Pure and total: it reads only its six
          * arguments, returns a slot in `0 until queue.size` or `null`, and cannot be affected by a
          * [PlayerState] that skipped [withQueueMutation]. `dir` is `+1` for "what plays next".
+         *
+         * The two ways `nextIndex == index` can arise are kept apart on purpose:
+         *  - [Repeat.ONE] *pins* — the same index regardless of the queue's shape, because the user
+         *    asked for this track again.
+         *  - [Repeat.ALL] over a **one-element** queue *wraps* — the only element is both the end
+         *    and the beginning of the order. That is a real, navigable successor (it is a bijection
+         *    on a set of one), and it is what every other player does with a one-track playlist on
+         *    repeat-all; the alternative, `null`, would report "End of queue" on the only track
+         *    there is. [validate] therefore requires `next == index` under a non-ONE repeat **only**
+         *    when the queue has exactly one element, and forbids it everywhere else, so a genuine
+         *    `nextIndex == index` bug on a real queue is still a throw.
          */
         fun nextIndexIn(
             queue: List<Song>,
@@ -342,52 +385,101 @@ data class PlayerState(
             }
         }
 
+        /**
+         * Is [order] a permutation of `0 until size`? One implementation, used by both
+         * [validate] and the mutation path, so the two cannot disagree.
+         *
+         * Up to [PERMUTATION_BITSET_LIMIT] this is a `Long` bitset — one word, no allocation. Above
+         * it, `1L shl i` wraps at 64, so slot *i* and slot *i + 64* are the same bit and every slot
+         * past 63 looked like a duplicate of one below it: a perfectly good order read as a
+         * non-permutation, the mutation path answered `null`, and a *fresh* permutation was
+         * installed on every queue mutation — so a large queue's shuffle silently changed under the
+         * user. Large queues take the `HashSet` path instead.
+         */
+        fun isPermutationOf(
+            order: List<Int>,
+            size: Int,
+        ): Boolean {
+            if (order.size != size || size == 0) return false
+            return if (size > PERMUTATION_BITSET_LIMIT) distinctBySet(order, size) else distinctByBits(order, size)
+        }
+
+        private fun distinctBySet(
+            order: List<Int>,
+            size: Int,
+        ): Boolean {
+            val seen = HashSet<Int>(size)
+            for (i in order) {
+                if (i < 0 || i >= size || !seen.add(i)) return false
+            }
+            return true
+        }
+
+        private fun distinctByBits(
+            order: List<Int>,
+            size: Int,
+        ): Boolean {
+            var bits = 0L
+            for (i in order) {
+                if (i < 0 || i >= size) return false
+                val bit = 1L shl i
+                if (bits and bit != 0L) return false
+                bits = bits or bit
+            }
+            return true
+        }
+
         /** Every rule a maintained [PlayerState] must satisfy. Called from [withQueueMutation]. */
         fun validate(s: PlayerState) {
+            validateShape(s)
+            validateShuffle(s)
+            validateSuccessor(s)
+        }
+
+        private fun validateShape(s: PlayerState) {
             val n = s.queue.size
-            if (s.index < -1 || s.index > s.queue.lastIndex) {
-                throw QueueInvariantViolation("index=${s.index} outside -1..${s.queue.lastIndex} for a queue of $n")
+            val range = "index=${s.index} outside -1..${s.queue.lastIndex} for a queue of $n"
+            reject(s.index >= -1 && s.index <= s.queue.lastIndex, range)
+            reject(s.queue.isEmpty() == (s.index == -1), "queue of $n paired with index=${s.index}")
+        }
+
+        private fun validateShuffle(s: PlayerState) {
+            val n = s.queue.size
+            val order = s.shuffleOrder
+            if (order == null) {
+                // An empty queue has no permutation to carry, so the shuffle *preference*
+                // legitimately outlives it. A queue that *has* rows and no order does not: that is a
+                // queue with no next track, and `nextIndexIn` answers null for it.
+                reject(n == 0 || !s.shuffleOn, "shuffleOn=true but shuffleOrder=false over a queue of $n")
+                return
             }
-            if (s.queue.isEmpty() != (s.index == -1)) {
-                throw QueueInvariantViolation("queue of $n paired with index=${s.index}")
-            }
-            if (s.shuffleOn != (s.shuffleOrder != null)) {
-                throw QueueInvariantViolation("shuffleOn=${s.shuffleOn} but shuffleOrder=${s.shuffleOrder != null}")
-            }
-            s.shuffleOrder?.let { order ->
-                if (order.size != n) throw QueueInvariantViolation("shuffleOrder of ${order.size} over a queue of $n")
-                if (n > 0) {
-                    val distinct = if (n <= PERMUTATION_BITSET_LIMIT) bitsetDistinct(order, n) else order.toSet().size == n
-                    if (!distinct) throw QueueInvariantViolation("shuffleOrder=$order is not a permutation of 0..${n - 1}")
-                    if (s.index >= 0 && s.index !in order) {
-                        throw QueueInvariantViolation("index=${s.index} absent from shuffleOrder=$order")
-                    }
-                }
-            }
+            reject(n == 0 || s.shuffleOn, "shuffleOrder over a queue of $n with shuffleOn=false")
+            reject(order.size == n, "shuffleOrder of ${order.size} over a queue of $n")
+            if (n == 0) return
+            reject(isPermutationOf(order, n), "shuffleOrder=$order is not a permutation of 0..${n - 1}")
+            reject(s.index < 0 || s.index in order, "index=${s.index} absent from shuffleOrder=$order")
+        }
+
+        private fun validateSuccessor(s: PlayerState) {
+            val n = s.queue.size
             val next = s.nextIndex
-            if (next != null && next !in 0 until n) {
-                throw QueueInvariantViolation("nextIndex=$next outside 0..${n - 1}")
-            }
-            if (s.repeat != Repeat.ONE && next == s.index && s.index in s.queue.indices) {
-                throw QueueInvariantViolation("nextIndex=$next == index under repeat=${s.repeat}")
-            }
-            if (s.repeat == Repeat.ONE && next != s.index) {
-                throw QueueInvariantViolation("repeat ONE with nextIndex=$next != index=${s.index}")
+            reject(next == null || next in 0 until n, "nextIndex=$next outside 0..${n - 1}")
+            if (s.index !in s.queue.indices) return
+            if (s.repeat == Repeat.ONE) {
+                reject(next == s.index, "repeat ONE with nextIndex=$next != index=${s.index}")
+            } else {
+                // Only a one-element queue can legitimately be its own successor under a non-ONE
+                // repeat; see `nextIndexIn`. Anything else is a real algebra bug and stays a throw.
+                reject(next != s.index || n <= 1, "nextIndex=$next == index under repeat=${s.repeat} over $n")
             }
         }
 
-        private fun bitsetDistinct(
-            order: List<Int>,
-            n: Int,
-        ): Boolean {
-            var seen = 0L
-            for (i in order) {
-                if (i < 0 || i >= n) return false
-                val bit = 1L shl i
-                if (seen and bit != 0L) return false
-                seen = seen or bit
-            }
-            return true
+        /** The one place an invariant becomes an exception, so the rules read as predicates. */
+        private fun reject(
+            holds: Boolean,
+            why: String,
+        ) {
+            if (!holds) throw QueueInvariantViolation(why)
         }
     }
 }

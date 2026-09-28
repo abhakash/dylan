@@ -87,7 +87,9 @@ sealed interface JobState {
 }
 
 /** True for the states a job never leaves. Terminal entries are what the engine retains. */
-internal fun JobState.isTerminal(): Boolean =
-    this is JobState.Done || this is JobState.Failed || this is JobState.Cancelled
+internal fun JobState.isTerminal(): Boolean {
+    val done = this is JobState.Done || this is JobState.Failed
+    return done || this is JobState.Cancelled
+}
 
 private const val UNASSIGNED_SEQ = -1L

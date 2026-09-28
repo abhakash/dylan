@@ -4,8 +4,19 @@ import okio.FileHandle
 import okio.FileSystem
 import okio.Path
 
-/** Container families the download engine verifies and the playback window probes for. */
-internal enum class Container { MP4, MP3 }
+/**
+ * Container families the download engine verifies and the playback window probes for.
+ *
+ * [ext] is the on-disk extension, not the enum's name: an iso-base-media file is committed as
+ * `.m4a`, and `Container.MP4.name.lowercase()` wrote `.mp4` — a file the app had never written, named
+ * by a guess at the container rather than by the mapping the rest of the pipeline already assumes.
+ */
+internal enum class Container(
+    val ext: String,
+) {
+    MP4("m4a"),
+    MP3("mp3"),
+}
 
 /**
  * Bytes the recogniser reads. The engine used to check 4 (`ftyp` alone) while the playback window

@@ -42,7 +42,7 @@ class Reconciler(
     private val clock = cfg.clock
 
     suspend fun run() =
-        withContext(disp.io) {
+        withContext(disp.on(Lane.IO)) {
             disp.assertInContext(Lane.IO)
             val t0 = clock.nowMs()
             val now = t0
@@ -69,12 +69,13 @@ class Reconciler(
      * then is the row dropped, so a failed unlink keeps the row and is retried.
      */
     private suspend fun reapInterruptedWrites(): Int {
-        val rows = withContext(disp.dbLane) { db.dylanQueries.reapableObjects(REAP_BATCH.toLong()).executeAsList() }
+        val rows =
+            withContext(disp.on(Lane.DB)) { db.dylanQueries.reapableObjects(REAP_BATCH.toLong()).executeAsList() }
         var dropped = 0
         rows.forEach { row ->
             val key = SongKey(row.provider, row.song_id)
             val gone = runCatching { fs.delete(paths.final(key, row.bitrate.toInt(), row.ext)) }.isSuccess
-            withContext(disp.dbLane) {
+            withContext(disp.on(Lane.DB)) {
                 db.dylanQueries.dropObject(row.provider, row.song_id, row.bitrate, row.ext)
             }
             if (gone) {
@@ -89,7 +90,8 @@ class Reconciler(
 
     /** Rows that have never been stat'ed since they were written. Empty for a swept library. */
     private suspend fun verifyUnstampedObjects(now: Long): Int {
-        val rows = withContext(disp.dbLane) { db.dylanQueries.unstampedObjects(REAP_BATCH.toLong()).executeAsList() }
+        val rows =
+            withContext(disp.on(Lane.DB)) { db.dylanQueries.unstampedObjects(REAP_BATCH.toLong()).executeAsList() }
         rows.forEach { row -> checkOne(row.provider, row.song_id, row.bitrate.toInt(), row.ext, row.bytes, now) }
         return rows.size
     }
@@ -101,10 +103,10 @@ class Reconciler(
      * with a future mtime as immortal.
      */
     private suspend fun fullSweep(now: Long): SweepCount {
-        val rows = withContext(disp.dbLane) { db.dylanQueries.selectAllCached().executeAsList() }
+        val rows = withContext(disp.on(Lane.DB)) { db.dylanQueries.selectAllCached().executeAsList() }
         val known = rows.map { Triple(SongKey(it.provider, it.song_id), it.bitrate.toInt(), it.ext) }
         val knownPaths = known.map { (key, bits, ext) -> paths.final(key, bits, ext) }.toHashSet()
-        val intents = withContext(disp.dbLane) { db.dylanQueries.allIntents().executeAsList() }
+        val intents = withContext(disp.on(Lane.DB)) { db.dylanQueries.allIntents().executeAsList() }
         val pendingParts = intents.map { paths.part(SongKey(it.provider, it.song_id), it.bitrate.toInt()) }.toHashSet()
 
         var partsDeleted = 0
@@ -122,7 +124,7 @@ class Reconciler(
             }
         }
         known.forEach { (key, bits, ext) -> checkOne(key.provider, key.songId, bits, ext, 0, now, stampOnly = true) }
-        withContext(disp.dbLane) {
+        withContext(disp.on(Lane.DB)) {
             db.dylanQueries.deleteOrphanHistory()
             db.dylanQueries.deleteOrphanLibrary()
             db.dylanQueries.deleteOrphanObjects()
@@ -150,12 +152,12 @@ class Reconciler(
         val size = fs.metadataOrNull(path)?.size
         val recorded = if (stampOnly) currentBytes(provider, songId, bitrate, ext) else expectedBytes
         if (size != null && size == recorded) {
-            withContext(disp.dbLane) { db.dylanQueries.markVerified(now, provider, songId, bitrate.toLong(), ext) }
+            withContext(disp.on(Lane.DB)) { db.dylanQueries.markVerified(now, provider, songId, bitrate.toLong(), ext) }
             return
         }
         log.w("reconciler", "cached file missing or short ${key.provider}:${key.songId} (row=$recorded B)")
         val gone = runCatching { fs.delete(path) }.isSuccess
-        withContext(disp.dbLane) { db.dylanQueries.dropObject(provider, songId, bitrate.toLong(), ext) }
+        withContext(disp.on(Lane.DB)) { db.dylanQueries.dropObject(provider, songId, bitrate.toLong(), ext) }
         if (!gone) log.e("reconciler", "unlink failed, row kept for retry: ${key.provider}:${key.songId}")
     }
 
@@ -165,7 +167,7 @@ class Reconciler(
         bitrate: Int,
         ext: String,
     ): Long? =
-        withContext(disp.dbLane) {
+        withContext(disp.on(Lane.DB)) {
             db.dylanQueries
                 .selectCached(provider, songId)
                 .executeAsOneOrNull()
@@ -192,10 +194,10 @@ class Reconciler(
     }
 
     private suspend fun resumeIntents() {
-        val intents = withContext(disp.dbLane) { db.dylanQueries.allIntents().executeAsList() }
+        val intents = withContext(disp.on(Lane.DB)) { db.dylanQueries.allIntents().executeAsList() }
         if (intents.isEmpty()) return
         val cached =
-            withContext(disp.dbLane) {
+            withContext(disp.on(Lane.DB)) {
                 db.dylanQueries
                     .selectAllCached()
                     .executeAsList()

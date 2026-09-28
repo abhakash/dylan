@@ -90,11 +90,15 @@ SELECT 0, COALESCE(SUM(bytes), 0), COUNT(*), 0, 0 FROM library;
 
 CREATE TRIGGER trg_library_total_ins AFTER INSERT ON library
 BEGIN
+  INSERT INTO cache_totals(id, final_bytes, final_count, part_bytes, part_count)
+    SELECT 0, 0, 0, 0, 0 WHERE NOT EXISTS (SELECT 1 FROM cache_totals WHERE id = 0);
   UPDATE cache_totals SET final_bytes = final_bytes + new.bytes, final_count = final_count + 1 WHERE id = 0;
 END;
 
 CREATE TRIGGER trg_library_total_del AFTER DELETE ON library
 BEGIN
+  INSERT INTO cache_totals(id, final_bytes, final_count, part_bytes, part_count)
+    SELECT 0, 0, 0, 0, 0 WHERE NOT EXISTS (SELECT 1 FROM cache_totals WHERE id = 0);
   UPDATE cache_totals
      SET final_bytes = MAX(0, final_bytes - old.bytes),
          final_count = MAX(0, final_count - 1)
@@ -103,6 +107,8 @@ END;
 
 CREATE TRIGGER trg_library_total_upd AFTER UPDATE OF bytes ON library
 BEGIN
+  INSERT INTO cache_totals(id, final_bytes, final_count, part_bytes, part_count)
+    SELECT 0, 0, 0, 0, 0 WHERE NOT EXISTS (SELECT 1 FROM cache_totals WHERE id = 0);
   UPDATE cache_totals SET final_bytes = MAX(0, final_bytes - old.bytes + new.bytes) WHERE id = 0;
 END;
 
@@ -201,3 +207,8 @@ BEGIN
                                      WHEN 'PREFETCH_NEXT' THEN 2 ELSE 3 END)
    WHERE provider = new.provider AND song_id = new.song_id;
 END;
+
+-- download_intents is renamed, rebuilt and the old table dropped above, so its indexes have to
+-- be recreated after that. Without this the scheduler's (priority, enqueued_at_ms) pop sorts the
+-- whole table into a temp b-tree on every dequeue.
+CREATE INDEX idx_intent_priority ON download_intents(priority, enqueued_at_ms);

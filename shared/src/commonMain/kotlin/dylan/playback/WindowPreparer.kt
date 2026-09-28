@@ -3,8 +3,10 @@ package dylan.playback
 import dylan.cache.Paths
 import dylan.db.Cached_files
 import dylan.db.Dylan
+import dylan.download.sniffContainer
 import dylan.model.SongKey
 import dylan.util.AppDispatchers
+import dylan.util.Lane
 import kotlinx.coroutines.withContext
 import okio.FileSystem
 import okio.Path
@@ -20,13 +22,14 @@ internal class WindowPreparer(
         val path: String,
         val size: Long,
         val modifiedMs: Long,
-    ) {
-        companion object {
-            val NONE = Stamp("", -1L, -1L)
-        }
-    }
+    )
 
-    private val verified = mutableMapOf<SongKey, Stamp>()
+    private data class Verdict(
+        val stamp: Stamp,
+        val ok: Boolean,
+    )
+
+    private val verified = mutableMapOf<SongKey, Verdict>()
 
     /**
      * The itemId the engine last reported as current. A re-announce of the live item must not be
@@ -39,7 +42,7 @@ internal class WindowPreparer(
     private var current: String? = null
 
     suspend fun cachedRow(key: SongKey): Cached_files? =
-        withContext(disp.dbLane) {
+        withContext(disp.on(Lane.DB)) {
             db.dylanQueries.selectCached(key.provider, key.songId).executeAsOneOrNull()
         }
 
@@ -47,10 +50,13 @@ internal class WindowPreparer(
     suspend fun cachedRows(keys: Collection<SongKey>): Map<SongKey, Cached_files> {
         val wanted = keys.distinct()
         if (wanted.isEmpty()) return emptyMap()
-        return withContext(disp.dbLane) {
+        return withContext(disp.on(Lane.DB)) {
             val out = LinkedHashMap<SongKey, Cached_files>(wanted.size)
             for (k in wanted) {
-                db.dylanQueries.selectCached(k.provider, k.songId).executeAsOneOrNull()?.let { out[k] = it }
+                db.dylanQueries
+                    .selectCached(k.provider, k.songId)
+                    .executeAsOneOrNull()
+                    ?.let { out[k] = it }
             }
             out
         }
@@ -59,21 +65,46 @@ internal class WindowPreparer(
     /**
      * Blocking `stat`/`open`/`read`/`close` — four syscalls per call, 2-4 calls per track change —
      * so it runs on the io lane, never on the single state lane. Memoised per
-     * (path, size, lastModified): a file that has not changed is sniffed once, which turns the
-     * re-prepare path of a track change from four syscalls into one hash lookup.
+     * (path, size, lastModified) **and** per verdict: an unchanged file is opened once, whether it
+     * passed or failed, which turns the re-prepare path of a track change from four syscalls into
+     * one hash lookup. The stamp already carries size and mtime, so a file that is rewritten is
+     * re-sniffed without the cache going stale.
+     *
+     * The predicate is [sniffContainer] — the engine's own — so "verified by the engine" and
+     * "accepted by playback" are one function. The copy that used to live here disagreed with it in
+     * both directions: it accepted any file with `ftyp` at offset 4 (no major brand) where the
+     * engine demands one, and it rejected a bare MPEG frame sync the engine commits.
      */
     suspend fun sniffOk(row: Cached_files): Boolean {
         val key = SongKey(row.provider, row.song_id)
+        if (row.bytes <= 0L) {
+            verified.remove(key)
+            return false
+        }
         val path = paths.final(key, row.bitrate.toInt(), row.ext)
         val stamp = stampOf(path, row.bytes)
         if (stamp == null) {
             verified.remove(key)
             return false
         }
-        if (verified[key] == stamp) return true
-        val ok = withContext(disp.io) { headIsAudio(path, row.bytes) }
-        verified[key] = if (ok) stamp else Stamp.NONE
+        verified[key]?.let { if (it.stamp == stamp) return it.ok }
+        val ok = withContext(disp.on(Lane.IO)) { sniffContainer(fs, path) != null }
+        remember(key, stamp, ok)
         return ok
+    }
+
+    /**
+     * Bounded: one entry per song ever sniffed, on a component that lives for the process. A plain
+     * `mutableMapOf` grew for the life of the app; dropping the whole map at the ceiling is a hash
+     * clear, not a re-sniff storm, because a re-added entry is one io-lane hop.
+     */
+    private fun remember(
+        key: SongKey,
+        stamp: Stamp,
+        ok: Boolean,
+    ) {
+        if (verified.size >= SNIFF_CACHE_MAX) verified.clear()
+        verified[key] = Verdict(stamp, ok)
     }
 
     private fun stampOf(
@@ -86,29 +117,6 @@ internal class WindowPreparer(
         return Stamp(path.toString(), size, meta.lastModifiedAtMillis ?: UNKNOWN_MTIME)
     }
 
-    private fun headIsAudio(
-        path: Path,
-        expectedBytes: Long,
-    ): Boolean {
-        if (expectedBytes <= 0) return false
-        return runCatching {
-            fs.openReadOnly(path).use { h ->
-                val buf = ByteArray(SNIFF_BYTES)
-                var read = 0
-                while (read < SNIFF_BYTES) {
-                    val n = h.read(read.toLong(), buf, read, SNIFF_BYTES - read)
-                    if (n <= 0) break
-                    read += n
-                }
-                if (read < SNIFF_BYTES) return@use false
-                buf.decodeToString(FTYP_AT, FMP4_AT) == "ftyp" || isId3(buf)
-            }
-        }.getOrDefault(false)
-    }
-
-    private fun isId3(buf: ByteArray) =
-        buf[0] == 'I'.code.toByte() && buf[1] == 'D'.code.toByte() && buf[2] == '3'.code.toByte()
-
     /** Called from the `TrackChanged` handler and from detach, which clears it. */
     fun noteEngineCurrent(itemId: String?) {
         current = itemId
@@ -116,8 +124,6 @@ internal class WindowPreparer(
 
     private companion object {
         const val UNKNOWN_MTIME = -1L
-        const val SNIFF_BYTES = 12
-        const val FTYP_AT = 4
-        const val FMP4_AT = 8
+        const val SNIFF_CACHE_MAX = 512
     }
 }

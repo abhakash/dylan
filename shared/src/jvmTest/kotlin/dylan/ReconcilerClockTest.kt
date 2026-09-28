@@ -17,6 +17,7 @@ import dylan.support.TestLanes
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.test.TestCoroutineScheduler
 import kotlinx.coroutines.test.runTest
 import okio.FileSystem
 import okio.Path
@@ -40,7 +41,10 @@ class ReconcilerClockTest {
     private lateinit var reconciler: Reconciler
     private val clock = MutableClock()
     private val fs = FileSystem.SYSTEM
-    private val disp = TestLanes().disp
+
+    // Virtual lanes: see `TestLanes.virtual`.
+    private val scheduler = TestCoroutineScheduler()
+    private val disp = TestLanes.virtual(scheduler).disp
     private val cfg = AppConfig(clock = clock)
     private val log = LogBuffer(minLevel = LogLevel.DEBUG)
 
@@ -116,7 +120,7 @@ class ReconcilerClockTest {
 
     @Test
     fun orphanFinalSurvivesInsideTheSixtySecondWindow() =
-        runTest {
+        runTest(scheduler) {
             val orphan = write("saavn_ghost_128.m4a", agedMs = 30_000)
             reconciler.run()
             assertTrue(fs.exists(orphan), "a 30 s old orphan is inside the grace window and must survive")
@@ -124,7 +128,7 @@ class ReconcilerClockTest {
 
     @Test
     fun orphanFinalIsSweptOnceTheWindowElapses() =
-        runTest {
+        runTest(scheduler) {
             val orphan = write("saavn_ghost_128.m4a", agedMs = 30_000)
             clock.advanceSeconds(31)
             reconciler.run()
@@ -133,27 +137,41 @@ class ReconcilerClockTest {
 
     @Test
     fun partFileIsHeldForTheConfiguredPartGraceHours() =
-        runTest {
+        runTest(scheduler) {
             val part = write("saavn_half_128.m4a.part", agedMs = 59 * 60_000)
             reconciler.run()
             assertTrue(fs.exists(part), "a 59 min old .part is inside the 1 h grace window")
 
-            clock.advanceSeconds(120)
+            // `.part` age is only ever read by the *weekly* full sweep (`Reconciler.fullSweep`),
+            // and the run() above stamped `reconcile_full_ms`, so a second boot two minutes later
+            // legitimately does nothing at all. Advancing past the sweep interval is what makes
+            // the second observation a sweep rather than a no-op; the file is re-aged against the
+            // new now so the 1 h boundary is still the thing under test.
+            clock.advanceMs(FULL_SWEEP_INTERVAL_MS + 120_000)
+            assertTrue(File(part.toString()).setLastModified(clock.nowMs() - 61 * 60_000))
             reconciler.run()
             assertFalse(fs.exists(part), "a 61 min old .part is past the grace window")
         }
 
     @Test
     fun theSameFileSweepsOrSurvivesDependingOnlyOnTheInjectedClock() =
-        runTest {
+        runTest(scheduler) {
             val name = "saavn_ghost_128.m4a"
             write(name, agedMs = 90_000)
             reconciler.run()
             assertFalse(fs.exists(paths.audioDir / name), "90 s old ⇒ swept")
 
-            // Same path, same bytes, same sweep: only the injected clock moved.
+            // Same path, same bytes, same sweep: only the injected clock moved. The sweep interval
+            // has to be crossed, or the second run() short-circuits on `reconcile_full_ms` and the
+            // file survives because nothing looked at it — which is not the claim being made.
+            // The clock moves first: `write` stamps the mtime relative to *now*, so ageing before
+            // the advance would leave the file a week old, not ten seconds old.
+            clock.advanceMs(FULL_SWEEP_INTERVAL_MS)
             write(name, agedMs = 10_000)
             reconciler.run()
             assertTrue(fs.exists(paths.audioDir / name), "10 s old ⇒ inside the window, must survive")
         }
 }
+
+/** `Reconciler.FULL_SWEEP_INTERVAL_MS`, restated: the reconciler only walks the audio directory weekly. */
+private const val FULL_SWEEP_INTERVAL_MS = 7L * 24 * 60 * 60 * 1000

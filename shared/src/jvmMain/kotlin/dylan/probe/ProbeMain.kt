@@ -153,8 +153,15 @@ object Probe {
             )
         api = apiClient(CIO.create(), cfg)
         bulk = bulkClient(CIO.create(), cfg)
-        provider = SaavnProvider(api, cfg, CoroutineScope(Dispatchers.IO), TestProbeLanes.disp, TestProbeLanes.net, LogBuffer())
-
+        provider =
+            SaavnProvider(
+                api,
+                cfg,
+                CoroutineScope(Dispatchers.IO),
+                TestProbeLanes.disp,
+                TestProbeLanes.net,
+                LogBuffer(),
+            )
         // S1-S3 need no catalog seed; skipping it also keeps the nightly off the
         // three extra search+home round trips the local mode uses.
         if (mode == "ci") return structural()

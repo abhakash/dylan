@@ -131,13 +131,25 @@ SELECT provider, song_id, bitrate, ext, bytes, cached_at_ms, last_used_ms, play_
 
 -- cache_totals is trigger-maintained, so every writer outside this module (the download engine's
 -- COMMIT, the repos) updates it for free and can never leave it stale.
+--
+-- Each trigger seeds the singleton row before updating it, rather than relying on a caller to
+-- have done so. `INSERT OR IGNORE` is NOT usable here: SQLite always resolves the update half of
+-- an UPSERT with ABORT, and that resolution wins over anything the fired trigger's own statement
+-- asks for -- so an `OR IGNORE` inside a trigger degrades to a plain INSERT whenever an UPSERT
+-- (`upsertCached`) fires it, and the statement dies on `UNIQUE constraint failed`. A guarded
+-- `INSERT ... SELECT ... WHERE NOT EXISTS` cannot conflict, so no resolution algorithm is
+-- involved and the statement is correct under every outer one.
 CREATE TRIGGER trg_library_total_ins AFTER INSERT ON library
 BEGIN
+  INSERT INTO cache_totals(id, final_bytes, final_count, part_bytes, part_count)
+    SELECT 0, 0, 0, 0, 0 WHERE NOT EXISTS (SELECT 1 FROM cache_totals WHERE id = 0);
   UPDATE cache_totals SET final_bytes = final_bytes + new.bytes, final_count = final_count + 1 WHERE id = 0;
 END;
 
 CREATE TRIGGER trg_library_total_del AFTER DELETE ON library
 BEGIN
+  INSERT INTO cache_totals(id, final_bytes, final_count, part_bytes, part_count)
+    SELECT 0, 0, 0, 0, 0 WHERE NOT EXISTS (SELECT 1 FROM cache_totals WHERE id = 0);
   UPDATE cache_totals
      SET final_bytes = MAX(0, final_bytes - old.bytes),
          final_count = MAX(0, final_count - 1)
@@ -146,6 +158,8 @@ END;
 
 CREATE TRIGGER trg_library_total_upd AFTER UPDATE OF bytes ON library
 BEGIN
+  INSERT INTO cache_totals(id, final_bytes, final_count, part_bytes, part_count)
+    SELECT 0, 0, 0, 0, 0 WHERE NOT EXISTS (SELECT 1 FROM cache_totals WHERE id = 0);
   UPDATE cache_totals SET final_bytes = MAX(0, final_bytes - old.bytes + new.bytes) WHERE id = 0;
 END;
 
@@ -244,6 +258,10 @@ CREATE TABLE download_intents (
   CHECK (priority BETWEEN 0 AND 3),
   CHECK (reason IN ('USER_NOW','USER_BULK','PREFETCH_NEXT','QUALITY_UPGRADE'))
 );
+
+-- The scheduler pops intents in (priority, enqueued_at_ms) order. Without this index every pop
+-- sorts the whole table into a temp b-tree; with it the ORDER BY is the index.
+CREATE INDEX idx_intent_priority ON download_intents(priority, enqueued_at_ms);
 
 -- The scheduling order is an indexed integer, not a CASE expression duplicated across two
 -- queries. The CASE that defines it exists exactly once, in these two triggers.

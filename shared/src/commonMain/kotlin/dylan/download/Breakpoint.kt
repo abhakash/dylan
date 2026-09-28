@@ -206,7 +206,7 @@ internal fun parseContentRange(value: String): Triple<Long, Long, Long?>? {
     val m = CONTENT_RANGE.matchEntire(value.trim()) ?: return null
     val start = m.groupValues[1].toLongOrNull() ?: return null
     val end = m.groupValues[2].toLongOrNull() ?: return null
-    val total = m.groupValues[3].takeIf { it != "*" }?.toLongOrNull()
+    val total = m.groupValues[TOTAL_GROUP].takeIf { it != WILDCARD }?.toLongOrNull()
     return Triple(start, end, total)
 }
 
@@ -324,3 +324,7 @@ private const val STATUS_TOO_MANY_REQUESTS = 429
 private const val STATUS_SERVICE_UNAVAILABLE = 503
 
 private val CONTENT_RANGE = Regex("bytes\\s+(\\d+)-(\\d+)/(\\d+|\\*)")
+
+/** Group index of the total in [CONTENT_RANGE]; `*` means the origin would not say. */
+private const val TOTAL_GROUP = 3
+private const val WILDCARD = "*"

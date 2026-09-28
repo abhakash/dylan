@@ -9,10 +9,9 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.doubleOrNull
-import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 
-/**
+/*
  * Identity and coercion — everything the mapper needs to decide *what a field means* before it
  * decides *what a card is*.
  *
@@ -21,6 +20,7 @@ import kotlinx.serialization.json.longOrNull
  * needs normalising, an artist name and an artist token are independent) are the ones a fixture
  * regression is most likely to be about.
  */
+
 /**
  * Coerces the live "320kbps" field across every shape the API has shipped: Boolean literal (true),
  * numeric (1/0) and strings ("true"/"false"/"1"/"0"). Anything unrecognized (null, absent, garbage)

@@ -4,6 +4,7 @@ import dylan.config.AppConfig
 import dylan.db.Dylan
 import dylan.model.Quality
 import dylan.util.AppDispatchers
+import dylan.util.Lane
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -30,7 +31,7 @@ class SettingsStore(
     suspend fun get(key: String): String? {
         cache[key]?.let { return it }
         return mutex.withLock {
-            cache[key] ?: withContext(disp.dbLane) { db.dylanQueries.getSetting(key).executeAsOneOrNull() }
+            cache[key] ?: withContext(disp.on(Lane.DB)) { db.dylanQueries.getSetting(key).executeAsOneOrNull() }
                 ?.also { cache[key] = it }
         }
     }
@@ -40,7 +41,7 @@ class SettingsStore(
         value: String,
     ) {
         mutex.withLock {
-            withContext(disp.dbLane) { db.dylanQueries.putSetting(key, value) }
+            withContext(disp.on(Lane.DB)) { db.dylanQueries.putSetting(key, value) }
             cache[key] = value
         }
     }

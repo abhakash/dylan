@@ -267,7 +267,6 @@ class AppContainer(
                     cacheManager = cache,
                     settings = settings,
                     net = netMonitor,
-                    protectedKeys = protectedKeys,
                     log = log,
                 ),
             downloads = downloads,
@@ -476,7 +475,7 @@ class AppContainer(
 
     private suspend fun scanQualityUpgrades(): Int {
         val candidates =
-            withContext(disp.dbLane) {
+            withContext(disp.on(Lane.DB)) {
                 data.db.dylanQueries
                     .selectAllCached()
                     .executeAsList()

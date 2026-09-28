@@ -9,6 +9,7 @@ import dylan.model.SongKey
 import dylan.playback.decodeSnapshot
 import dylan.util.AppDispatchers
 import dylan.util.Clock
+import dylan.util.Lane
 import dylan.util.SystemClock
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.withContext
@@ -26,7 +27,7 @@ suspend fun Dylan.admitSongs(
     disp: AppDispatchers,
     songs: List<Song>,
     clock: Clock = SystemClock,
-) = withContext(disp.dbLane) {
+) = withContext(disp.on(Lane.DB)) {
     if (songs.isEmpty()) return@withContext
     val now = clock.nowMs()
     transaction {
@@ -76,7 +77,7 @@ class Favorites(
 
     suspend fun add(song: Song) {
         val now = clock.nowMs()
-        withContext(disp.dbLane) {
+        withContext(disp.on(Lane.DB)) {
             db.transaction {
                 // Guard like admitSong — with FK=ON a plain INSERT OR REPLACE on songs would
                 // cascade-delete cached_files/favorites for that key (F2). Only insert if absent.
@@ -110,7 +111,7 @@ class Favorites(
     }
 
     suspend fun remove(key: SongKey) =
-        withContext(disp.dbLane) {
+        withContext(disp.on(Lane.DB)) {
             db.transaction {
                 db.dylanQueries.removeFavorite(key.provider, key.songId)
                 db.dylanQueries.demotePin(key.provider, key.songId)
@@ -118,12 +119,12 @@ class Favorites(
         }.also { version.value += 1 }
 
     suspend fun isFavorite(key: SongKey): Boolean =
-        withContext(disp.dbLane) {
+        withContext(disp.on(Lane.DB)) {
             db.dylanQueries.isFavorite(key.provider, key.songId).executeAsOne()
         }
 
     suspend fun all(): List<Song> =
-        withContext(disp.dbLane) {
+        withContext(disp.on(Lane.DB)) {
             db.dylanQueries
                 .allFavorites()
                 .executeAsList()
@@ -136,7 +137,7 @@ class History(
     private val disp: AppDispatchers,
 ) {
     suspend fun recent(limit: Int): List<Song> =
-        withContext(disp.dbLane) {
+        withContext(disp.on(Lane.DB)) {
             db.dylanQueries
                 .recentHistory(limit.toLong())
                 .executeAsList()
@@ -145,7 +146,7 @@ class History(
 
     /** Album carousel personalization — pure SQLite: last-played album per (provider, album_id). */
     suspend fun recentAlbums(limit: Int): List<RecentAlbums> =
-        withContext(disp.dbLane) {
+        withContext(disp.on(Lane.DB)) {
             db.dylanQueries
                 .recentAlbums(limit.toLong())
                 .executeAsList()
@@ -158,7 +159,7 @@ class SearchHistoryRepo(
     private val cfg: AppConfig,
 ) {
     suspend fun record(display: String) =
-        withContext(disp.dbLane) {
+        withContext(disp.on(Lane.DB)) {
             val key = display.trim().lowercase()
             if (key.isNotEmpty()) {
                 db.transaction {
@@ -169,7 +170,7 @@ class SearchHistoryRepo(
         }
 
     suspend fun recent(): List<String> =
-        withContext(disp.dbLane) {
+        withContext(disp.on(Lane.DB)) {
             db.dylanQueries
                 .listSearchHistory(cfg.searchHistoryLimit.toLong())
                 .executeAsList()
@@ -177,7 +178,7 @@ class SearchHistoryRepo(
         }
 
     suspend fun clear() =
-        withContext(disp.dbLane) {
+        withContext(disp.on(Lane.DB)) {
             db.dylanQueries.clearSearchHistory()
         }
 }
@@ -188,7 +189,7 @@ class HomeCacheRepo(
     private val cfg: AppConfig,
 ) {
     suspend fun getJson(key: String): String? =
-        withContext(disp.dbLane) {
+        withContext(disp.on(Lane.DB)) {
             val row = db.dylanQueries.getHomeCache(key).executeAsOneOrNull() ?: return@withContext null
             if (cfg.clock.nowMs() - row.fetched_at_ms > cfg.homeCacheTtlMs) null else row.json
         }
@@ -196,12 +197,12 @@ class HomeCacheRepo(
     suspend fun putJson(
         key: String,
         json: String,
-    ) = withContext(disp.dbLane) {
+    ) = withContext(disp.on(Lane.DB)) {
         db.dylanQueries.putHomeCache(key, json, cfg.clock.nowMs())
     }
 
     suspend fun evictWeekly() =
-        withContext(disp.dbLane) {
+        withContext(disp.on(Lane.DB)) {
             db.dylanQueries.evictStaleHomeCache(cfg.clock.nowMs() - cfg.homeCacheTtlMs)
             db.dylanQueries.evictHomeCacheKeepNewest(cfg.homeCacheRowCap.toLong())
         }
@@ -218,7 +219,7 @@ suspend fun Dylan.upgradeCandidates(
     fromBitrate: Long,
     limit: Int,
 ): List<SongKey> =
-    withContext(disp.dbLane) {
+    withContext(disp.on(Lane.DB)) {
         dylanQueries
             .selectUpgradeCandidates(fromBitrate, limit.toLong())
             .executeAsList()
@@ -228,7 +229,7 @@ suspend fun Dylan.upgradeCandidates(
 suspend fun Dylan.weeklyGc(
     disp: AppDispatchers,
     cfg: AppConfig,
-) = withContext(disp.dbLane) {
+) = withContext(disp.on(Lane.DB)) {
     val cutoff = cfg.clock.nowMs() - cfg.songsGcAgeDays * 24L * 60 * 60 * 1000
     val rawResume = dylanQueries.getSetting("resume").executeAsOneOrNull()
     val protect = rawResume?.let { decodeSnapshot(it)?.items?.map { r -> "${r.provider}:${r.songId}" } } ?: emptyList<String>()

@@ -239,10 +239,10 @@ class FakePlayerEngine internal constructor(
     val upNext: StateFlow<LocalTrack?> get() = upNextFlow
 
     /** Suspend until some prepared window has contained an itemId starting with [prefix]. */
-    suspend fun awaitWindow(prefix: String): List<LocalTrack> =
+    suspend fun awaitWindow(matches: (itemId: String) -> Boolean): List<LocalTrack> =
         windowHistory
-            .first { ws -> ws.any { w -> w.any { it.itemId.startsWith(prefix) } } }
-            .first { w -> w.any { it.itemId.startsWith(prefix) } }
+            .first { ws -> ws.any { w -> w.any { matches(it.itemId) } } }
+            .first { w -> w.any { matches(it.itemId) } }
 
     fun currentTrack(): LocalTrack? = window.getOrNull(currentIndex)
 
@@ -331,19 +331,18 @@ class FakePlayerEngine internal constructor(
             }
     }
 
-    /**
-     * Advance the engine's media clock and publish, without waiting for a poll tick. Ticking itself
-     * — including that it stops when paused — is verified by [EngineContractTest]; this exists for
-     * graph tests that need a position past a threshold (e.g. `Intent.Previous`'s 3 s restart) and
-     * must not burn three real seconds reaching it.
-     */
-
     /** Set an absolute position, as if playback had reached it. */
     fun setPositionMs(ms: Long) {
         positionMs = ms
         mutablePosition.value = ms
     }
 
+    /**
+     * Advance the engine's media clock and publish, without waiting for a poll tick. Ticking itself
+     * — including that it stops when paused — is verified by [EngineContractTest]; this exists for
+     * graph tests that need a position past a threshold (e.g. `Intent.Previous`'s 3 s restart) and
+     * must not burn three real seconds reaching it.
+     */
     fun advancePlaybackClock(ms: Long) {
         positionMs += ms
         mutablePosition.value = positionMs
