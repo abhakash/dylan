@@ -235,6 +235,20 @@ class CacheManager(
      * claims, so there is no per-viction re-serialisation of the exclusion list and no mid-pass
      * re-read: v0's `SELECT ... LIMIT 1` loop re-serialised the whole `NOT IN ?` list per victim,
      * i.e. 200 full sorts and ~20 000 bound parameters for a 200-row bulk eviction.
+     *
+     * **The loop must discount what it has already claimed.** `cache_totals` is maintained by the
+     * library triggers, so it only moves when a row is *dropped* — and the drop deliberately
+     * happens after the unlink, in [finishReap], once this function has returned. A row that this
+     * pass has claimed (state READY -> EVICTING) is therefore still counted in the totals the next
+     * iteration reads. Without the discount below, iteration N+1 derives byte-for-byte the same
+     * over-budget figures as iteration N, `need` never shrinks, and the loop keeps claiming until
+     * `lruVictims` runs dry: the WHOLE eligible pool is destroyed instead of the excess. That is
+     * exactly what a stale-materialisation bug looks like from the outside, and it is why
+     * `unplayedEvictsBeforeRecentlyPlayed` saw zero survivors rather than a wrong victim.
+     *
+     * A claim whose unlink later FAILS is restored to READY with its row and its bytes still in
+     * the totals, so the next `enforceBudget` re-derives the overage and retries it. The discount
+     * is per-pass and never touches `cache_totals`, so that retry semantics is unchanged.
      */
     private suspend fun claimLruVictims(
         netNewBytes: Long,
@@ -242,10 +256,12 @@ class CacheManager(
         exempt: Set<SongKey>,
     ): List<Claim> {
         val out = mutableListOf<Claim>()
+        var claimedBytes = 0L
+        var claimedRows = 0L
         while (true) {
             val totals = withContext(disp.on(Lane.DB)) { db.dylanQueries.cachedCountAndBytes().executeAsOne() }
-            val rowCount = totals.song_count
-            val byteCount = totals.total_bytes
+            val rowCount = (totals.song_count - claimedRows).coerceAtLeast(0L)
+            val byteCount = (totals.total_bytes - claimedBytes).coerceAtLeast(0L)
             val partBytes = withContext(disp.on(Lane.DB)) { db.dylanQueries.partTotals().executeAsOne() }
             val usage = byteCount + partBytes.part_bytes + netNewBytes
             val rows = rowCount + pendingRows
@@ -255,6 +271,11 @@ class CacheManager(
             val batch = claimBatch(overRows, overBytes, rowCount, byteCount, exempt)
             if (batch.isEmpty()) return out
             out += batch
+            // One claimed rendition == one library row == the bytes it reports: `media_objects`
+            // carries the library row's active rendition (trg_library_asset_{ins,upd}), so dropping
+            // it removes exactly this row and this many bytes from the totals.
+            claimedRows += batch.size
+            claimedBytes += batch.sumOf { it.bytes }
         }
     }
 
