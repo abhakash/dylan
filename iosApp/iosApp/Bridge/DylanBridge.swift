@@ -392,12 +392,27 @@ extension KGraph {
         }
     }
 
-    func removeDownloaded(_ info: KCachedSongInfo) async {
+    /// False means `CacheManager.evictOne` refused: the key is protected (playing, queued,
+    /// mid-download, or the source of an in-flight quality upgrade) or the row was already gone.
+    @discardableResult
+    func removeDownloaded(_ info: KCachedSongInfo) async -> Bool {
         do {
-            try await removeDownload(key: info.song.key)
+            let v = try await removeDownload(key: info.song.key) as? KotlinBoolean
+            return v?.boolValue ?? false
         } catch {
             bridgeLog.error("removeDownload failed: \(error.localizedDescription)")
             onToast?("Check your connection and try again.")
+            return false
+        }
+    }
+
+    /// Terminal graph teardown (Ktor clients, HTTP engine, file log, the state lane's SupervisorJob).
+    /// Suspends, so it needs a live task — see AppEnvironment.teardown().
+    func teardownGraph() async {
+        do {
+            try await dispose()
+        } catch {
+            bridgeLog.error("graph teardown failed: \(error.localizedDescription)")
         }
     }
 

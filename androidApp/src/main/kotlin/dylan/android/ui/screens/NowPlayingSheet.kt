@@ -27,7 +27,6 @@ import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -40,14 +39,17 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import dylan.android.DylanApp
 import dylan.android.media.AudioRoute
 import dylan.android.media.RouteKind
 import dylan.android.ui.LocalDylanTokens
 import dylan.android.ui.PlayPauseIcon
+import dylan.android.ui.components.rememberDownloadPct
 import dylan.di.AppContainer
 import dylan.model.Repeat
+import dylan.model.SongKey
 import dylan.playback.Intent
 import kotlinx.coroutines.launch
 
@@ -59,15 +61,14 @@ fun NowPlayingSheet(
     onOpenArtist: (String, String) -> Unit = { _, _ -> },
     onEnsureService: () -> Unit = {},
 ) {
-    val state by container.orchestrator.state.collectAsState()
-    val posMs by container.orchestrator.positionMs.collectAsState(0L)
+    val state by container.orchestrator.state.collectAsStateWithLifecycle()
     val t = LocalDylanTokens.current
     val song = state.current ?: return
     val durMs = (song.durationS * 1000L).coerceAtLeast(1)
     val scope = androidx.compose.runtime.rememberCoroutineScope()
     // E6: favorite state must survive toggles and stay fresh across screens — key the read on
     // both the song and the repo's invalidation counter instead of a one-shot load.
-    val favVersion by container.favorites.version.collectAsState()
+    val favVersion by container.favorites.version.collectAsStateWithLifecycle()
     var isFavorite by remember(song.key.songId) { mutableStateOf(false) }
     LaunchedEffect(song.key.songId, favVersion) {
         isFavorite = runCatching { container.favorites.isFavorite(song.key) }.getOrDefault(false)
@@ -86,19 +87,13 @@ fun NowPlayingSheet(
         bitsLabel = row?.bitrate?.let { "${it}kbps" } ?: ""
     }
 
-    // Keyed on the song so a track change resets any in-flight drag (no stale dragPos).
-    var dragging by remember(song.key) { mutableStateOf(false) }
-    var dragPos by remember(song.key) { mutableFloatStateOf(0f) }
     val isLoading = state.phase is dylan.model.Phase.Resolving || state.phase is dylan.model.Phase.Downloading
-    // Resume position is preserved: while loading we keep showing posMs (never snap to 0).
-    val shown = if (dragging) dragPos else posMs.toFloat()
     // Scrubbable only once transportable (Playing/Paused/Ready) and not mid-resolve.
     val transportable =
         state.phase is dylan.model.Phase.Playing ||
             state.phase is dylan.model.Phase.Paused ||
             state.phase is dylan.model.Phase.Ready
-    val downloadProgress by container.downloads.progress.collectAsState()
-    val currentDownloadPct = downloadProgress[state.current?.key]
+    val currentDownloadPct = rememberDownloadPct(container, song.key)
 
     // Centering contract (per Compose bottom-sheet guidance): the overlay box is
     // 94% of the screen while the content is a fixed stack. Anchor top while it
@@ -151,7 +146,7 @@ fun NowPlayingSheet(
                             )
                             Text(
                                 when (state.phase) {
-                                    is dylan.model.Phase.Downloading -> "DOWNLOADING ${currentDownloadPct ?: 0}%"
+                                    is dylan.model.Phase.Downloading -> "DOWNLOADING ${currentDownloadPct.value ?: 0}%"
                                     else -> "PREPARING"
                                 },
                                 style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 1.2.sp),
@@ -196,7 +191,7 @@ fun NowPlayingSheet(
                         .padding(top = 8.dp),
                     contentAlignment = Alignment.Center,
                 ) {
-                    val pct = currentDownloadPct
+                    val pct = currentDownloadPct.value
                     if (pct != null) {
                         androidx.compose.material3.LinearProgressIndicator(
                             progress = { pct / 100f },
@@ -213,78 +208,13 @@ fun NowPlayingSheet(
                     }
                 }
             } else {
-                Slider(
-                    value = shown.coerceIn(0f, durMs.toFloat()),
-                    onValueChange = {
-                        dragging = true
-                        dragPos = it
-                    },
-                    onValueChangeFinished = {
-                        container.orchestrator.submit(Intent.Seek(dragPos.toLong()))
-                        dragging = false
-                    },
-                    enabled = !isLoading && transportable,
-                    valueRange = 0f..durMs.toFloat(),
-                    colors =
-                        SliderDefaults.colors(
-                            thumbColor = t.primary,
-                            activeTrackColor = t.primary,
-                            inactiveTrackColor = t.divider,
-                            activeTickColor = androidx.compose.ui.graphics.Color.Transparent,
-                            inactiveTickColor = androidx.compose.ui.graphics.Color.Transparent,
-                            disabledThumbColor = t.divider,
-                            disabledActiveTrackColor = t.divider,
-                            disabledInactiveTrackColor = t.divider,
-                        ),
-                    thumb = {
-                        Box(
-                            Modifier
-                                .size(if (dragging) 22.dp else 18.dp)
-                                .background(if (isLoading) t.divider else t.primary)
-                                .padding(3.dp)
-                                .background(androidx.compose.ui.graphics.Color.White),
-                        )
-                    },
-                    track = { sliderState ->
-                        val range = sliderState.valueRange
-                        val frac =
-                            if (range.endInclusive > range.start) {
-                                ((sliderState.value - range.start) / (range.endInclusive - range.start)).coerceIn(0f, 1f)
-                            } else {
-                                0f
-                            }
-                        Box(Modifier.fillMaxWidth().height(if (dragging) 6.dp else 4.dp).background(t.divider)) {
-                            Box(
-                                Modifier
-                                    .fillMaxWidth(frac)
-                                    .fillMaxHeight()
-                                    .background(if (isLoading) t.divider else t.primary),
-                            )
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth().height(36.dp).padding(top = 8.dp),
-                )
-            }
-            Row(
-                Modifier.fillMaxWidth().padding(horizontal = 2.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-            ) {
-                Text(
-                    formatTime(shown.toLong()),
-                    style = MaterialTheme.typography.bodyMedium.copy(fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold),
-                    color =
-                        if (dragging) {
-                            t.primary
-                        } else if (isLoading) {
-                            t.textSecondary
-                        } else {
-                            t.textPrimary
-                        },
-                )
-                Text(
-                    formatTime(durMs),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = t.textSecondary,
+                SeekBar(
+                    container = container,
+                    songKey = song.key,
+                    durMs = durMs,
+                    enabled = transportable,
+                    dim = t.divider,
+                    accent = t.primary,
                 )
             }
 
@@ -303,14 +233,15 @@ fun NowPlayingSheet(
                 Box(
                     Modifier
                         .size(64.dp)
-                        .background(t.primary)
-                        .clickable {
-                            onEnsureService()
-                            container.orchestrator.submit(Intent.TogglePlayPause)
-                        },
+                        .background(t.primary),
                     contentAlignment = Alignment.Center,
                 ) {
-                    PlayPauseIcon(container, size = 48, onEnsureService = onEnsureService)
+                    PlayPauseIcon(
+                        container = container,
+                        size = 48,
+                        playing = state.phase is dylan.model.Phase.Playing,
+                        onEnsureService = onEnsureService,
+                    )
                 }
                 IconButton(onClick = { container.orchestrator.submit(Intent.Next) }) {
                     Icon(dylan.android.ui.Dyl.Next, "Next", tint = t.textPrimary)
@@ -396,9 +327,100 @@ private fun formatTime(ms: Long): String {
     return "%d:%02d".format(s / 60, s % 60)
 }
 
+/**
+ * Slider plus elapsed/duration, isolated so the 10 Hz position invalidates this subtree only — the
+ * artwork, marquee and transport row above it do not recompose while a track plays. Drag state is
+ * keyed on the song so a track change cannot leave a stale thumb position behind.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SeekBar(
+    container: AppContainer,
+    songKey: SongKey,
+    durMs: Long,
+    enabled: Boolean,
+    dim: androidx.compose.ui.graphics.Color,
+    accent: androidx.compose.ui.graphics.Color,
+) {
+    val t = LocalDylanTokens.current
+    val posMs by container.orchestrator.positionMs.collectAsStateWithLifecycle(0L)
+    var dragging by remember(songKey) { mutableStateOf(false) }
+    var dragPos by remember(songKey) { mutableFloatStateOf(0f) }
+    // Resume position is preserved: while loading we keep showing posMs (never snap to 0).
+    val shown = if (dragging) dragPos else posMs.toFloat()
+    Column {
+        Slider(
+            value = shown.coerceIn(0f, durMs.toFloat()),
+            onValueChange = {
+                dragging = true
+                dragPos = it
+            },
+            onValueChangeFinished = {
+                container.orchestrator.submit(Intent.Seek(dragPos.toLong()))
+                dragging = false
+            },
+            enabled = enabled,
+            valueRange = 0f..durMs.toFloat(),
+            colors =
+                SliderDefaults.colors(
+                    thumbColor = accent,
+                    activeTrackColor = accent,
+                    inactiveTrackColor = dim,
+                    activeTickColor = androidx.compose.ui.graphics.Color.Transparent,
+                    inactiveTickColor = androidx.compose.ui.graphics.Color.Transparent,
+                    disabledThumbColor = dim,
+                    disabledActiveTrackColor = dim,
+                    disabledInactiveTrackColor = dim,
+                ),
+            thumb = {
+                Box(
+                    Modifier
+                        .size(if (dragging) 22.dp else 18.dp)
+                        .background(dim)
+                        .padding(3.dp)
+                        .background(androidx.compose.ui.graphics.Color.White),
+                )
+            },
+            track = { sliderState ->
+                val range = sliderState.valueRange
+                val frac =
+                    if (range.endInclusive > range.start) {
+                        ((sliderState.value - range.start) / (range.endInclusive - range.start)).coerceIn(0f, 1f)
+                    } else {
+                        0f
+                    }
+                Box(Modifier.fillMaxWidth().height(if (dragging) 6.dp else 4.dp).background(dim)) {
+                    Box(
+                        Modifier
+                            .fillMaxWidth(frac)
+                            .fillMaxHeight()
+                            .background(accent),
+                    )
+                }
+            },
+            modifier = Modifier.fillMaxWidth().height(36.dp).padding(top = 8.dp),
+        )
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 2.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Text(
+                formatTime(shown.toLong()),
+                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold),
+                color = if (dragging) accent else t.textPrimary,
+            )
+            Text(
+                formatTime(durMs),
+                style = MaterialTheme.typography.bodyMedium,
+                color = t.textSecondary,
+            )
+        }
+    }
+}
+
 @Composable
 private fun rememberAudioRoute(): AudioRoute? {
     val app = LocalContext.current.applicationContext as? DylanApp
     val flow = remember(app) { app?.mediaHub?.audioRoute }
-    return flow?.collectAsState()?.value
+    return flow?.collectAsStateWithLifecycle()?.value
 }

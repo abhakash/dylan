@@ -28,6 +28,8 @@ CREATE TABLE library (
   CHECK (bitrate > 0),
   CHECK (ext <> ''),
   CHECK (play_count >= 0),
+  -- A pin without a pin timestamp (or the reverse) is the phantom-pin bug of §3.9: nothing
+  -- clears it. They are one fact.
   CHECK ((pinned = 0) = (pinned_at_ms IS NULL))
 );
 
@@ -156,6 +158,11 @@ SELECT provider, song_id, bitrate, ext, bytes, cached_at_ms, last_used_ms, play_
  WHERE provider IS NOT NULL;
 
 CREATE INDEX idx_songs_gc ON songs(updated_at_ms);
+
+-- recentAlbums' per-album "which song of this album did the user play last" probe. v0 had no
+-- index on songs at all, so an upgraded install silently ran the carousel on a full scan for
+-- ever while a fresh install did not.
+CREATE INDEX idx_songs_album ON songs(provider, album_id, song_id);
 
 -- play_history had no index on its own FK columns, so gcSongs' NOT EXISTS full-scanned the whole
 -- history for every candidate song. idx_history also gains id so trimHistory's ORDER BY

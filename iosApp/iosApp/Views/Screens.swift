@@ -430,6 +430,11 @@ struct DownloadsScreen: View {
                             Button(role: .destructive) {
                                 pending = info
                             } label: { Label("Remove", systemImage: "trash") }
+                            // Nothing depends on a protected key, so the gesture is refused
+                            // rather than offered and then rejected. `CacheManager` still has the
+                            // last word at eviction time — the protection set can change between
+                            // this render and the tap.
+                            .disabled(!info.removable)
                         }
                     }
                     Text("Cached audio \(formatBytes(env.library.totalBytes)) of \(formatBytes(env.graph.cfg.cacheMaxBytes)) \u{00B7} \(env.library.downloads.count) songs")
@@ -451,10 +456,14 @@ struct DownloadsScreen: View {
             set: { if !$0 { pending = nil } }
         )) {
             Button("Remove", role: .destructive) {
-                if let p = pending {
-                    Task { await env.library.removeDownload(p, env.graph) }
-                }
+                guard let p = pending else { return }
                 pending = nil
+                Task {
+                    // A refusal is not an error: the key was protected, so the file is still there
+                    // and the row still is. Say so instead of leaving a silent no-op.
+                    if await env.library.removeDownload(p, env.graph) { return }
+                    env.toasts.show("Still playing or still downloading — can’t remove this one.")
+                }
             }
             Button("Cancel", role: .cancel) { pending = nil }
         } message: {

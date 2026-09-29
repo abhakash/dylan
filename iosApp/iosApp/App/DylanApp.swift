@@ -122,8 +122,32 @@ final class AppEnvironment {
         return shared
     }
 
+    /// Terminal teardown: the path monitor, the AVQueuePlayer, and then the whole Kotlin graph
+    /// (Ktor clients, the Darwin engine, the file-log handle, the SQLite-owning components and the
+    /// state lane's SupervisorJob). Idempotent — `shared` is cleared first, and
+    /// `IosGraph.dispose()` is one-shot behind its own guard.
+    ///
+    /// The terminate hook is the only caller that actually runs: `shared` is a process-lifetime
+    /// singleton, so `deinit` is not a lifecycle event and never fires. iOS may also kill the
+    /// process without calling `applicationWillTerminate` at all — that is a platform guarantee,
+    /// not something this app can close — but leaving the graph up for the whole process when it is
+    /// *not* killed is what made the contract fiction.
+    static func teardown() {
+        let env = shared
+        shared = nil
+        guard let env else { return }
+        env.pathMonitor.cancel()
+        env.output.dispose()
+        // `dispose()` suspends, so it needs a task, and a task must not capture the object being
+        // torn down — the graph is captured by value instead.
+        Task { await env.graph.teardownGraph() }
+    }
+
     deinit {
+        // Unreachable for the singleton; kept so a released environment still stops the monitor
+        // and the player. The graph is released by `teardown()`.
         pathMonitor.cancel()
+        output.dispose()
     }
 
     // ---- UI action helpers ---------------------------------------------------------------
@@ -194,6 +218,7 @@ final class AppEnvironment {
 
 @main
 struct DylanApp: App {
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     private let env = AppEnvironment.bootstrap()
 
     var body: some Scene {
@@ -202,5 +227,15 @@ struct DylanApp: App {
                 .environment(env)
                 .tint(DylanTokens.primary)
         }
+    }
+}
+
+/// The one lifecycle hook iOS actually delivers before it reaps a process. `scenePhase` is not it:
+/// an audio app goes `.background` on every Control-Center pull and locks the screen, and tearing
+/// the graph down there would kill playback that is supposed to continue.
+@MainActor
+final class AppDelegate: NSObject, UIApplicationDelegate {
+    func applicationWillTerminate(_: UIApplication) {
+        AppEnvironment.teardown()
     }
 }

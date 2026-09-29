@@ -22,7 +22,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -32,6 +31,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dylan.android.ui.Copy
 import dylan.android.ui.LocalDylanTokens
 import dylan.android.ui.components.OfflineBanner
@@ -60,7 +60,7 @@ fun HomeScreen(
     onOpenArtist: (MiniEntity) -> Unit = {},
 ) {
     val t = LocalDylanTokens.current
-    val snapshot by container.homeSnapshot.collectAsState()
+    val snapshot by container.homeSnapshot.collectAsStateWithLifecycle()
     var trending by remember { mutableStateOf<List<dylan.model.MiniEntity>>(emptyList()) }
     var topSearches by remember { mutableStateOf<List<dylan.model.MiniEntity>>(emptyList()) }
     var jumpBack by remember { mutableStateOf(snapshot.jumpBack) }

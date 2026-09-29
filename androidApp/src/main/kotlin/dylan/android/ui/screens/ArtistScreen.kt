@@ -20,7 +20,6 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -32,12 +31,14 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import dylan.android.ui.Copy
 import dylan.android.ui.LocalDylanTokens
 import dylan.android.ui.components.SongRow
 import dylan.android.ui.components.canPlay
 import dylan.android.ui.components.rememberCachedKeys
+import dylan.android.ui.components.rememberDownloadPct
 import dylan.android.ui.components.rememberIsOnline
 import dylan.di.AppContainer
 import dylan.model.Artist
@@ -72,12 +73,11 @@ fun ArtistScreen(
     }
 
     val songs = artist?.songs.orEmpty()
-    val st by container.orchestrator.state.collectAsState()
+    val st by container.orchestrator.state.collectAsStateWithLifecycle()
     val playing = st.phase is dylan.model.Phase.Playing
     val ctx = LocalContext.current
     val isOnline = rememberIsOnline(container)
     val cachedKeys = rememberCachedKeys(container)
-    val progress by container.downloads.progress.collectAsState()
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 24.dp)) {
         item {
             Box(Modifier.fillMaxWidth()) {
@@ -133,12 +133,13 @@ fun ArtistScreen(
         }
         itemsIndexed(songs) { i, song ->
             val can = canPlay(isOnline, cachedKeys, song.key)
+            val pct = rememberDownloadPct(container, song.key)
             SongRow(
                 song = song,
                 index = i + 1,
                 isPlaying = song.key == st.current?.key && playing,
                 isCached = song.key in cachedKeys,
-                progressPct = progress[song.key],
+                progressPct = pct.value,
                 enabled = can,
                 onTap = {
                     if (!can) {

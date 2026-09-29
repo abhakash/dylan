@@ -371,9 +371,13 @@ final class LibraryStore {
         jumpBack = await g.historyRecent(5)
     }
 
-    func removeDownload(_ info: KCachedSongInfo, _ g: KGraph) async {
-        await g.removeDownloaded(info)
+    /// True when the cached row and its file are gone; false when the eviction was refused
+    /// because something still depends on the key.
+    @discardableResult
+    func removeDownload(_ info: KCachedSongInfo, _ g: KGraph) async -> Bool {
+        let removed = await g.removeDownloaded(info)
         await loadDownloads(g)
+        return removed
     }
 }
 

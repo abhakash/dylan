@@ -32,9 +32,13 @@ class ExoPlayerEngine(
     /**
      * Notification/lock-screen artwork: Media3 renders `artworkData` bitmaps but
      * never fetches remote `artworkUri` itself. Each prepared item gets a Coil
-     * load (software bitmap, 512px); on success the item's metadata is replaced
-     * so the notification refreshes. Loads are per-itemId cancellable and die
-     * with prepare()/release().
+     * load (512px); on success the item's metadata is replaced so the
+     * notification refreshes. Loads are per-itemId cancellable and die with
+     * prepare()/release().
+     *
+     * The load goes through the singleton configured in [dylan.android.DylanApp]. A per-load
+     * `ImageLoader` would own its own (empty) memory cache, disk cache and HTTP client, so every
+     * prepare re-fetched and re-decoded the same cover.
      */
     private val artScope =
         kotlinx.coroutines.CoroutineScope(
@@ -52,27 +56,7 @@ class ExoPlayerEngine(
             artScope.launch {
                 // MediaMetadata.artworkData is a byte[] — decode via Coil, ship JPEG
                 // bytes and let Media3's notification manager decode the large icon.
-                val bytes =
-                    runCatching {
-                        val loader = coil3.ImageLoader(appContext)
-                        val req =
-                            coil3.request.ImageRequest
-                                .Builder(appContext)
-                                .data(url)
-                                .size(512)
-                                .build()
-                        val raw = (loader.execute(req).image as? coil3.BitmapImage)?.bitmap ?: return@launch
-                        // compress() throws on HARDWARE-config bitmaps — copy out first.
-                        val bitmap =
-                            if (raw.config == android.graphics.Bitmap.Config.HARDWARE) {
-                                raw.copy(android.graphics.Bitmap.Config.ARGB_8888, false) ?: return@launch
-                            } else {
-                                raw
-                            }
-                        val out = java.io.ByteArrayOutputStream()
-                        bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, out)
-                        out.toByteArray()
-                    }.getOrNull() ?: return@launch
+                val bytes = fetchArtworkBytes(url) ?: return@launch
                 postToMedia {
                     val idx = (0 until player.mediaItemCount).firstOrNull { player.getMediaItemAt(it).mediaId == itemId }
                     if (idx != null) {
@@ -87,6 +71,29 @@ class ExoPlayerEngine(
                 }
             }
     }
+
+    /** Singleton loader ⇒ the app's memory + disk cache; see [loadArtwork]. */
+    private suspend fun fetchArtworkBytes(url: String): ByteArray? =
+        runCatching {
+            val loader = coil3.SingletonImageLoader.get(appContext)
+            val req =
+                coil3.request.ImageRequest
+                    .Builder(appContext)
+                    .data(url)
+                    .size(512)
+                    .build()
+            val raw = (loader.execute(req).image as? coil3.BitmapImage)?.bitmap ?: return@runCatching null
+            // compress() throws on HARDWARE-config bitmaps — copy out first.
+            val bitmap =
+                if (raw.config == android.graphics.Bitmap.Config.HARDWARE) {
+                    raw.copy(android.graphics.Bitmap.Config.ARGB_8888, false) ?: return@runCatching null
+                } else {
+                    raw
+                }
+            val out = java.io.ByteArrayOutputStream()
+            bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, out)
+            out.toByteArray()
+        }.onFailure { log.d("art", "cover failed: ${it.message}") }.getOrNull()
 
     private fun cancelArtwork() {
         artJobs.values.forEach { it.cancel() }
@@ -176,6 +183,24 @@ class ExoPlayerEngine(
 
                     override fun onIsPlayingChanged(isPlaying: Boolean) {
                         pollPosition()
+                    }
+
+                    /**
+                     * Media3 pauses for one reason the Orchestrator did not ask for and never resumes
+                     * on its own: audio became noisy (headphones/BT dropped). Without this event the
+                     * shared phase keeps claiming `Playing`, so a lock-screen Play — routed through
+                     * the Orchestrator, so the app UI can follow it — reads as "already playing" and
+                     * pauses instead of resuming. Focus loss is deliberately NOT reported: Media3
+                     * auto-resumes on `AUDIOFOCUS_GAIN`, and the Orchestrator has no event that
+                     * moves the phase forward with it.
+                     */
+                    override fun onPlayWhenReadyChanged(
+                        playWhenReady: Boolean,
+                        reason: Int,
+                    ) {
+                        if (playWhenReady) return
+                        if (reason != Player.PLAY_WHEN_READY_CHANGE_REASON_AUDIO_BECOMING_NOISY) return
+                        emit(EngineEvent.Interrupted(shouldResume = false))
                     }
                 },
             )

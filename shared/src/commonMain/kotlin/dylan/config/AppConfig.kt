@@ -45,10 +45,13 @@ data class AppConfig(
      * In-memory LRU entries for album/artist/home/topSearches.
      */
     val catalogLruEntries: Int = 24,
-    /** How long a failed endpoint is answered from cache instead of re-requested. */
+    /**
+     * How long a failed endpoint is answered from cache instead of re-requested. This is the
+     * catalog's *only* backoff: the origin's `Retry-After` is parsed nowhere in production
+     * (`ResilientClient.retryAfterMs` has test-only callers), so a 429 costs exactly this long
+     * regardless of what the origin asked for.
+     */
     val catalogNegativeTtlMs: Long = 30_000,
-    /** `Retry-After` longer than this is not honoured; the negative TTL wins instead. */
-    val catalogRetryAfterCapMs: Long = 60_000,
     val submitPageSize: Int = 20,
     val cacheMaxFiles: Int = 300,
     val cacheMaxBytes: Long = 2L * 1024 * 1024 * 1024,

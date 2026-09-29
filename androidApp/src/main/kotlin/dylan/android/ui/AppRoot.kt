@@ -29,7 +29,6 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateListOf
@@ -39,12 +38,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import dylan.android.ui.screens.AlbumScreen
 import dylan.android.ui.screens.ArtistScreen
@@ -55,6 +56,7 @@ import dylan.android.ui.screens.NowPlayingSheet
 import dylan.android.ui.screens.QueueSheet
 import dylan.android.ui.screens.SearchScreen
 import dylan.di.AppContainer
+import dylan.model.Phase
 import dylan.playback.Intent
 import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.launch
@@ -87,18 +89,26 @@ fun AppRoot(
     onFirstPlay: () -> Unit,
     onReportDrawn: () -> Unit,
 ) {
-    val state by container.orchestrator.state.collectAsState()
+    val state by container.orchestrator.state.collectAsStateWithLifecycle()
     val backStack = remember { mutableStateListOf<Screen>(Screen.Tab(0)) }
     var sheet by remember { mutableStateOf(Sheet.Closed) }
 
-    val playNow: (List<dylan.model.Song>, Int) -> Unit = { songs, idx ->
-        onFirstPlay()
-        container.orchestrator.submit(Intent.PlayNow(songs, idx))
-    }
-    val openArtist: (dylan.model.MiniEntity) -> Unit = { m ->
-        val token = m.artistId.orEmpty()
-        if (token.isNotBlank()) backStack.add(Screen.Artist(m.title, token))
-    }
+    // Stable across recompositions: a fresh lambda instance here is a changed parameter for all
+    // six screens, so none of them could skip.
+    val playNow =
+        remember(container, onFirstPlay) {
+            { songs: List<dylan.model.Song>, idx: Int ->
+                onFirstPlay()
+                container.orchestrator.submit(Intent.PlayNow(songs, idx))
+            }
+        }
+    val openArtist =
+        remember(backStack) {
+            { m: dylan.model.MiniEntity ->
+                val token = m.artistId.orEmpty()
+                if (token.isNotBlank()) backStack.add(Screen.Artist(m.title, token))
+            }
+        }
 
     fun pop() {
         if (backStack.size > 1) backStack.removeAt(backStack.lastIndex)
@@ -363,10 +373,8 @@ fun MiniPlayer(
     onLongPressClear: () -> Unit,
     onEnsureService: () -> Unit = {},
 ) {
-    val state by container.orchestrator.state.collectAsState()
-    val pos by container.orchestrator.positionMs.collectAsState(0L)
+    val state by container.orchestrator.state.collectAsStateWithLifecycle()
     val t = LocalDylanTokens.current
-    val durMs = ((state.current?.durationS ?: 0L) * 1000L).coerceAtLeast(1)
     Row(
         modifier =
             Modifier
@@ -422,27 +430,49 @@ fun MiniPlayer(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            Box(
-                Modifier
-                    .padding(top = 4.dp)
-                    .height(1.dp)
-                    .fillMaxWidth((pos.toFloat() / durMs).coerceIn(0f, 1f))
-                    .background(t.textPrimary),
-            )
+            MiniProgress(container, (state.current?.durationS ?: 0L) * 1000L, t.textPrimary)
         }
-        PlayPauseIcon(container, size = 32, onEnsureService = onEnsureService)
+        PlayPauseIcon(container, size = 32, playing = state.phase is Phase.Playing, onEnsureService = onEnsureService)
     }
+}
+
+/** Vertical centre of the 1 dp track: the scale is horizontal, so it must grow from the left. */
+private const val BAR_CENTRE = 0.5f
+
+private val LeftOrigin = TransformOrigin(0f, BAR_CENTRE)
+
+/**
+ * The 10 Hz position never recomposes anything above it: the read is deferred into the layer block
+ * (a draw-phase read) and the track is a full-width bar scaled horizontally, so no measure or
+ * layout pass runs per tick.
+ */
+@Composable
+private fun MiniProgress(
+    container: AppContainer,
+    durationMs: Long,
+    color: androidx.compose.ui.graphics.Color,
+) {
+    val pos = container.orchestrator.positionMs.collectAsStateWithLifecycle(0L)
+    val dur = durationMs.coerceAtLeast(1L)
+    Box(
+        Modifier
+            .padding(top = 4.dp)
+            .height(1.dp)
+            .fillMaxWidth()
+            .graphicsLayer {
+                transformOrigin = LeftOrigin
+                scaleX = (pos.value.toFloat() / dur).coerceIn(0f, 1f)
+            }.background(color),
+    )
 }
 
 @Composable
 internal fun PlayPauseIcon(
     container: AppContainer,
     size: Int,
+    playing: Boolean,
     onEnsureService: () -> Unit = {},
 ) {
-    val state by container.orchestrator.state.collectAsState()
-    // Pause glyph only while actually Playing — Ready is pre-audible, not playing.
-    val playing = state.phase is dylan.model.Phase.Playing
     IconButton(
         onClick = {
             // After process death the snapshot restores PAUSED with no service running — a bare
@@ -452,6 +482,7 @@ internal fun PlayPauseIcon(
         },
         modifier = Modifier.height(size.dp),
     ) {
+        // Pause glyph only while actually Playing — Ready is pre-audible, not playing.
         androidx.compose.material3.Icon(
             imageVector = if (playing) Dyl.Pause else Dyl.Play,
             contentDescription = if (playing) "Pause" else "Play",

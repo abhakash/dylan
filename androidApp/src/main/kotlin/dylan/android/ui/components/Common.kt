@@ -10,7 +10,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -19,10 +19,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dylan.android.ui.Copy
 import dylan.android.ui.LocalDylanTokens
 import dylan.di.AppContainer
 import dylan.model.SongKey
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
 
 @Composable
@@ -72,7 +74,8 @@ fun OfflineBanner() {
 @Composable
 fun rememberIsOnline(container: AppContainer): Boolean {
     val ctx = LocalContext.current
-    val netClass by container.netMonitor.changes().collectAsState(initial = container.netMonitor.current())
+    val changes = container.netMonitor.changes()
+    val netClass by changes.collectAsStateWithLifecycle(initialValue = container.netMonitor.current())
     return remember(netClass) {
         val cm = ctx.getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager
         cm?.activeNetwork != null
@@ -83,9 +86,10 @@ fun rememberIsOnline(container: AppContainer): Boolean {
 @Composable
 fun rememberCachedKeys(container: AppContainer): Set<SongKey> {
     var keys by remember { mutableStateOf(emptySet<SongKey>()) }
-    val progress by container.downloads.progress.collectAsState()
-    // Re-query only when the in-flight key set changes (a finish/drop), not on every pct tick.
-    LaunchedEffect(progress.keys) {
+    // Keyed on the in-flight key SET, not the progress map: a percentage tick for one song must
+    // not invalidate every screen that shows an offline gate, and it must not re-run the query.
+    val inflight = rememberDownloadingKeys(container)
+    LaunchedEffect(inflight) {
         keys =
             withContext(container.disp.dbLane) {
                 runCatching {
@@ -98,6 +102,35 @@ fun rememberCachedKeys(container: AppContainer): Set<SongKey> {
             }
     }
     return keys
+}
+
+/** The set of keys with a transfer in flight; changes only when a download starts or ends. */
+@Composable
+private fun rememberDownloadingKeys(container: AppContainer): Set<SongKey> {
+    val flow = remember(container) { container.downloads.progress.map { it.keys } }
+    val keys by flow.collectAsStateWithLifecycle(initialValue = emptySet())
+    return keys
+}
+
+/**
+ * One row's download percentage. Keyed on [key] so another song's ticks cannot invalidate this
+ * row: the shared map is a single value, read per row, it made every visible row of every screen
+ * recompose four times a second per active download.
+ */
+@Composable
+fun rememberDownloadPct(
+    container: AppContainer,
+    key: SongKey,
+): State<Int?> {
+    val flow = remember(container, key) { container.downloads.progress.map { it[key] } }
+    return flow.collectAsStateWithLifecycle(initialValue = null)
+}
+
+/** Whether any transfer is in flight, as a distinct boolean so a tick is not a recomposition. */
+@Composable
+fun rememberAnyDownloading(container: AppContainer): State<Boolean> {
+    val flow = remember(container) { container.downloads.progress.map { it.isNotEmpty() } }
+    return flow.collectAsStateWithLifecycle(initialValue = false)
 }
 
 /** Offline gate: uncached rows are disabled when there is no connectivity. */

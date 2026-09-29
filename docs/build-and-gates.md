@@ -24,11 +24,28 @@ run for no correctness gain.
 
 | Job | Task | Fails on |
 | --- | --- | --- |
-| nightly/probe | `:shared:probeLocal -PprobeFast`, `:shared:probeCi` | any `M0`-gated check FAIL. `probeCi` runs S1 (api.php JSON + live search mapping), S2 (plain-HTTP autocomplete), S3 (WS handshake); all three are tagged `gate = "M0"` and `gates = true`, so a failure exits 1. |
+| nightly/probe | `:shared:probeLocal -PprobeFast`, `:shared:probeCi` | any `M0`-gated check that **FAILs or TIMEOUTs**. `probeCi` runs S1 (api.php JSON + live search mapping), S2 (plain-HTTP autocomplete), S3 (WS handshake); all three are tagged `gate = "M0"` and `gates = true`, so a failure exits 1. A hang counts: `withTimeoutOrNull` records it as `TIMEOUT` and a blackholed origin (captive portal, firewall DROP) is the most common way a live gate breaks, so gating only on `FAIL` reported the total absence of an answer as success. |
 | nightly/contract-drift | `:shared:contractDrift` | any `FAIL`-severity drift row, or any unreachable endpoint. |
 
 These are deliberately **not** presubmit: they depend on a third-party API being
 up, so a Saavn outage must not block a PR.
+
+### proving the probe gate can go red
+
+`probeCi` reaches the live API, so "it exits 0" is not evidence that it can exit
+1. `DYLAN_PROBE_API_BASE` / `DYLAN_PROBE_WS_URL` repoint it, and
+`DYLAN_PROBE_TIMEOUT_MS` shortens the per-check window so the proof does not take
+45 s per check. `10.255.255.1` is RFC1918 and unrouted, so packets are *dropped*
+rather than refused — which is what produces `TIMEOUT` rather than `FAIL`:
+
+```bash
+DYLAN_PROBE_API_BASE=https://10.255.255.1/api.php \
+DYLAN_PROBE_WS_URL=wss://10.255.255.1/ \
+DYLAN_PROBE_TIMEOUT_MS=4000 ./gradlew :shared:probeCi; echo "exit=$?"
+```
+
+Expect three `[!] … (M0) … TIMEOUT` rows, `GATING FAILURES: S1(TIMEOUT) …` and
+`exit=1`.
 
 Report output (which embeds live API response bodies) is written to
 `build/reports/probe/`, which is gitignored. `tools/probe-results.md` is

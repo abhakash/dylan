@@ -1,3 +1,5 @@
+@file:OptIn(kotlin.concurrent.atomics.ExperimentalAtomicApi::class)
+
 package dylan.di
 
 import dylan.bridge.BridgeLanes
@@ -23,7 +25,6 @@ import dylan.model.SongKey
 import dylan.model.message
 import dylan.playback.IosPlayerEngine
 import dylan.playback.NativeAudioOutput
-import dylan.repo.toSong
 import dylan.search.SaavnSearchChannel
 import dylan.util.AppDispatchers
 import dylan.util.IosNetMonitor
@@ -31,9 +32,12 @@ import dylan.util.Lane
 import io.ktor.client.engine.darwin.Darwin
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
+import kotlin.concurrent.atomics.AtomicBoolean
 
 /** Settings > Storage figures (mirrors the cachedCountAndBytes row Android reads). */
 data class CacheStats(
@@ -41,12 +45,19 @@ data class CacheStats(
     val totalBytes: Long,
 )
 
-/** Library > Downloads row: admitted song joined with its cached_files row. */
+/**
+ * Library > Downloads row: admitted song joined with its library row.
+ *
+ * [removable] is false while the key is playing, queued, mid-download or the source of an
+ * in-flight quality upgrade, so the row can refuse the gesture *before* the user commits to it
+ * rather than after [IosGraph.removeDownload] has already said no.
+ */
 data class CachedSongInfo(
     val song: Song,
     val bitrate: Int,
     val bytes: Long,
     val pinned: Boolean,
+    val removable: Boolean,
 )
 
 /**
@@ -100,10 +111,12 @@ class IosGraph private constructor(
     val cfg: AppConfig,
     private val disp: AppDispatchers,
     private val scope: CoroutineScope,
+    private val graphJob: Job,
     val container: AppContainer,
     private val net: IosNetMonitor,
 ) {
     private var engine: IosPlayerEngine? = null
+    private val disposed = AtomicBoolean(false)
 
     /** Bridge lanes come from the graph, never from a hardcoded dispatcher. */
     private val lanes: BridgeLanes = BridgeLanes(disp, container.log)
@@ -161,13 +174,29 @@ class IosGraph private constructor(
     }
 
     /**
-     * Terminal teardown. iOS had none: `AppEnvironment` only ever cancelled the path monitor, so
-     * every Ktor client, the SQLite driver, the file-log handle and every collector the stores
-     * bound in `init` outlived the graph for the process lifetime. Call it when the last store
-     * releases the graph.
+     * Terminal teardown, in the only order that leaves nothing running.
+     *
+     * The engine is released *here* rather than through the orchestrator inbox: inbox messages are
+     * delivered by the state lane this method is about to cancel, so a Detach left in the queue
+     * would tear the `AVQueuePlayer` down never. `release()` is idempotent, so the orchestrator
+     * finding it already released is not a problem.
+     *
+     * [AppContainer.shutdown] closes the Ktor clients, the shared HTTP engine and the file-log
+     * handle. [graphJob] is the `SupervisorJob` `create` built for this graph and nothing else holds
+     * it: it is the parent of the orchestrator inbox, of every collector the stores bound and of
+     * the log sink's scope, so cancelling it is what stops the detached coroutines from outliving
+     * the process.
+     *
+     * Idempotent: the Swift terminate hook and `AppEnvironment.deinit` can both reach it.
      */
     suspend fun dispose() {
+        if (!disposed.compareAndSet(false, true)) return
+        val attached = engine
+        engine = null
+        attached?.release()
         container.shutdown()
+        graphJob.cancel()
+        graphJob.join()
     }
 
     // ---- Flow→Swift subscriptions (§9.11) -------------------------------------------------
@@ -249,20 +278,17 @@ class IosGraph private constructor(
         }
 
     suspend fun libraryDownloads(): List<CachedSongInfo> =
-        withContext(disp.on(Lane.DB)) {
-            container.db.dylanQueries.selectAllCached().executeAsList().mapNotNull { row ->
-                val s =
-                    container.db.dylanQueries
-                        .selectSong(row.provider, row.song_id)
-                        .executeAsOneOrNull()
-                        ?: return@mapNotNull null
-                CachedSongInfo(
-                    song = s.toSong(),
-                    bitrate = row.bitrate.toInt(),
-                    bytes = row.bytes,
-                    pinned = row.pinned == 1L,
-                )
-            }
+        // CacheManager.downloads is the one-JOIN read; this used to be selectAllCached() plus a
+        // selectSong() per row, i.e. 301 round trips through the single-threaded dbLane every time
+        // the Downloads sheet opened at the 300-file cap. `first()` collects exactly one emission.
+        container.cacheManager.downloads.first().map { e ->
+            CachedSongInfo(
+                song = e.song,
+                bitrate = e.bitrate,
+                bytes = e.bytes,
+                pinned = e.pinned,
+                removable = e.removable,
+            )
         }
 
     /** Album heart ⇒ favorites-all-tracks bulk download within the pinned budget (D12/§8.5). */
@@ -293,20 +319,16 @@ class IosGraph private constructor(
                 ?.toInt() ?: 0
         }
 
-    /** Library > Downloads swipe-remove: drop the cached row + its file; favorites/pins untouched. */
-    suspend fun removeDownload(key: SongKey) {
-        val row =
-            withContext(disp.on(Lane.DB)) {
-                container.db.dylanQueries
-                    .selectCached(key.provider, key.songId)
-                    .executeAsOneOrNull()
-            }
-        withContext(disp.on(Lane.DB)) { container.db.dylanQueries.deleteCached(key.provider, key.songId) }
-        if (row != null) {
-            val f = container.paths.final(key, row.bitrate.toInt(), row.ext)
-            runCatching { container.fs.delete(f) }
-        }
-    }
+    /**
+     * Library > Downloads swipe-remove. Returns false when the key is protected — playing, queued,
+     * mid-download, or the source of an in-flight quality upgrade — so the caller can say so.
+     *
+     * This used to be an unconditional `deleteCached` + `fs.delete` with no protection check at
+     * all, which on iOS alone meant swiping the row of the track you were playing deleted the file
+     * you were playing. The protection check has to live inside the statement that claims the row
+     * or it is a TOCTOU race, so this is [CacheManager.evictOne] and nothing else.
+     */
+    suspend fun removeDownload(key: SongKey): Boolean = container.cacheManager.evictOne(key)
 
     companion object {
         /**
@@ -347,6 +369,7 @@ class IosGraph private constructor(
                     cfg = cfg,
                     disp = disp,
                     scope = sharedScope,
+                    graphJob = stateJob,
                     net = net,
                     container =
                         AppContainer(

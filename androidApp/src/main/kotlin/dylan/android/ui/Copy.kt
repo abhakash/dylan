@@ -15,6 +15,7 @@ object Copy {
     val GEO_BLOCKED = "Not available in your region."
     val RATE_LIMITED = "Slow down a moment…"
     val TOO_MANY_FAILURES = "Several tracks failed to load. Check your connection."
+    const val BUSY = "That track is playing or being saved — can't remove it."
 
     fun forCode(code: ErrorCode): String = DylanFailure(code).message()
 }

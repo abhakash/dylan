@@ -20,10 +20,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -32,6 +29,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dylan.android.ui.Copy
 import dylan.android.ui.Dyl
 import dylan.android.ui.LocalDylanTokens
@@ -39,14 +37,14 @@ import dylan.android.ui.components.SectionTitle
 import dylan.android.ui.components.SongRow
 import dylan.android.ui.components.canPlay
 import dylan.android.ui.components.quietLoad
+import dylan.android.ui.components.rememberAnyDownloading
 import dylan.android.ui.components.rememberCachedKeys
 import dylan.android.ui.components.rememberFavoriteKeys
 import dylan.android.ui.components.rememberIsOnline
 import dylan.android.ui.components.rememberSongActions
+import dylan.cache.DownloadEntry
 import dylan.di.AppContainer
 import dylan.model.Song
-import dylan.model.SongKey
-import dylan.repo.toSong
 import kotlinx.coroutines.launch
 
 @Composable
@@ -58,28 +56,17 @@ fun LibraryScreen(
     val t = LocalDylanTokens.current
     var favorites by remember { mutableStateOf(emptyList<Song>()) }
     var jumpBack by remember { mutableStateOf(emptyList<Song>()) }
-    var downloadCount by remember { mutableIntStateOf(0) }
-    var downloadBytes by remember { mutableLongStateOf(0L) }
     val actions = rememberSongActions(container)
     val favKeys = rememberFavoriteKeys(container)
-    val favVersion by container.favorites.version.collectAsState()
     val ctx = LocalContext.current
     val isOnline = rememberIsOnline(container)
     val cachedKeys = rememberCachedKeys(container)
+    // Same single-JOIN model the Downloads screen renders, so the summary cannot disagree with it.
+    val downloads by container.cacheManager.downloads.collectAsStateWithLifecycle(initialValue = emptyList())
 
-    LaunchedEffect(favVersion) {
+    LaunchedEffect(favKeys) {
         favorites = quietLoad(emptyList()) { container.favorites.all() }
         jumpBack = quietLoad(emptyList()) { container.history.recent(5) }
-        val rows =
-            kotlinx.coroutines.withContext(container.disp.dbLane) {
-                quietLoad(emptyList<dylan.db.Cached_files>()) {
-                    container.db.dylanQueries
-                        .selectAllCached()
-                        .executeAsList()
-                }
-            }
-        downloadCount = rows.size
-        downloadBytes = rows.sumOf { it.bytes }
     }
 
     Column(
@@ -105,7 +92,7 @@ fun LibraryScreen(
                     Column(Modifier.weight(1f)) {
                         Text("Downloads", style = MaterialTheme.typography.titleMedium, color = t.textPrimary)
                         Text(
-                            if (downloadCount == 0) "Nothing saved yet" else "$downloadCount songs · ${formatBytes(downloadBytes)}",
+                            downloadsSummary(downloads),
                             style = MaterialTheme.typography.bodyMedium,
                             color = t.textSecondary,
                         )
@@ -181,27 +168,17 @@ fun DownloadsScreen(
     onBack: () -> Unit,
 ) {
     val t = LocalDylanTokens.current
+    val ctx = LocalContext.current
     val scope = androidx.compose.runtime.rememberCoroutineScope()
-    var songs by remember { mutableStateOf(listOf<Pair<Song, dylan.db.Cached_files>>()) }
-    var pendingRemove by remember { mutableStateOf<Pair<Song, dylan.db.Cached_files>?>(null) }
-    var reload by remember { mutableIntStateOf(0) }
-    val progress by container.downloads.progress.collectAsState()
+    var pendingRemove by remember { mutableStateOf<DownloadEntry?>(null) }
+    // One subscription, one JOIN. `removableKeys` is a second subscription to the same cold
+    // flow, so reading it alongside `downloads` would double the query on every emission.
+    val rows by container.cacheManager.downloads.collectAsStateWithLifecycle(initialValue = emptyList())
+    val anyDownloading = rememberAnyDownloading(container)
     val actions = rememberSongActions(container)
     val favKeys = rememberFavoriteKeys(container)
-
-    LaunchedEffect(reload) {
-        songs =
-            kotlinx.coroutines.withContext(container.disp.dbLane) {
-                quietLoad(emptyList<Pair<Song, dylan.db.Cached_files>>()) {
-                    container.db.dylanQueries.selectAllCached().executeAsList().mapNotNull { r ->
-                        container.db.dylanQueries
-                            .selectSong(r.provider, r.song_id)
-                            .executeAsOneOrNull()
-                            ?.let { s -> s.toSong() to r }
-                    }
-                }
-            }
-    }
+    val songs = remember(rows) { rows.map { it.song } }
+    val totalBytes = remember(rows) { rows.sumOf { it.bytes } }
 
     Column(
         Modifier
@@ -217,38 +194,36 @@ fun DownloadsScreen(
             }
             Text("Downloads", style = MaterialTheme.typography.titleLarge, color = t.textPrimary)
         }
-        if (songs.isEmpty()) {
+        if (rows.isEmpty()) {
             Text(
-                if (progress.isEmpty()) "Nothing saved yet. Play something and it lands here." else "Downloading…",
+                if (anyDownloading.value) "Downloading…" else "Nothing saved yet. Play something and it lands here.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = t.textSecondary,
                 modifier = Modifier.padding(16.dp),
             )
         } else {
             LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 24.dp)) {
-                items(songs, key = { it.second.provider + ":" + it.second.song_id }) { (song, row) ->
+                items(rows, key = { it.key.provider + ":" + it.key.songId }) { row ->
+                    val at = songs.indexOfFirst { it.key == row.key }.coerceAtLeast(0)
+                    val offerRemove = remember(row) { { pendingRemove = row } }
                     SongRow(
-                        song = song,
+                        song = row.song,
                         isCached = true,
-                        isFavorite = SongKey(row.provider, row.song_id) in favKeys,
+                        isFavorite = row.key in favKeys,
                         sizeLabel = formatBytes(row.bytes),
-                        onTap = { onPlaySongs(songs.map { it.first }, songs.indexOfFirst { it.second.song_id == row.song_id }.coerceAtLeast(0)) },
+                        onTap = { onPlaySongs(songs, at) },
                         onDownload = null,
-                        onRemoveDownload =
-                            if (isRemovable(container, SongKey(row.provider, row.song_id))) {
-                                { pendingRemove = song to row }
-                            } else {
-                                null
-                            },
-                        onPlayNext = { actions.playNext(song) },
-                        onAddLast = { actions.addToQueue(song) },
-                        onFavorite = { actions.toggleFavorite(song) },
+                        // From the same row the protection set was evaluated against, so the menu
+                        // disappears the moment a download or an upgrade takes the key.
+                        onRemoveDownload = if (row.removable) offerRemove else null,
+                        onPlayNext = { actions.playNext(row.song) },
+                        onAddLast = { actions.addToQueue(row.song) },
+                        onFavorite = { actions.toggleFavorite(row.song) },
                     )
                 }
-                item {
-                    val totalBytes = songs.sumOf { it.second.bytes }
+                item(key = "downloads-footer") {
                     Text(
-                        "Cached audio ${formatBytes(totalBytes)} of ${formatBytes(container.cfg.cacheMaxBytes)} · ${songs.size} songs",
+                        downloadsFooter(totalBytes, rows.size, container),
                         style = MaterialTheme.typography.labelSmall,
                         color = t.textSecondary,
                         modifier = Modifier.padding(16.dp),
@@ -258,13 +233,13 @@ fun DownloadsScreen(
         }
     }
 
-    pendingRemove?.let { (song, row) ->
+    pendingRemove?.let { entry ->
         androidx.compose.material3.AlertDialog(
             onDismissRequest = { pendingRemove = null },
             title = { Text("Remove download?", style = MaterialTheme.typography.titleMedium, color = t.textPrimary) },
             text = {
                 Text(
-                    "\"${song.title}\" (${formatBytes(row.bytes)}) will be deleted from storage.",
+                    "\"${entry.song.title}\" (${formatBytes(entry.bytes)}) will be deleted from storage.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = t.textSecondary,
                 )
@@ -273,8 +248,14 @@ fun DownloadsScreen(
                 androidx.compose.material3.TextButton(onClick = {
                     pendingRemove = null
                     scope.launch {
-                        runCatching { container.cacheManager.evictOne(SongKey(row.provider, row.song_id)) }
-                        reload++
+                        // evictOne re-checks protection inside the claim, so a key that became
+                        // protected between the tap and here is refused, not deleted.
+                        val removed = container.cacheManager.evictOne(entry.key)
+                        if (!removed) {
+                            android.widget.Toast
+                                .makeText(ctx, Copy.BUSY, android.widget.Toast.LENGTH_SHORT)
+                                .show()
+                        }
                     }
                 }) { Text("Remove", color = t.error) }
             },
@@ -286,18 +267,16 @@ fun DownloadsScreen(
     }
 }
 
-// A cached song is only removable when nothing depends on it: not playing/queued (protected),
-// not mid-download, not an in-progress quality-upgrade source. Composed from existing shared
-// CacheManager flows + queries because CacheManager has no per-key evict API yet.
-private fun isRemovable(
-    container: AppContainer,
-    key: SongKey,
-): Boolean {
-    val cm = container.cacheManager
-    return key !in cm.protectedKeys.value &&
-        key !in cm.inFlightJobKeys.value &&
-        key !in cm.upgradeSourceKeys.value
+private fun downloadsSummary(rows: List<DownloadEntry>): String {
+    if (rows.isEmpty()) return "Nothing saved yet"
+    return "${rows.size} songs · ${formatBytes(rows.sumOf { it.bytes })}"
 }
+
+private fun downloadsFooter(
+    bytes: Long,
+    count: Int,
+    container: AppContainer,
+): String = "Cached audio ${formatBytes(bytes)} of ${formatBytes(container.cfg.cacheMaxBytes)} · $count songs"
 
 internal fun formatBytes(b: Long): String =
     when {

@@ -38,7 +38,8 @@ struct NowPlayingSheet: View {
         let durMs = max(1, song.durationS * 1000)
         // Mirrors Android NowPlayingSheet: isLoading = phase is Resolving || Downloading
         let isLoading = env.player.phaseKind == "resolving" || env.player.phaseKind == "downloading"
-        // Scrubbable only once transportable (Playing/Paused/Ready) and not mid-resolve.
+        // Scrubbable only once transportable (Playing/Paused/Ready), which is already false while
+        // resolving or downloading — so the disabled scrubber *is* the mid-resolve behaviour.
         let transportable = ["playing", "paused", "ready"].contains(env.player.phaseKind)
         // Resume position is preserved: while loading we keep showing pos (never snap to 0).
         let shown: Double = dragging ? dragPos : Double(env.player.positionMs)
@@ -55,6 +56,11 @@ struct NowPlayingSheet: View {
                 .frame(maxWidth: .infinity, minHeight: geo.size.height)
             }
             .task(id: song.key.token) {
+                // A track change re-creates the Slider (it is keyed on the token), so a drag in
+                // flight never reports its release. Reset here, as Android's `remember(song.key)`
+                // does, or the new track inherits the old drag value.
+                dragging = false
+                dragPos = 0
                 loadedSongToken = song.key.token
                 async let f: Void = refreshFavorite(song)
                 async let b: Void = refreshBits(song)
@@ -119,38 +125,40 @@ struct NowPlayingSheet: View {
 
             // (Album jump removed: the subtitle line already carries the album info.)
 
+            // The scrubber is never unmounted. Swapping it for a ProgressView while the phase is
+            // Resolving/Downloading destroyed the Slider mid-gesture, so `onEditingChanged(false)`
+            // never arrived: `dragging` stayed true, the release-seek was dropped and the clock
+            // latched at the abandoned drag value for the rest of the session. The loading bar
+            // lives in the status row instead, where it costs no layout shift.
+            Slider(
+                value: Binding(
+                    get: { min(max(shown, 0), Double(durMs)) },
+                    set: { dragging = true; dragPos = $0 }
+                ),
+                in: 0 ... Double(durMs),
+                onEditingChanged: { editing in
+                    if !editing {
+                        env.graph.submit(Intents.seek(ms: Int64(dragPos)))
+                        dragging = false
+                    }
+                }
+            )
+            .tint(DylanTokens.primary)
+            .padding(.horizontal, DylanTokens.s24)
+            .padding(.top, DylanTokens.s12)
+            // Keyed on the song so a track change resets any in-flight drag.
+            .id(song.key.token)
+            .disabled(!transportable)
+
             if isLoading {
-                // Mirrors Android: when Resolving/Downloading show LinearProgressIndicator
-                // in the slider slot (fixed 36pt height so layout doesn't shift) and
-                // keep the scrubber disabled at 0.
                 ProgressView()
                     .progressViewStyle(.linear)
                     .tint(DylanTokens.primary)
-                    .frame(height: 4)
+                    .frame(height: 2)
                     .padding(.horizontal, DylanTokens.s24)
-                    .padding(.top, DylanTokens.s12)
-                    .frame(height: 36)
+                    .padding(.top, DylanTokens.s8)
                     .allowsHitTesting(false)
-            } else {
-                Slider(
-                    value: Binding(
-                        get: { min(max(shown, 0), Double(durMs)) },
-                        set: { dragging = true; dragPos = $0 }
-                    ),
-                    in: 0 ... Double(durMs),
-                    onEditingChanged: { editing in
-                        if !editing {
-                            env.graph.submit(Intents.seek(ms: Int64(dragPos)))
-                            dragging = false
-                        }
-                    }
-                )
-                .tint(DylanTokens.primary)
-                .padding(.horizontal, DylanTokens.s24)
-                .padding(.top, DylanTokens.s12)
-                // Keyed on the song so a track change resets any in-flight drag.
-                .id(song.key.token)
-                .disabled(!transportable)
+                    .accessibilityLabel(env.player.statusLine)
             }
 
             HStack {
@@ -361,8 +369,11 @@ struct MiniPlayerBar: View {
     var body: some View {
         Group {
             if let song = env.player.current {
-                Button(action: onExpand) {
-                    VStack(spacing: 0) {
+                HStack(spacing: DylanTokens.s12) {
+                    // A Button nested in another Button's label is not a second control: the
+                    // outer one owns the tap, so play/pause from the bar never fired. Two
+                    // sibling buttons, one row.
+                    Button(action: onExpand) {
                         HStack(spacing: 10) {
                             ThumbImage(url: song.artUrl150)
                                 .frame(width: 40, height: 40)
@@ -374,22 +385,26 @@ struct MiniPlayerBar: View {
                                 progressBar
                                     .frame(height: 2)
                             }
-                            Button {
-                                env.graph.submit(Intents.toggle)
-                            } label: {
-                                Image(systemName: env.player.showsPause ? "pause.fill" : "play.fill")
-                                    .font(.system(size: 22))
-                                    .foregroundStyle(DylanTokens.textPrimary)
-                            }
-                            .accessibilityLabel(env.player.showsPause ? "Pause" : "Play")
                         }
-                        .padding(.horizontal, DylanTokens.s12)
-                        .padding(.vertical, DylanTokens.s8)
+                        .contentShape(Rectangle())
                     }
-                    .background(DylanTokens.surface)
-                    .contentShape(Rectangle())
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Now playing: \(song.title)")
+
+                    Button {
+                        env.graph.submit(Intents.toggle)
+                    } label: {
+                        Image(systemName: env.player.showsPause ? "pause.fill" : "play.fill")
+                            .font(.system(size: 22))
+                            .foregroundStyle(DylanTokens.textPrimary)
+                            .frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
+                    }
+                    .accessibilityLabel(env.player.showsPause ? "Pause" : "Play")
                 }
-                .buttonStyle(.plain)
+                .padding(.horizontal, DylanTokens.s12)
+                .padding(.vertical, DylanTokens.s8)
+                .background(DylanTokens.surface)
             }
         }
     }

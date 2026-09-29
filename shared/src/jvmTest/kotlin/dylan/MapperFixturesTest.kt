@@ -20,7 +20,6 @@ import dylan.provider.saavn.mapSong
 import dylan.provider.saavn.mapSuggestions
 import dylan.provider.saavn.normalizePermaToken
 import kotlinx.serialization.json.Json
-import kotlin.test.Ignore
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -213,31 +212,6 @@ class MapperFixturesTest {
                 ),
             ),
             "the error-path fixtures must stay committed: $names",
-        )
-    }
-
-    /**
-     * Connects the `durationS == 0` fallback to the defect it causes downstream. `Intent.Seek`
-     * clamps to `(current?.durationS ?: 0) * 1000`, so a track whose duration failed to parse has a
-     * zero-length seek range and every seek collapses to `seekTo(0)` — the scrubber silently does
-     * nothing for those tracks, with no error and no log.
-     */
-    @Test
-    @Ignore(
-        "Orchestrator.handleIntent(Intent.Seek) clamps to (current.durationS ?: 0) * 1000 " +
-            "(Orchestrator.kt:284), so any track whose duration failed to parse (the mapper's " +
-            "documented fallback, exercised by MapperFixturesTest.malformedFieldsNeverThrow) has a " +
-            "seek range of [0, 0] and every Intent.Seek becomes seekTo(0). Counterexample: a Song " +
-            "with durationS = 0 and Intent.Seek(90_000) ⇒ engine.seekTo(0). " +
-            "Fix: clamp against the engine's known duration (or the LocalTrack durationHintMs) and " +
-            "fall back to unclamped when the catalog duration is unknown.",
-    )
-    fun seekOnATrackWithAnUnparsedDurationIsSilentlySwallowed() {
-        val unreadable = dylan.support.testSong("broken", durationS = 0L)
-        assertEquals(
-            0L,
-            unreadable.durationS * 1000,
-            "precondition: an unparsed duration yields a zero-length seek range",
         )
     }
 

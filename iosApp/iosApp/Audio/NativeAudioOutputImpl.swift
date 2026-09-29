@@ -7,10 +7,20 @@ import shared
 /// no suspend. Kotlin owns events/position via IosPlayerEngine; this class pushes
 /// AVFoundation observations through the EngineEventSink it receives in bindEvents.
 ///
+/// Threading. The Kotlin engine seam calls these methods from the shared *state lane*
+/// (Dispatchers.Default.limitedParallelism(1)), not the main thread, while AVFoundation
+/// delivers `AVPlayerItem.status` KVO on the thread that changed the value and posts
+/// `AVPlayerItemDidPlayToEndTime` on its own queue. So every entry point below hops to the
+/// main queue and every stored property is main-thread-only — the dictionaries are otherwise a
+/// data race, not a style question. The hop is FIFO from the state lane, so a
+/// `prepare`-then-`play` pair from one inbox turn still runs in that order.
+///
 /// Window contract:
 ///   * prepare(items) rebuilds the 1–2 item window; Prepared(first) is emitted when the
 ///     CURRENT item reaches .readyToPlay — mirroring the Android D8 fix (ExoPlayer
 ///     emits Prepared on STATE_READY, never before). A failed item maps to Error(.source).
+///     A same-head re-prepare re-answers immediately rather than waiting for a status
+///     transition that will not come again.
 ///   * replaceUpNext removes queued items BEYOND index 0 only (never removeAllItems —
 ///     that kills audible playback), then inserts.
 ///   * KVO currentItem change → TrackChanged(AUTO); last item's natural end → QueueExhausted;
@@ -35,8 +45,13 @@ final class NativeAudioOutputImpl: NSObject, KNativeAudioOutput {
         player.actionAtItemEnd = .advance
         player.automaticallyWaitsToMinimizeStalling = true
 
+        // Every observer below is registered with `queue: nil`, so the block runs on whichever
+        // thread posted — for end-of-item that is an AVFoundation queue, not main. Each one hops
+        // through `onMain` so the player and the two dictionaries stay on one thread.
         kvoToken = player.observe(\AVQueuePlayer.currentItem, options: [.old, .new]) { [weak self] _, change in
-            self?.currentItemChanged(change.newValue ?? nil)
+            guard let self else { return }
+            let item = change.newValue ?? nil
+            self.onMain { self.currentItemChanged(item) }
         }
 
         endObserver = NotificationCenter.default.addObserver(
@@ -44,7 +59,9 @@ final class NativeAudioOutputImpl: NSObject, KNativeAudioOutput {
             object: nil,
             queue: nil
         ) { [weak self] note in
-            self?.itemDidEnd(note.object as? AVPlayerItem)
+            guard let self else { return }
+            let item = note.object as? AVPlayerItem
+            self.onMain { self.itemDidEnd(item) }
         }
 
         routeObserver = NotificationCenter.default.addObserver(
@@ -52,9 +69,10 @@ final class NativeAudioOutputImpl: NSObject, KNativeAudioOutput {
             object: nil,
             queue: nil
         ) { [weak self] note in
-            guard let self, !self.released else { return }
             let reason = UInt(note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt ?? 0)
-            if reason == AVAudioSession.RouteChangeReason.oldDeviceUnavailable.rawValue {
+            guard reason == AVAudioSession.RouteChangeReason.oldDeviceUnavailable.rawValue else { return }
+            self?.onMain {
+                guard let self, !self.released else { return }
                 self.player.pause()
                 self.emit(Events.routeLost())
             }
@@ -65,18 +83,17 @@ final class NativeAudioOutputImpl: NSObject, KNativeAudioOutput {
             object: nil,
             queue: nil
         ) { [weak self] note in
-            guard let self, !self.released else { return }
             let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt ?? 0
             let type = AVAudioSession.InterruptionType(rawValue: raw) ?? .began
-            switch type {
-            case .began:
-                self.emit(Events.interrupted(false))
-            case .ended:
-                let optRaw = note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
-                let shouldResume = AVAudioSession.InterruptionOptions(rawValue: optRaw).contains(.shouldResume)
-                self.emit(Events.interrupted(shouldResume))
-            default:
-                break
+            let optRaw = note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
+            let shouldResume = AVAudioSession.InterruptionOptions(rawValue: optRaw).contains(.shouldResume)
+            self?.onMain {
+                guard let self, !self.released else { return }
+                switch type {
+                case .began: self.emit(Events.interrupted(false))
+                case .ended: self.emit(Events.interrupted(shouldResume))
+                default: break
+                }
             }
         }
     }
@@ -90,6 +107,10 @@ final class NativeAudioOutputImpl: NSObject, KNativeAudioOutput {
 
     @objc(prepareItems:)
     func prepare(items: [KLocalTrack]) {
+        onMain { prepareOnMain(items) }
+    }
+
+    private func prepareOnMain(_ items: [KLocalTrack]) {
         guard !released else { return }
         suppressCurrentItemEvents = true
         // Window diff: if the new head is already the audible item, keep it —
@@ -99,6 +120,7 @@ final class NativeAudioOutputImpl: NSObject, KNativeAudioOutput {
            let curHead = player.items().first,
            itemIds[ObjectIdentifier(curHead)] == wantHead.itemId {
             replaceTail(with: Array(items.dropFirst().prefix(1)))
+            rearmPreparedForHead()
         } else {
             dropStatusObservers()
             player.removeAllItems()
@@ -110,6 +132,24 @@ final class NativeAudioOutputImpl: NSObject, KNativeAudioOutput {
             }
         }
         suppressCurrentItemEvents = false
+    }
+
+    /// `prepare` is a request for the window to be ready, so a same-head re-prepare has to answer
+    /// it. An `AVPlayerItem` has no second `.readyToPlay` transition to wait for and the diff path
+    /// leaves the old status observer attached, so without this the orchestrator's resync path
+    /// re-prepares and then waits for an event that can never arrive.
+    private func rearmPreparedForHead() {
+        guard let head = player.items().first, let id = itemIds[ObjectIdentifier(head)] else { return }
+        preparedEmittedForWindow = false
+        switch head.status {
+        case .readyToPlay:
+            preparedEmittedForWindow = true
+            emit(Events.prepared(id))
+        case .failed:
+            emit(Events.error(id, KEngineErr.source))
+        default:
+            break // the observer is still attached and will fire.
+        }
     }
 
     /// Rebuilds everything after index 0 (shared by prepare-diff and replaceUpNext).
@@ -127,41 +167,53 @@ final class NativeAudioOutputImpl: NSObject, KNativeAudioOutput {
 
     @objc(replaceUpNextItem:)
     func replaceUpNext(item: KLocalTrack?) {
-        guard !released else { return }
-        // Remove ONLY queued items beyond index 0 (§9.4 iOS mapping).
-        replaceTail(with: item.map { [$0] } ?? [])
+        onMain {
+            guard !released else { return }
+            // Remove ONLY queued items beyond index 0 (§9.4 iOS mapping).
+            replaceTail(with: item.map { [$0] } ?? [])
+        }
     }
 
     @objc(play)
     func play() {
-        guard !released else { return }
-        do {
-            try AVAudioSession.sharedInstance().setActive(true)
-            player.play()
-        } catch {
-            emit(Events.error(nil, KEngineErr.sessionActivation))
+        onMain {
+            guard !released else { return }
+            do {
+                try AVAudioSession.sharedInstance().setActive(true)
+                player.play()
+            } catch {
+                emit(Events.error(nil, KEngineErr.sessionActivation))
+            }
         }
     }
 
     @objc(pause)
     func pause() {
-        guard !released else { return }
-        player.pause()
+        onMain {
+            guard !released else { return }
+            player.pause()
+        }
     }
 
     @objc(seekToMs:)
     func seekTo(ms: Int64) {
-        guard !released else { return }
-        let time = CMTime(value: CMTimeValue(ms), timescale: 1000)
-        player.currentItem?.seek(
-            to: time,
-            toleranceBefore: .zero,
-            toleranceAfter: .zero
-        )
+        onMain {
+            guard !released else { return }
+            let time = CMTime(value: CMTimeValue(ms), timescale: 1000)
+            player.currentItem?.seek(
+                to: time,
+                toleranceBefore: .zero,
+                toleranceAfter: .zero
+            )
+        }
     }
 
     @objc(currentTimeMs)
     func currentTimeMs() -> Int64 {
+        onMain { currentTimeOnMain() }
+    }
+
+    private func currentTimeOnMain() -> Int64 {
         guard !released else { return 0 }
         // CMTimeGetSeconds returns NaN/∞ for invalid times; converting non-finite
         // doubles to Int64 is UB and would poison the position lane.
@@ -172,34 +224,55 @@ final class NativeAudioOutputImpl: NSObject, KNativeAudioOutput {
 
     @objc(bindEventsSink:)
     func bindEvents(sink: KEngineEventSink) {
-        self.sink = sink
+        onMain { self.sink = sink }
     }
 
     func dispose() {
-        guard !released else { return }
-        released = true
-        player.pause()
-        player.removeAllItems()
-        itemIds.removeAll()
-        dropStatusObservers()
-        kvoToken?.invalidate()
-        kvoToken = nil
-        if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
-        if let routeObserver { NotificationCenter.default.removeObserver(routeObserver) }
-        if let interruptionObserver { NotificationCenter.default.removeObserver(interruptionObserver) }
-        endObserver = nil
-        routeObserver = nil
-        interruptionObserver = nil
+        onMain {
+            guard !released else { return }
+            released = true
+            player.pause()
+            player.removeAllItems()
+            itemIds.removeAll()
+            dropStatusObservers()
+            kvoToken?.invalidate()
+            kvoToken = nil
+            if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
+            if let routeObserver { NotificationCenter.default.removeObserver(routeObserver) }
+            if let interruptionObserver { NotificationCenter.default.removeObserver(interruptionObserver) }
+            endObserver = nil
+            routeObserver = nil
+            interruptionObserver = nil
+        }
     }
 
     /// Safety net: block-based NotificationCenter tokens are NOT auto-removed on
-    /// dealloc (unlike NSKeyValueObservation), so a dealloc without release() would
-    /// leak observer blocks. dispose() is idempotent via the released flag.
+    /// dealloc (unlike NSKeyValueObservation), so a dealloc without dispose() would leak three
+    /// observer blocks. `dispose()` is idempotent via the `released` flag, so these are no-ops
+    /// after it has run.
+    ///
+    /// Written without `onMain` on purpose: a `deinit` must not hand `self` to a closure that
+    /// could outlive it, and the object is already being torn down, so there is nothing left to
+    /// keep on a queue.
     deinit {
-        dispose()
+        kvoToken?.invalidate()
+        if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
+        if let routeObserver { NotificationCenter.default.removeObserver(routeObserver) }
+        if let interruptionObserver { NotificationCenter.default.removeObserver(interruptionObserver) }
     }
 
     // ---- internals -----------------------------------------------------------------------
+
+    /// Main-queue gate. Inline on main, so the AVFoundation callbacks that re-enter this object
+    /// (KVO on `removeAllItems`, the end-of-item notification) stay on one thread instead of
+    /// deadlocking or bouncing through a second hop.
+    private func onMain(_ body: @escaping @MainActor () -> Void) {
+        if Thread.isMainThread {
+            MainActor.assumeIsolated(body)
+        } else {
+            DispatchQueue.main.async { MainActor.assumeIsolated(body) }
+        }
+    }
 
     private func dropStatusObservers() {
         statusObservers.values.forEach { $0.invalidate() }
@@ -223,7 +296,7 @@ final class NativeAudioOutputImpl: NSObject, KNativeAudioOutput {
     /// orchestrator can skip instead of hanging in Ready forever.
     private func observeStatus(_ item: AVPlayerItem) {
         let token = item.observe(\AVPlayerItem.status, options: [.new]) { [weak self] item, _ in
-            DispatchQueue.main.async { self?.statusChanged(item) }
+            self?.onMain { self?.statusChanged(item) }
         }
         statusObservers[ObjectIdentifier(item)] = token
     }

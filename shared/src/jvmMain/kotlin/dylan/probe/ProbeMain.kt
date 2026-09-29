@@ -60,6 +60,21 @@ object Probe {
     private var lastMediaHitMs = 0L
     private val rows = mutableListOf<Row>()
 
+    /** Per-check window. Overridable so the TIMEOUT arm of the gate can be demonstrated offline. */
+    private var checkTimeoutMs = DEFAULT_CHECK_TIMEOUT_MS
+
+    private const val DEFAULT_CHECK_TIMEOUT_MS = 45_000L
+
+    /**
+     * A hang is a failure, not an absence of one.
+     *
+     * Gating only on `FAIL` meant a blackholed origin — captive portal, firewall DROP, a dead CDN
+     * edge, the single most common way a live gate breaks — produced three `TIMEOUT` rows and exit
+     * 0. `withTimeoutOrNull` in `check` turns "never answered" into a `TIMEOUT` status precisely so
+     * it can be counted here; counting only `FAIL` threw that distinction away.
+     */
+    private val GATING_STATUSES = setOf("FAIL", "TIMEOUT")
+
     private suspend fun HttpClient.mediaGet(
         url: String,
         range: String? = null,
@@ -112,7 +127,7 @@ object Probe {
         id: String,
         gate: String,
         desc: String,
-        timeoutMs: Long = 45_000,
+        timeoutMs: Long = checkTimeoutMs,
         block: suspend () -> String,
     ) {
         try {
@@ -144,13 +159,17 @@ object Probe {
     ): Int {
         // DYLAN_PROBE_API_BASE / DYLAN_PROBE_WS_URL let the gate be pointed at a
         // dead endpoint on purpose — that is the only way to prove probeCi is
-        // capable of returning non-zero.
+        // capable of returning non-zero. DYLAN_PROBE_TIMEOUT_MS shortens the
+        // per-check window so that proof does not take 45 s per check.
         val defaults = AppConfig()
         cfg =
             defaults.copy(
                 apiBaseUrl = System.getenv("DYLAN_PROBE_API_BASE") ?: defaults.apiBaseUrl,
                 wsSearchUrl = System.getenv("DYLAN_PROBE_WS_URL") ?: defaults.wsSearchUrl,
             )
+        checkTimeoutMs =
+            System.getenv("DYLAN_PROBE_TIMEOUT_MS")?.toLongOrNull()?.coerceAtLeast(1L)
+                ?: DEFAULT_CHECK_TIMEOUT_MS
         api = apiClient(CIO.create(), cfg)
         bulk = bulkClient(CIO.create(), cfg)
         provider =
@@ -436,20 +455,25 @@ object Probe {
         gates: Boolean,
     ): Int {
         val stamp = java.time.Instant.now()
-        val failed = rows.count { it.status == "FAIL" }
+        val bad = rows.count { it.status in GATING_STATUSES }
         println("\n=== DYLAN probe ($mode) @ $stamp ===")
         rows.forEach { r ->
             val mark =
                 when (r.status) {
                     "PASS" -> "+"
-                    "FAIL" -> "!"
+                    in GATING_STATUSES -> "!"
                     else -> "-"
                 }
             println("[$mark] ${r.id} (${r.gate}) ${r.note}")
         }
-        println("---\n${rows.size - failed}/${rows.size} checks passed")
-        val blocking = if (gates) rows.filter { it.status == "FAIL" && it.gate == "M0" } else emptyList()
-        if (blocking.isNotEmpty()) println("GATING FAILURES: ${blocking.joinToString { it.id }}")
+        println("---\n${rows.size - bad}/${rows.size} checks passed")
+        val blocking = if (gates) rows.filter { it.status in GATING_STATUSES && it.gate == "M0" } else emptyList()
+        if (blocking.isNotEmpty()) {
+            println(
+                "GATING FAILURES: ${blocking.joinToString { "${it.id}(${it.status})" }}" +
+                    " — see build/reports/probe/probe-results.md",
+            )
+        }
         // Notes carry live API response bodies — never write them to a tracked file.
         val dir = File("build/reports/probe").also { it.mkdirs() }
         File(dir, "probe-results.md").appendText(

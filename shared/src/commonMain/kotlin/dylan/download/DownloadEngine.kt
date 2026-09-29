@@ -146,9 +146,10 @@ internal data class PrevRow(
  * `cfg.maxConcurrentParts = 3` and 45 lines of part-cap machinery carefully maintained up to three
  * parts — the config promised concurrency the engine did not have. It now runs [WORKER_COUNT] jobs
  * at once, which is the audit's minimum for a track boundary: with one slot a `USER_NOW` cannot
- * preempt an equal-priority `USER_NOW`, so a three-second skip pays for a whole transfer. The
- * bounded resource is the *transfer* (see [TransferGate]), not the job, so a job parked in VERIFY
- * or COMMIT holds no permit.
+ * preempt an equal-priority `USER_NOW`, so a three-second skip pays for a whole transfer.
+ *
+ * [WORKER_COUNT] — not [TransferGate] — is what "one in flight and one queued" means, and it is the
+ * only bound that binds with the shipped defaults. See the [gate] comment for the other one.
  *
  * The bytes-on-disk ↔ bytes-on-wire relationship is [Breakpoint], a value. See that file for the
  * six defects that were all statements about it.
@@ -187,12 +188,17 @@ class DownloadEngine(
     private val queue = JobQueue(QUEUE_CAPACITY)
 
     /**
-     * The bounded resource is the byte copy, so the gate is the parts budget and nothing else.
-     * It used to be `minOf(WORKER_COUNT, maxConcurrentParts)`, which with the shipped defaults is
-     * `minOf(2, 3)` = 2 — exactly the worker count, so a two-permit gate in front of two workers
-     * bounded nothing while two comments claimed it reserved "one in flight and one queued". That
-     * reservation is [WORKER_COUNT]; this is the concurrency of open response bodies, and with
-     * `maxConcurrentParts = 1` it is the only thing that stops two workers copying at once.
+     * Ceiling on **open response bodies**, and nothing else. [TransferGate] is taken around the
+     * request-and-copy in `Transfer.run`, not around the job, so a job parked in RESOLVE, VERIFY or
+     * COMMIT holds no permit and a 6 MB `USER_NOW` does not occupy the same resource for the same
+     * wall-clock time as a 400 KB `PREFETCH_NEXT`.
+     *
+     * What it is *not* is the engine's concurrency: only [WORKER_COUNT] coroutines can reach it, so
+     * with the shipped defaults (3 permits, 2 workers) it cannot block and the workers are the
+     * binding bound. It becomes binding the moment the permit count drops below the worker count —
+     * `DownloadEngineTest.theTransferGateBoundsConcurrentCopiesNotConcurrentJobs` pins that at
+     * `maxConcurrentParts = 1`. Two earlier comments here claimed the gate reserved "one in flight
+     * and one queued"; that reservation is [WORKER_COUNT] and this line is the other one.
      */
     private val gate = TransferGate(cfg.maxConcurrentParts.coerceAtLeast(1))
     private val started = AtomicBoolean(false)
@@ -211,7 +217,14 @@ class DownloadEngine(
             defer = { job, delayMs -> requeueLater(job, delayMs) },
         )
 
-    /** A *set*: preemption is no longer single-slot, so one global key is no longer the truth. */
+    /**
+     * A *set*: preemption is no longer single-slot, so one global key is no longer the truth.
+     *
+     * An entry lives from `markPreempted` until the `onCancelled` of that attempt. The one path that
+     * never reaches `onCancelled` is a victim that finished before its worker handle was taken, so
+     * the enqueue path drops the mark itself in that case — the set is bounded by the number of
+     * live preemptions, not by the number of jobs the process has ever run.
+     */
     private val preempted = AtomicReference<Set<JobId>>(emptySet())
 
     /** Coroutine handles of the jobs in flight, so a preemption can cancel the right one. */
@@ -261,7 +274,11 @@ class DownloadEngine(
                 scope.launch { library.writeIntent(job) }
                 log.i("dl", "preempt ${result.victim.label} for ${job.label}")
                 markPreempted(preempted, result.victim.id)
-                cancelWorker(result.victim.key)
+                // No handle means the victim finished between the queue's snapshot and here, so no
+                // cancellation was delivered and `onCancelled` — the only place the mark is cleared
+                // — will never run for that id. Left in the set it accumulated one entry per such
+                // race, for the life of the process.
+                if (!cancelWorker(result.victim.key)) clearMark(preempted, result.victim.id)
                 poke()
             }
             EnqueueResult.SupersededByHigherPriority ->
@@ -386,8 +403,11 @@ class DownloadEngine(
         if (wake.trySend(Unit).isFailure) log.w("dl", "wake channel closed, workers may stall")
     }
 
-    private fun cancelWorker(key: SongKey) {
-        handles.load()[key]?.cancel(PreemptSignal())
+    /** False when no worker owned [key], i.e. no cancellation was delivered. */
+    private fun cancelWorker(key: SongKey): Boolean {
+        val handle = handles.load()[key] ?: return false
+        handle.cancel(PreemptSignal())
+        return true
     }
 
     private fun requeueLater(
