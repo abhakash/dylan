@@ -63,7 +63,9 @@ final class AppEnvironment {
         )
 
         let support = Self.applicationSupportDir()
-        // Kotlin companion fun → Swift: SharedIosGraph.companion.create(baseDir:)
+        // Kotlin companion fun → Swift: IosGraph.companion.create(baseDir:logMinLevel:). The
+        // default for logMinLevel is applied in DylanGraph.create, because a Kotlin default
+        // argument does not appear in the exported ObjC signature.
         // (spelling assumption lives in DylanGraph.create, Bridge/DylanBridge.swift)
         graph = DylanGraph.create(baseDir: support)
 

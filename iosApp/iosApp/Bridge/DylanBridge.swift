@@ -74,6 +74,9 @@ typealias KIntentSeek = IntentSeek        // Intent.Seek
 //   AUTO -> auto_ and EXPLICIT -> explicit_ because `auto`/`explicit` are Swift keywords
 //   (header: @property auto_ swift_name("auto_"), explicit_ swift_name("explicit_"))
 typealias KTransitionReason = TransitionReason
+// check: enum LogLevel (uppercase cases -> lowerCamelCase on the Swift side, as with
+// TransitionReason.AUTO_ -> KTransitionReason.auto_).
+typealias KLogLevel = LogLevel
 //   check: enum EngineErr { DECODE, SOURCE, SESSION_ACTIVATION } →
 //   .decode/.source/.sessionActivation (lowerCamelCase, A5)
 typealias KEngineErr = EngineErr
@@ -165,10 +168,16 @@ enum Intents {
 
 /// Graph bootstrap — keeps the `companion` spelling assumption inside this file.
 enum DylanGraph {
-    /// check: IosGraph.companion.create(baseDir:) — Kotlin companion object
+    /// check: IosGraph.companion.create(baseDir:logMinLevel:) — Kotlin companion object
     /// surfaces as a static `.companion` property on the class.
+    ///
+    /// `logMinLevel` MUST be passed explicitly even though Kotlin declares it with a default:
+    /// a Kotlin default argument is not part of the exported ObjC signature (there are no ObjC
+    /// default-argument overloads), so `create(baseDir:)` alone does not compile from Swift and
+    /// the generated header demands the second parameter. `KLogLevel.info` mirrors
+    /// `LogLevel.INFO`, the Kotlin-side default.
     static func create(baseDir: String) -> KGraph {
-        IosGraph.companion.create(baseDir: baseDir)
+        IosGraph.companion.create(baseDir: baseDir, logMinLevel: KLogLevel.info)
     }
 }
 
