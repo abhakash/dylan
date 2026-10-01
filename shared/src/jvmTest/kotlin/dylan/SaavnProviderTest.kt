@@ -53,7 +53,21 @@ class SaavnProviderTest {
     private val clock = MutableClock()
     private val lanes = TestLanes()
     private val log = LogBuffer()
-    private val requests = mutableListOf<String>()
+
+    /**
+     * The MockEngine handler appends here from whichever thread is serving the IO lane, and `io` is
+     * `Dispatchers.IO` — genuinely multi-permit, unlike the state/db lanes which are
+     * `limitedParallelism(1)`. So this was a plain `ArrayList` being mutated concurrently, which is
+     * a lost-update race, not a theoretical one: two `+=` on an ArrayList can both read the same
+     * size and one write is lost. That is what made
+     * `theSnapshotLruSurvivesConcurrentWritersThatTheLinkedHashMapDoesNot` fail intermittently on
+     * CI (the assertion is "exactly one request per key", so a dropped append shows up as a count
+     * that is too LOW) while passing locally on a faster, differently-interleaved machine.
+     *
+     * CopyOnWriteArrayList because these lists are tiny and written rarely; a synchronized list
+     * would work too and costs the same at this size.
+     */
+    private val requests = java.util.concurrent.CopyOnWriteArrayList<String>()
 
     private fun fixture(name: String): String =
         java.io
