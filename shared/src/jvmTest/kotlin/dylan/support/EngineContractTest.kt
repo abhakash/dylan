@@ -2,6 +2,8 @@ package dylan.support
 
 import dylan.playback.EngineEvent
 import dylan.playback.LocalTrack
+import dylan.playback.MAX_PLAYBACK_RATE
+import dylan.playback.MIN_PLAYBACK_RATE
 import dylan.playback.PlayerEngine
 import dylan.playback.TransitionReason
 import kotlinx.coroutines.cancel
@@ -215,6 +217,242 @@ abstract class EngineContractTest {
             assertTrue(c.engine.currentTimeMs() >= 0, "currentTimeMs() must answer inline when it can")
         }
 
+    /**
+     * The band a media clock that covered [wallMs] of wall time at [rate]× must land in.
+     *
+     * An engine publishes the position from a poll that re-arms every [DEFAULT_POLL_INTERVAL_MS],
+     * so the position is `ticks × interval × rate` and the ticks that fit inside `wallMs` cover at
+     * least `wallMs` and at most `wallMs + interval` — hence the band. Pinning an exact tick count
+     * instead would be a test of `advanceTimeBy`'s boundary, not of the engine: it runs scheduled
+     * events *up to and including* the target, so the tick count depends on where the advance lands
+     * relative to the poll grid. The bands are far apart enough to stay unambiguous — 1.0× of
+     * [QUARTER_TRACK_MS] is 2 500…2 600 ms, 1.5× is 3 750…3 900 ms, and the clamps are 1 250…1 300
+     * and 5 000…5 200.
+     */
+    private fun clockBand(
+        wallMs: Long,
+        rate: Float,
+    ): LongRange {
+        val covered = (wallMs * rate).toLong()
+        return covered..(covered + (DEFAULT_POLL_INTERVAL_MS * rate).toLong())
+    }
+
+    /**
+     * A rate is the one seam input whose only observable effect is on the media clock, so the rule
+     * is stated in the clock's terms: the same wall time must buy 1.5× the track at 1.5×. An engine
+     * that records the rate and never applies it, or that rounds the poll step, misses the band.
+     */
+    @Test
+    fun setRateChangesHowFastTheMediaClockMoves() =
+        withEngine { c ->
+            c.engine.prepare(c.window("a"))
+            c.settle()
+            c.drain()
+            c.play()
+            c.advancePlaybackTime(QUARTER_TRACK_MS)
+            val atNormalSpeed = c.position()
+            assertTrue(
+                atNormalSpeed in clockBand(QUARTER_TRACK_MS, 1.0f),
+                "a 1.0x transport covers the elapsed wall time, which is what the rest of the " +
+                    "position arithmetic in the app assumes: $atNormalSpeed",
+            )
+
+            c.engine.setRate(1.5f)
+            c.advancePlaybackTime(QUARTER_TRACK_MS)
+            val gained = c.position() - atNormalSpeed
+            assertTrue(
+                gained in clockBand(QUARTER_TRACK_MS, 1.5f),
+                "the same wall time must buy 1.5x the track at 1.5x; the rate was recorded but not " +
+                    "applied (gained $gained, wanted ${clockBand(QUARTER_TRACK_MS, 1.5f)})",
+            )
+        }
+
+    /**
+     * The AVPlayer trap, as a rule: assigning a positive `rate` to a paused `AVPlayer` *begins
+     * playback*, so a rate change on a paused engine would be an unrequested play — the app's
+     * position would start advancing with no `Playing` phase behind it.
+     */
+    @Test
+    fun aRateSetWhilePausedDoesNotResumePlayback() =
+        withEngine { c ->
+            c.engine.prepare(c.window("a"))
+            c.settle()
+            c.drain()
+            c.play()
+            c.advancePlaybackTime(QUARTER_TRACK_MS)
+            val before = c.position()
+            assertTrue(before > 0L, "precondition: playback advanced: $before")
+
+            c.engine.pause()
+            c.advancePlaybackTime(QUARTER_TRACK_MS)
+            assertEquals(
+                before,
+                c.position(),
+                "the poll stops re-posting when paused, so the position must be frozen before the rate call",
+            )
+
+            c.engine.setRate(MAX_PLAYBACK_RATE)
+            c.advancePlaybackTime(QUARTER_TRACK_MS)
+            assertEquals(
+                before,
+                c.position(),
+                "setRate is a transport property, not a play request: a paused engine must stay paused",
+            )
+        }
+
+    /**
+     * Out-of-range input is clamped rather than rejected: an engine that throws on 0.01 or 50 turns
+     * a UI slider into a crash, and one that passes them through hands `PlaybackParameters.withSpeed`
+     * a value outside what the platform accepts. Measured at the clamped 0.5x and 2.0x, so an engine
+     * that honoured the raw 0.01 (≈25 ms of track) or the raw 50 (≈125 000 ms) misses by orders of
+     * magnitude rather than by a rounding error.
+     */
+    @Test
+    fun aRateOutsideTheSupportedRangeIsClampedToIt() =
+        withEngine { c ->
+            c.engine.prepare(c.window("a"))
+            c.settle()
+            c.drain()
+            c.play()
+
+            c.engine.setRate(0.01f)
+            c.advancePlaybackTime(QUARTER_TRACK_MS)
+            val slow = c.position()
+            assertTrue(
+                slow in clockBand(QUARTER_TRACK_MS, MIN_PLAYBACK_RATE),
+                "0.01x is below $MIN_PLAYBACK_RATE and must be clamped up to it, not honoured: $slow",
+            )
+
+            c.engine.setRate(50f)
+            c.advancePlaybackTime(QUARTER_TRACK_MS)
+            val gained = c.position() - slow
+            assertTrue(
+                gained in clockBand(QUARTER_TRACK_MS, MAX_PLAYBACK_RATE),
+                "50x is above $MAX_PLAYBACK_RATE and must be clamped down to it, not honoured: " +
+                    "gained $gained, wanted ${clockBand(QUARTER_TRACK_MS, MAX_PLAYBACK_RATE)}",
+            )
+        }
+
+    /**
+     * NaN survives every comparison, so `coerceIn` hands it straight through and a clock multiplied
+     * by NaN stops advancing forever — a silently dead transport that still reports `Playing`. The
+     * seam drops non-finite input, so the clock must keep running.
+     */
+    @Test
+    fun aNonFiniteRateIsIgnoredRatherThanCorruptingTheClock() =
+        withEngine { c ->
+            c.engine.prepare(c.window("a"))
+            c.settle()
+            c.drain()
+            c.play()
+
+            c.engine.setRate(Float.NaN)
+            c.advancePlaybackTime(QUARTER_TRACK_MS)
+            val after = c.position()
+            assertTrue(after > 0L, "a non-finite rate must not freeze the media clock at 0: $after")
+            c.advancePlaybackTime(QUARTER_TRACK_MS)
+            assertTrue(
+                c.position() > after,
+                "the media clock must still be running after a non-finite rate: $after -> ${c.position()}",
+            )
+        }
+
+    /**
+     * A skip is *relative*, and the only honest base is the engine's own position: the caller's
+     * cached `posMs` is a 10 Hz sample of this same clock, so it is stale by construction. Two
+     * forwards and a backward must compose back to exactly one forward.
+     */
+    @Test
+    fun aSkipIsRelativeToTheEnginesOwnPosition() =
+        withEngine { c ->
+            c.engine.prepare(c.window("a"))
+            c.settle()
+            c.drain()
+            c.play()
+            c.advancePlaybackTime(QUARTER_TRACK_MS)
+            val before = c.position()
+            assertTrue(before > 0L, "precondition: playback advanced: $before")
+
+            c.engine.skipForward(SKIP_STEP_MS)
+            c.advancePlaybackTime(0L)
+            assertEquals(
+                before + SKIP_STEP_MS,
+                c.position(),
+                "skipForward is measured from the engine's position, not from 0",
+            )
+
+            c.engine.skipForward(SKIP_STEP_MS)
+            c.advancePlaybackTime(0L)
+            assertEquals(
+                before + 2 * SKIP_STEP_MS,
+                c.position(),
+                "a second skip stacks on the first, so the base really is the engine's position",
+            )
+
+            c.engine.skipBackward(SKIP_STEP_MS)
+            c.advancePlaybackTime(0L)
+            assertEquals(
+                before + SKIP_STEP_MS,
+                c.position(),
+                "skipBackward is measured from the engine's position, not from 0",
+            )
+        }
+
+    /**
+     * Both ends of a relative seek can overshoot, and neither may be handed to the decoder: a
+     * negative position and a position past the item are the two ways a skip becomes a silent
+     * no-op or an audible jump to the wrong track.
+     */
+    @Test
+    fun aSkipIsClampedToZeroAndToTheItemDuration() =
+        withEngine { c ->
+            c.engine.prepare(c.window("a"))
+            c.settle()
+            c.drain()
+            c.play()
+            c.advancePlaybackTime(HALF_TRACK_MS)
+            assertTrue(c.position() > 0L, "precondition: playback advanced: ${c.position()}")
+
+            c.engine.skipBackward(TRACK_MS)
+            c.advancePlaybackTime(0L)
+            assertEquals(0L, c.position(), "a backward skip past the start lands at 0, never below it")
+
+            c.engine.skipForward(TRACK_MS + HALF_TRACK_MS)
+            c.advancePlaybackTime(0L)
+            assertEquals(
+                TRACK_MS,
+                c.position(),
+                "a forward skip past the end lands on the item duration, not past it",
+            )
+        }
+
+    /**
+     * The bug class this codebase already paid for: a seek clamped against a duration of 0 (or -1)
+     * becomes `seekTo(0)` forever. An unknown duration must let the seek through so the engine's
+     * own decoder is the one that decides — otherwise every skip on a track with an unparseable
+     * duration is swallowed.
+     */
+    @Test
+    fun aSkipOnATrackWithNoKnownDurationIsStillPerformed() =
+        withEngine { c ->
+            c.engine.prepare(c.window("a", durationMs = null))
+            c.settle()
+            c.drain()
+            c.play()
+            c.advancePlaybackTime(QUARTER_TRACK_MS)
+            val before = c.position()
+            assertTrue(before > 0L, "precondition: playback advanced: $before")
+
+            c.engine.skipForward(QUARTER_TRACK_MS)
+            c.advancePlaybackTime(0L)
+            assertEquals(
+                before + QUARTER_TRACK_MS,
+                c.position(),
+                "an unknown duration must not swallow the skip: clamping it to 0 would make every " +
+                    "skip on such a track a permanent no-op",
+            )
+        }
+
     @Test
     fun replaceUpNextNeverBlanksTheCurrentItem() =
         withEngine { c ->
@@ -283,6 +521,9 @@ abstract class EngineContractTest {
         const val TRACK_MS: Long = 10_000L
         const val HALF_TRACK_MS: Long = 5_000L
         const val QUARTER_TRACK_MS: Long = 2_500L
+
+        /** A round relative-seek amount, comfortably inside [TRACK_MS]. */
+        const val SKIP_STEP_MS: Long = 1_000L
 
         /** `"provider:songId:bits"` for a song that is in no queue. */
         const val STALE_ITEM_ID: String = "saavn:ghost:128"

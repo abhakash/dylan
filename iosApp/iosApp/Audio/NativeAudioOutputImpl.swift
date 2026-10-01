@@ -208,6 +208,71 @@ final class NativeAudioOutputImpl: NSObject, KNativeAudioOutput {
         }
     }
 
+    // ---- rate + relative seek --------------------------------------------------------
+    // `MIN_PLAYBACK_RATE` / `MAX_PLAYBACK_RATE` from shared/src/commonMain/.../playback/Engine.kt.
+    // Duplicated rather than imported because this is the side that actually applies the rate, so
+    // a divergence from `clampPlaybackRate` would be silent on the Kotlin side and audible here.
+    private static let minRate: Float = 0.5
+    private static let maxRate: Float = 2.0
+
+    /// Speed only, clamped into the seam's range, with non-finite input dropped — `coerceIn` alone
+    /// would hand NaN through, and a player whose rate is NaN never advances again.
+    ///
+    /// The trap this method exists to avoid: **assigning a positive `AVPlayer.rate` to a paused
+    /// player BEGINS PLAYBACK.** So `rate` is assigned only while the player is already running,
+    /// and `defaultRate` carries the request across a pause. `play()` is documented to start at
+    /// `defaultRate`, so a rate set while paused applies on the next play and `play()` itself needs
+    /// no change — which keeps "a rate is a transport property, not a play request" true on both
+    /// sides of the bridge.
+    @objc(setRateRate:)
+    func setRate(rate: Float) {
+        onMain {
+            guard !released, rate.isFinite else { return }
+            let clamped = min(max(rate, Self.minRate), Self.maxRate)
+            player.defaultRate = clamped
+            guard player.rate > 0 else { return }
+            if player.rate != clamped {
+                player.rate = clamped
+            }
+        }
+    }
+
+    /// Relative seek, from the output's own `currentTime()` — never from a caller-supplied
+    /// position, which is a 10 Hz sample of this same clock and therefore already stale.
+    @objc(skipForwardMs:)
+    func skipForward(ms: Int64) {
+        skipOnMain(byMs: ms)
+    }
+
+    /// A negative amount is not a direction change, it is a no-op — the same
+    /// `ms.coerceAtLeast(0L)` the Kotlin `PlayerEngine.skipBackward` default applies.
+    @objc(skipBackwardMs:)
+    func skipBackward(ms: Int64) {
+        skipOnMain(byMs: ms > 0 ? -ms : 0)
+    }
+
+    /// Clamped against the item's duration **only when that duration is known**. An `AVPlayerItem`
+    /// that has not finished loading reports `.indefinite`, and clamping a skip against that
+    /// would pin it to 0 forever — the exact bug class this codebase already paid for on the
+    /// Kotlin side. Unknown duration ⇒ seek anyway and let the decoder decide.
+    private func skipOnMain(byMs deltaMs: Int64) {
+        guard !released, let item = player.currentItem else { return }
+        let baseSeconds = player.currentTime().seconds
+        guard baseSeconds.isFinite, baseSeconds >= 0 else { return }
+        var targetSeconds = baseSeconds + Double(deltaMs) / 1000.0
+        let durationSeconds = item.duration.seconds
+        if item.duration.isNumeric, durationSeconds.isFinite, durationSeconds > 0 {
+            targetSeconds = min(max(targetSeconds, 0), durationSeconds)
+        }
+        // Tolerant tolerances, unlike `seekTo`: a skip only has to land in the right place, and
+        // demanding sample accuracy makes AVFoundation decode from the preceding keyframe.
+        item.seek(
+            to: CMTime(seconds: targetSeconds, preferredTimescale: 1000),
+            toleranceBefore: .positiveInfinity,
+            toleranceAfter: .positiveInfinity
+        )
+    }
+
     @objc(currentTimeMs)
     func currentTimeMs() -> Int64 {
         onMain { currentTimeOnMain() }

@@ -15,6 +15,8 @@ import dylan.model.SongKey
 import dylan.playback.EngineEvent
 import dylan.playback.LocalTrack
 import dylan.playback.PlayerEngine
+import dylan.playback.clampPlaybackRate
+import dylan.playback.clampSeekTargetMs
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -279,6 +281,39 @@ class ExoPlayerEngine(
 
     override fun seekTo(ms: Long) {
         handler.post { player.seekTo(ms) }
+    }
+
+    /**
+     * Speed only — `PlaybackParameters` carries `playWhenReady` unchanged, and Media3's setter
+     * has no AVPlayer-style "a positive rate starts playback" behaviour, so this cannot resume a
+     * paused player. On the media thread like every other player call (§9.9), and NaN/±Inf are
+     * dropped by [clampPlaybackRate] before they can reach `withSpeed` (which validates but does
+     * not reject NaN).
+     */
+    override fun setRate(rate: Float) {
+        val speed = clampPlaybackRate(rate) ?: return
+        handler.post {
+            val p = player.playbackParameters
+            if (p.speed == speed) return@post
+            player.playbackParameters = p.withSpeed(speed)
+        }
+    }
+
+    /**
+     * Overridden rather than taking `PlayerEngine.skipBy`'s default, which would read
+     * [currentTimeMs] — the 10 Hz [pollRunnable] sample, i.e. up to 100 ms stale — from the
+     * caller's thread. `player.currentPosition` is read where it is authoritative, on the media
+     * looper.
+     *
+     * `player.duration` is [C.TIME_UNSET] until the item is ready, which `clampSeekTargetMs`
+     * reads as unknown, so a skip on a not-yet-ready item still seeks instead of collapsing to 0.
+     */
+    override fun skipBy(deltaMs: Long) {
+        handler.post {
+            val base = player.currentPosition
+            if (base < 0L) return@post
+            player.seekTo(clampSeekTargetMs(base + deltaMs, player.duration))
+        }
     }
 
     override fun release() {

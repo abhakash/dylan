@@ -5,6 +5,8 @@ import dylan.playback.EngineEvent
 import dylan.playback.LocalTrack
 import dylan.playback.PlayerEngine
 import dylan.playback.TransitionReason
+import dylan.playback.clampPlaybackRate
+import dylan.playback.clampSeekTargetMs
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
@@ -24,6 +26,7 @@ import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.yield
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.coroutines.CoroutineContext
+import kotlin.math.roundToLong
 
 /** How long after a script is queued the engine's looper publishes it. Mirrors a real looper hop. */
 const val DEFAULT_EMIT_DELAY_MS: Long = 1L
@@ -38,8 +41,6 @@ const val ZERO_EMIT_DELAY_MS: Long = 0L
  * A [PlayerEngine] that behaves the way a real engine behaves, which the pre-wave inline fake did
  * not. Every rule below is transcribed from `ExoPlayerEngine`; the matching conformance rules
  * live in `EngineContractTest` so a real engine can be dropped into the same suite.
- *
- * What the old inline fake got wrong, and what each of these costs it:
  *
  * What the old inline fake got wrong, and what each of those mistakes cost:
  *
@@ -57,7 +58,10 @@ const val ZERO_EMIT_DELAY_MS: Long = 0L
  *  - `currentTimeMs()` was not overridden, so `enginePositionMs()` always took the `lastPosMs`
  *    fallback. It is overridden, so the production branch is the one under test.
  *  - `release()` was a no-op that nothing called (audit blocker AN-1). It is idempotent and observable.
- *
+ *  - `setRate` was absent, so nothing could observe what a rate does to the media clock. It is now
+ *    recorded, clamped ([rates]) and *applied*: the poll advances the position by
+ *    `pollIntervalMs × rate`, exactly as a rate-changed AVPlayer/ExoPlayer does.
+
  * The engine owns a **looper**: a single-permit dispatcher that both publishes events and drives
  * the position poll, exactly as `HandlerThread("dylan-media")` does. Supply a virtual one
  * ([virtual]) to make the 10 Hz poll and long timeouts free.
@@ -83,6 +87,9 @@ class FakePlayerEngine internal constructor(
     val preparedWindows: MutableList<List<LocalTrack>> = mutableListOf()
     val upNextHistory: MutableList<LocalTrack?> = mutableListOf()
     val seeks: MutableList<Long> = mutableListOf()
+
+    /** Rates [setRate] actually accepted, already clamped. A dropped NaN/±Inf is not recorded. */
+    val rates: MutableList<Float> = mutableListOf()
     private val _emitted = CopyOnWriteArrayList<EngineEvent>()
 
     val emitted: List<EngineEvent> get() = _emitted.toList()
@@ -118,6 +125,7 @@ class FakePlayerEngine internal constructor(
     private var currentIndex: Int = 0
     private var playing: Boolean = false
     private var positionMs: Long = 0L
+    private var rate: Float = 1.0f
     private var pollJob: Job? = null
     private var pumpJob: Job? = null
 
@@ -205,6 +213,33 @@ class FakePlayerEngine internal constructor(
 
     override fun currentTimeMs(): Long = if (isReleased) -1L else positionMs
 
+    /**
+     * Recorded, clamped, and **applied** — the rate multiplies how fast the media clock moves, which
+     * is the only way a seam-only contract rule can observe a rate at all. It never touches [playing]
+     * and never restarts the poll, so `setRate` on a paused engine stays paused: the AVPlayer
+     * implicit-play trap has a rule of its own (`aRateSetWhilePausedDoesNotResumePlayback`).
+     */
+    override fun setRate(rate: Float) {
+        if (isReleased) return
+        val applied = clampPlaybackRate(rate) ?: return
+        this.rate = applied
+        rates += applied
+    }
+
+    /**
+     * Relative, from [currentTimeMs] — the engine's own clock, not a caller's cached position — and
+     * clamped against the *item's* duration rather than the seam's [durationMs] default, mirroring
+     * `ExoPlayerEngine.skipBy` reading `player.duration`. A null/absent `durationHintMs` is unknown,
+     * so the seek is still performed (see `clampSeekTargetMs`); it then routes through [seekTo], so a
+     * cross-item skip emits `TrackChanged(SEEK)` just as a cross-item seek does.
+     */
+    override fun skipBy(deltaMs: Long) {
+        if (isReleased) return
+        val base = currentTimeMs()
+        if (base < 0L) return
+        seekTo(clampSeekTargetMs(base + deltaMs, currentTrack()?.durationHintMs ?: -1L))
+    }
+
     override fun release() {
         releaseCount++
         if (isReleased) return
@@ -253,6 +288,9 @@ class FakePlayerEngine internal constructor(
     fun isPlaying(): Boolean = playing
 
     fun position(): Long = positionMs
+
+    /** The rate the engine is currently playing at — 1.0 until [setRate] says otherwise. */
+    fun currentRate(): Float = rate
 
     /** Drive [block] against a bare engine whose looper is virtual, then tear it down. */
     fun advanceVirtualTime(ms: Long) {
@@ -318,7 +356,9 @@ class FakePlayerEngine internal constructor(
                     ticks++
                     if (!isActive || !playing) break
                     val dur = window.getOrNull(currentIndex)?.durationHintMs
-                    val next = positionMs + pollIntervalMs
+                    // The media clock, not the wall clock: a 2x player covers 2x the ground per tick.
+                    val step = (pollIntervalMs * rate).roundToLong().coerceAtLeast(1L)
+                    val next = positionMs + step
                     if (dur != null && next >= dur) {
                         positionMs = dur
                         mutablePosition.value = positionMs
