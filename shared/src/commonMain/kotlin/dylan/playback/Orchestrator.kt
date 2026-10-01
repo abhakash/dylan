@@ -481,7 +481,11 @@ class Orchestrator(
      */
     private fun upperBoundMs(s: PlayerState): Long? {
         if (!transportable(s.phase)) return null
-        engine?.durationMs()?.takeIf { it >= 0L }?.let { return it }
+        // `> 0L`, not `>= 0L`: the seam answers -1 for "unknown" and the catalog's documented
+        // fallback for an unparseable duration is 0, so 0 means UNKNOWN here too. Admitting it
+        // would make [seek] clamp every seek on such a track to seekTo(0) — the request swallowed
+        // rather than clamped. This matches the `currentDurationHintMs` line below it.
+        engine?.durationMs()?.takeIf { it > 0L }?.let { return it }
         return currentDurationHintMs?.takeIf { it > 0L }
     }
 

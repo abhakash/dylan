@@ -190,6 +190,24 @@ val generateAppVersion by tasks.registering {
 kotlin.sourceSets.named("commonMain") {
     kotlin.srcDir(appVersionSrcDir)
 }
+
+// Every task that READS the generated source must depend on the task that WRITES it, and the
+// dependency has to be declared for all of them — not just the Kotlin compile tasks. ktlint and
+// detekt walk commonMain too, so without this Gradle reports an implicit-dependency validation
+// error ("uses this output of task ':shared:generateAppVersion' without declaring a dependency")
+// and fails the moment both are in the same invocation.
+//
+// Declared as an input rather than only `dependsOn` so the task also re-runs when VERSION changes,
+// which a bare dependsOn would not do on its own. The input is the generated FILE, not its parent
+// directory: Gradle rejects `inputs.file()` pointed at a directory.
+tasks.matching { it.name.startsWith("runKtlint") || it.name.endsWith("ktlintSourceSetCheck") }.configureEach {
+    dependsOn(generateAppVersion)
+    inputs.file(generateAppVersion.map { it.outputs.files.singleFile }).withPropertyName("generatedAppVersion").optional()
+}
+tasks.matching { it.name.contains("detekt") }.configureEach {
+    dependsOn(generateAppVersion)
+    inputs.file(generateAppVersion.map { it.outputs.files.singleFile }).withPropertyName("generatedAppVersion").optional()
+}
 tasks.matching { it.name.startsWith("compile") && it.name.contains("Kotlin") }.configureEach {
     dependsOn(generateAppVersion)
 }
