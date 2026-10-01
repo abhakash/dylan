@@ -107,7 +107,7 @@ final class NativeAudioOutputImpl: NSObject, KNativeAudioOutput {
 
     @objc(prepareItems:)
     func prepare(items: [KLocalTrack]) {
-        onMain { prepareOnMain(items) }
+        onMain { self.prepareOnMain(items) }
     }
 
     private func prepareOnMain(_ items: [KLocalTrack]) {
@@ -168,21 +168,21 @@ final class NativeAudioOutputImpl: NSObject, KNativeAudioOutput {
     @objc(replaceUpNextItem:)
     func replaceUpNext(item: KLocalTrack?) {
         onMain {
-            guard !released else { return }
+            guard !self.released else { return }
             // Remove ONLY queued items beyond index 0 (§9.4 iOS mapping).
-            replaceTail(with: item.map { [$0] } ?? [])
+            self.replaceTail(with: item.map { [$0] } ?? [])
         }
     }
 
     @objc(play)
     func play() {
         onMain {
-            guard !released else { return }
+            guard !self.released else { return }
             do {
                 try AVAudioSession.sharedInstance().setActive(true)
-                player.play()
+                self.player.play()
             } catch {
-                emit(Events.error(nil, KEngineErr.sessionActivation))
+                self.emit(Events.error(nil, KEngineErr.sessionActivation))
             }
         }
     }
@@ -190,17 +190,17 @@ final class NativeAudioOutputImpl: NSObject, KNativeAudioOutput {
     @objc(pause)
     func pause() {
         onMain {
-            guard !released else { return }
-            player.pause()
+            guard !self.released else { return }
+            self.player.pause()
         }
     }
 
     @objc(seekToMs:)
     func seekTo(ms: Int64) {
         onMain {
-            guard !released else { return }
+            guard !self.released else { return }
             let time = CMTime(value: CMTimeValue(ms), timescale: 1000)
-            player.currentItem?.seek(
+            self.player.currentItem?.seek(
                 to: time,
                 toleranceBefore: .zero,
                 toleranceAfter: .zero
@@ -227,12 +227,12 @@ final class NativeAudioOutputImpl: NSObject, KNativeAudioOutput {
     @objc(setRateRate:)
     func setRate(rate: Float) {
         onMain {
-            guard !released, rate.isFinite else { return }
+            guard !self.released, rate.isFinite else { return }
             let clamped = min(max(rate, Self.minRate), Self.maxRate)
-            player.defaultRate = clamped
-            guard player.rate > 0 else { return }
-            if player.rate != clamped {
-                player.rate = clamped
+            self.player.defaultRate = clamped
+            guard self.player.rate > 0 else { return }
+            if self.player.rate != clamped {
+                self.player.rate = clamped
             }
         }
     }
@@ -275,7 +275,7 @@ final class NativeAudioOutputImpl: NSObject, KNativeAudioOutput {
 
     @objc(currentTimeMs)
     func currentTimeMs() -> Int64 {
-        onMain { currentTimeOnMain() }
+        onMain { self.currentTimeOnMain() }
     }
 
     private func currentTimeOnMain() -> Int64 {
@@ -294,20 +294,20 @@ final class NativeAudioOutputImpl: NSObject, KNativeAudioOutput {
 
     func dispose() {
         onMain {
-            guard !released else { return }
-            released = true
-            player.pause()
-            player.removeAllItems()
-            itemIds.removeAll()
-            dropStatusObservers()
-            kvoToken?.invalidate()
-            kvoToken = nil
+            guard !self.released else { return }
+            self.released = true
+            self.player.pause()
+            self.player.removeAllItems()
+            self.itemIds.removeAll()
+            self.dropStatusObservers()
+            self.kvoToken?.invalidate()
+            self.kvoToken = nil
             if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
             if let routeObserver { NotificationCenter.default.removeObserver(routeObserver) }
             if let interruptionObserver { NotificationCenter.default.removeObserver(interruptionObserver) }
-            endObserver = nil
-            routeObserver = nil
-            interruptionObserver = nil
+            self.endObserver = nil
+            self.routeObserver = nil
+            self.interruptionObserver = nil
         }
     }
 
