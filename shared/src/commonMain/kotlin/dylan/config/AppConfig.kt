@@ -53,8 +53,54 @@ data class AppConfig(
      */
     val catalogNegativeTtlMs: Long = 30_000,
     val submitPageSize: Int = 20,
+    /**
+     * Maximum cached renditions, and the offline cache's PRIMARY knob: the byte budget is derived
+     * from it (see [cacheMaxBytes]), so raising the file cap raises the byte cap by the same
+     * factor and the two can never disagree about how full "full" is.
+     *
+     * What it bounds: how many tracks the Downloads screen can offer offline, and therefore how
+     * many the LRU pass may destroy per new download.
+     *
+     * Failure mode it prevents: a Downloads screen listing more tracks than the cache can hold,
+     * so every completed download silently evicts a track the user can still see listed.
+     */
     val cacheMaxFiles: Int = 300,
-    val cacheMaxBytes: Long = 2L * 1024 * 1024 * 1024,
+    /**
+     * Byte budget for the cache — DERIVED as `cacheMaxFiles x CACHE_MEAN_TRACK_BYTES`, not an
+     * independent knob.
+     *
+     * It used to be an independent 2 GB, enforced as `min(cacheMaxBytes, cacheMaxFiles x 1 MB)`.
+     * At 300 files that `min` could only ever pick the derived term, so `cacheMaxBytes` was dead
+     * config that *looked* live: both platform UIs print and divide by it
+     * ("Cached audio 41 MB of 2.0 GB", a progress bar over 2 GB), so the user was shown a budget
+     * the cache could never reach and never told which of the two was real. Deriving removes the
+     * second number, so what the UI shows and what the LRU pass enforces are the same value by
+     * construction — and a user (or a test) who raises `cacheMaxFiles` automatically raises the
+     * bytes those files are allowed to occupy.
+     *
+     * Which of the two caps binds is a property of the *content*, not of the caps: this one trips
+     * first whenever renditions are larger than the assumed mean (a 320 kbps track is several MB,
+     * so in practice the byte budget is the binding constraint and the file cap is the backstop
+     * for a cache of unusually small tracks), and the file cap trips first when they are smaller.
+     * Both statements stay true under derivation.
+     *
+     * Failure mode it prevents: a corrupt `bytes` column or a pathological provider filling the
+     * user's disk, since the file cap alone cannot bound anything byte-sized.
+     */
+    val cacheMaxBytes: Long = cacheMaxFiles * CACHE_MEAN_TRACK_BYTES,
+    /**
+     * Share of the cache a favourite is guaranteed against the pinned sub-pool's own eviction.
+     * Both pinned budgets come from it and from [cacheMaxBytes]: `pinnedMaxFraction` of the file
+     * cap in rows, and the same fraction of the byte budget in bytes.
+     *
+     * The pin-demotion path is LIVE, not vestigial: with the defaults a pool trips the pinned byte
+     * budget at ~38 six-megabyte renditions, long before the 225-row budget — so `demotePins` has
+     * work to do well inside the file cap. (It was reported dead because the unreachable 2 GB byte
+     * cap was read as the real budget; it never was.)
+     *
+     * Failure mode it prevents: favourites accumulating an unbounded share of the cache, where the
+     * LRU pass may never touch them because they are protected, so nothing else ever shrinks them.
+     */
     val pinnedMaxFraction: Double = 0.75,
     val imageCacheBytes: Long = 150L * 1024 * 1024,
     val diskFloorBytes: Long = 500L * 1024 * 1024,
@@ -67,12 +113,34 @@ data class AppConfig(
     val rangeRestartsCap: Int = 1,
     val stallTimeoutMs: Long = 20_000,
     val stallWatchdogTickMs: Long = 2_000,
-    // Wall-clock cap floor: real cap = max(this, expectedB / 8) — i.e. time-to-download at a
-    // conservative 8 KB/s. Only a trickling transfer (below that average rate) is killed;
-    // a flowing-but-slow link never trips it. Configurable for tests.
-    val stallWallFloorMs: Long = 120_000,
-    // Max wait for a USER_NOW download before ensureReadyAndPlay gives up into Phase.Error.
-    val readyTimeoutMs: Long = 120_000,
+    /**
+     * FLOOR on one attempt's wall-clock lifetime. The real ceiling is
+     * `max(this, expectedBytes / 8)` — see `stallWallCapMs` — i.e. the time the track would take
+     * at a deliberately pessimistic 8 KB/s. Rate-based on purpose: only a transfer trickling below
+     * that average rate is killed, and a flowing-but-slow link never trips it. `stallTimeoutMs`
+     * covers the other case (no fresh bytes at all).
+     *
+     * Failure mode it prevents: an unbounded trickle holding a transfer permit and the user's
+     * cellular for as long as the origin keeps sending bytes.
+     */
+    val stallWallFloorMs: Long = READY_TIMEOUT_MS,
+    /**
+     * How long playback waits for a USER_NOW download before reporting NETWORK_TIMEOUT.
+     *
+     * THIS BOUNDS THE USER-VISIBLE WAIT ONLY — IT DOES NOT CANCEL THE ATTEMPT.
+     * `Orchestrator.awaitDownload` is a bare `withTimeoutOrNull`; when it fires, the transfer keeps
+     * running until its own ceiling above. So the honest bound on cellular spent AFTER the user was
+     * told the download failed is `max(0, max(stallWallFloorMs, expectedBytes / 8) - readyTimeoutMs)`:
+     * zero below 960 KB, ~12 min after a 6 MB track, ~28 min after a 14.5 MB one — and it also
+     * restarts once per transient retry. Bounding that window is the Orchestrator's job (cancel the
+     * attempt it was handed on timeout), NOT a config value: no constant can bound it, because the
+     * ceiling scales with a track size that no config ever sees. This constant can only guarantee
+     * the window is never *shorter* than the floor — i.e. playback never gives up before a merely
+     * trickling transfer has reached the ceiling it was always going to get.
+     *
+     * It shares one literal with [stallWallFloorMs] so those two roles cannot drift apart.
+     */
+    val readyTimeoutMs: Long = READY_TIMEOUT_MS,
     val skipSettleMs: Int = 350,
     // Rapid Next/Previous taps inside this window are dropped (first tap always allowed).
     val navDebounceMs: Long = 300,
@@ -107,6 +175,25 @@ data class AppConfig(
     val clock: Clock = SystemClock,
 ) {
     private companion object {
+        /**
+         * 120 s: how long a user is prepared to wait for a tap to become playback. Used twice, on
+         * purpose — as the floor on an attempt's lifetime and as the wait that gives up — so that
+         * "playback gave up" and "the transfer may be killed" cannot be two unrelated literals that
+         * silently disagree. It is the FLOOR of an attempt's ceiling, not its bound: a track larger
+         * than 960 KB outlives it (see [readyTimeoutMs]).
+         */
+        const val READY_TIMEOUT_MS = 120_000L
+
+        /**
+         * Assumed mean size of one cached rendition, in bytes. 1 MB is a deliberately conservative
+         * stand-in for "a track" — a 320 kbps rendition is really several MB — which puts the
+         * derived byte cap in the safe direction: too small means the cache fills to fewer files
+         * than [cacheMaxFiles] (evicting early, recoverable), too large means it overruns the disk
+         * the file cap was promised. It moves the enforced byte budget 1:1, so changing it is a
+         * product decision about on-device cache size, not a tuning detail.
+         */
+        const val CACHE_MEAN_TRACK_BYTES = 1_000_000L
+
         /** 15 minutes: a snapshot older than this describes a paused track, not a playing one. */
         const val RESUME_MAX_AGE_MINUTES = 15
         const val MS_PER_MINUTE = 60_000L

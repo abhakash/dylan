@@ -69,17 +69,28 @@ class CacheManager(
     private val revision = MutableStateFlow(0L)
 
     /**
-     * The byte budget actually enforced. `cacheMaxBytes` is 2 GB but 300 tracks at 320 kbps are
-     * ~255 MB, so the *file* cap binds about six times earlier and the byte figure is
-     * unreachable — which is what left the pinned sub-pool demotion loop with nothing to do.
+     * The byte budget actually enforced, and now the ONLY one: [AppConfig.cacheMaxBytes] is derived
+     * from the file cap and the assumed mean rendition size, so raising `cacheMaxFiles` raises this
+     * by the same factor and the pair cannot drift.
+     *
+     * This is the cap that binds in practice, not the file cap — renditions are larger than the
+     * assumed 1 MB mean, so the byte budget is reached in far fewer than `cacheMaxFiles` rows.
+     * (It was previously `min(cacheMaxBytes, cacheMaxFiles * EXPECTED_MEAN_TRACK_BYTES)`, in which
+     * `cacheMaxBytes`'s own 2 GB default was unreachable and only the derived term ever bound — see
+     * [AppConfig.cacheMaxBytes] for what that cost the UI.)
      */
-    val byteBudget: Long = minOf(cfg.cacheMaxBytes, cfg.cacheMaxFiles * EXPECTED_MEAN_TRACK_BYTES)
+    val byteBudget: Long = cfg.cacheMaxBytes
 
-    /** Pinned pool row budget, from the same fraction as the byte cap (see [enforceBudget]). */
+    /**
+     * Pinned-pool row budget, from the same fraction as the byte cap (see [enforceBudget]). The row
+     * budget is what makes the file cap enforceable at all when the pool is byte-cheap.
+     */
     val pinnedRowBudget: Int = maxOf(1, (cfg.cacheMaxFiles * cfg.pinnedMaxFraction).toInt())
 
+    /** Pinned-pool byte budget: the same fraction of the whole cache's byte budget. */
     val pinnedByteBudget: Long = (byteBudget * cfg.pinnedMaxFraction).toLong()
 
+    /** The file cap, kept as a named field so the eviction loop reads as one budget triple. */
     val fileBudget: Int = cfg.cacheMaxFiles
 
     /**
@@ -426,8 +437,9 @@ class CacheManager(
     ): Long = if (a <= 0L) 0L else (a + b - 1) / b
 
     private companion object {
-        /** 320 kbps x 200 s / 8, rounded up. See [byteBudget]. */
-        const val EXPECTED_MEAN_TRACK_BYTES = 1_000_000L
+        // The assumed mean rendition size moved to AppConfig, next to the file cap it is multiplied
+        // by: two constants in two packages is exactly how the byte budget and the file cap drifted
+        // apart (and how `cacheMaxBytes` ended up displayed at 2 GB while 300 MB was enforced).
         const val EVICT_BATCH = 64
         const val REAP_BATCH = 256
         const val FOOTER_PIN_BUDGET =

@@ -24,7 +24,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class CacheManagerTest {
-    /** 300 x 5 MB against a 25 MiB budget's 75 % pinned cap: a real demotion wave with survivors. */
+    /** 300 x 5 MB against this budget's 75 % pinned cap: a real demotion wave with survivors. */
     private val bulkPinBytes = 5_000_000L
 
     private lateinit var tmp: String
@@ -38,7 +38,16 @@ class CacheManagerTest {
     // scheduler makes them scheduler steps instead, with the single-permit contract intact.
     private val scheduler = TestCoroutineScheduler()
     private val disp = TestLanes.virtual(scheduler).disp
-    private val cfg = AppConfig(cacheMaxBytes = 25L * 1024 * 1024)
+
+    /**
+     * The class fixture's budget is DERIVED (`cacheMaxFiles x AppConfig.CACHE_MEAN_TRACK_BYTES`),
+     * so a byte budget is now requested by naming a file count: 26 files is a 26 MB byte budget,
+     * the smallest count that still leaves the three rows of
+     * [partBytesCountTowardUsageOnlyAfterTheyAreReported] (25 MB) inside it *and* leaves the
+     * 2 MB of `.part` bytes reported by that test outside it. Both are asserted there, so the
+     * number is load-bearing rather than arbitrary.
+     */
+    private val cfg = AppConfig(cacheMaxFiles = 26)
     private val log = LogBuffer(minLevel = LogLevel.DEBUG)
 
     @BeforeTest
@@ -227,21 +236,21 @@ class CacheManagerTest {
         }
 
     /**
-     * The pinned sub-pool's row budget, which is what makes the 300-file cap enforceable at all.
-     * 300 favourites x 4 MB is 1.2 GB, comfortably under a byte cap, so the v0 byte-only loop ran
-     * zero iterations, `lruVictim` (WHERE pinned = 0) matched nothing, and `?: break` exited with
-     * the cap permanently unenforceable and no user-visible signal.
+     * The pinned sub-pool's row budget, which is what makes the file cap enforceable at all.
+     * 300 favourites x 4 MB is 1.2 GB, comfortably under a 2 GB byte cap, so the v0 byte-only loop
+     * ran zero iterations, `lruVictim` (WHERE pinned = 0) matched nothing, and `?: break` exited
+     * with the cap permanently unenforceable and no user-visible signal.
      *
-     * The rows are sized to isolate the *row* budget. `CacheManager.byteBudget` is derived —
-     * `min(cacheMaxBytes, cacheMaxFiles x 1 MB)` — not `cacheMaxBytes`, so 12 x 4 MB against a
-     * 10-file cap put the pool 6x over the pinned byte budget and the loop correctly ran to its
-     * one-survivor floor: a true result, but of the byte cap rather than of the row cap under test.
-     * 12 x 500 KB is 6 MB against a 7.5 MB pinned byte budget, so only the row budget can bind.
+     * The rows are sized to isolate the *row* budget. `CacheManager.byteBudget` is derived from the
+     * file cap (`cacheMaxFiles x 1 MB`), so 10 files is a 10 MB byte budget and 12 x 4 MB would put
+     * the pool 6x over the 7.5 MB pinned byte budget: a true result, but of the byte cap rather than
+     * of the row cap under test. 12 x 500 KB is 6 MB against that same 7.5 MB pinned byte budget, so
+     * only the row budget can bind.
      */
     @Test
     fun thePinnedPoolHasARowBudgetSoTheFileCapStaysEnforceable() =
         runTest(scheduler) {
-            withFreshCache(cfg = AppConfig(cacheMaxBytes = 2_000_000_000L, cacheMaxFiles = 10)) { db2, cm2, _ ->
+            withFreshCache(cfg = AppConfig(cacheMaxFiles = 10)) { db2, cm2, _ ->
                 repeat(12) { idx ->
                     val k = SongKey("saavn", "fav$idx")
                     db2.dylanQueries
@@ -317,7 +326,7 @@ class CacheManagerTest {
     @Test
     fun atTheFileCapWithNoPendingRowNothingIsEvicted() =
         runTest(scheduler) {
-            val capCfg = AppConfig(cacheMaxBytes = 1_000_000_000L, cacheMaxFiles = 5)
+            val capCfg = AppConfig(cacheMaxFiles = 5)
             withFreshCache(cfg = capCfg) { db2, cm2, _ ->
                 repeat(5) { idx ->
                     val id = "k$idx"
@@ -336,6 +345,37 @@ class CacheManagerTest {
                 // Control: the same state with one row genuinely pending DOES evict exactly one.
                 cm2.enforceBudget(pendingRows = 1)
                 assertEquals(4L, db2.songCount())
+            }
+        }
+
+    /**
+     * The byte budget is DERIVED from the file cap, and this pins that. It used to be an independent
+     * 2 GB which `min(2 GB, 300 x 1 MB)` could never reach, so the figure both platform screens
+     * print and divide by was not the figure the LRU pass enforced — a 2 GB progress bar that can
+     * never leave 15 %. One knob, one number: raising the file cap raises the bytes those files may
+     * occupy, and the budget `CacheManager` enforces is that same number.
+     */
+    @Test
+    fun theByteBudgetIsDerivedFromTheFileCapSoTheEnforcedAndDisplayedNumbersCannotDisagree() =
+        runTest(scheduler) {
+            val defaults = AppConfig()
+            val doubled = AppConfig(cacheMaxFiles = defaults.cacheMaxFiles * 2)
+            assertEquals(
+                MEAN_TRACK_BYTES * defaults.cacheMaxFiles,
+                defaults.cacheMaxBytes,
+                "the byte budget must be the file cap times the assumed mean track size",
+            )
+            assertEquals(
+                defaults.cacheMaxBytes * 2,
+                doubled.cacheMaxBytes,
+                "raising the file cap must raise the byte budget by the same factor",
+            )
+            withFreshCache { _, cm2, _ ->
+                assertEquals(
+                    cfg.cacheMaxBytes,
+                    cm2.byteBudget,
+                    "the budget CacheManager enforces must be the one config derives and both UIs show",
+                )
             }
         }
 
@@ -387,7 +427,7 @@ class CacheManagerTest {
                         .toSet()
                 assertTrue(
                     after.size < 3,
-                    "2 MB of .part bytes must count toward the budget: 25 MB + 2 MB > 25 MB, " +
+                    "2 MB of .part bytes must count toward the budget: 25 MB + 2 MB > 26 MB, " +
                         "so a victim is due, survivors=$after",
                 )
                 assertTrue(
@@ -622,6 +662,13 @@ class CacheManagerTest {
  * constraint. See `thePinnedPoolHasARowBudgetSoTheFileCapStaysEnforceable`.
  */
 private const val PINNED_FIXTURE_BYTES = 500_000L
+
+/**
+ * The assumed mean rendition size `AppConfig` multiplies the file cap by. Mirrored rather than
+ * imported (it is private there), so that changing the production constant has to update this
+ * value deliberately — the derivation is what this test class is asserting, not the arithmetic.
+ */
+private const val MEAN_TRACK_BYTES = 1_000_000L
 
 private data class CacheFileNameAssert(
     val provider: String,

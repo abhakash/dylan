@@ -685,8 +685,21 @@ class Orchestrator(
         admitted: EnqueueResult,
     ): JobState? {
         val id = (admitted as? EnqueueResult.Queued)?.id
-        if (id != null) return downloads.awaitAttempt(id, cfg.readyTimeoutMs)
-        return withTimeoutOrNull(cfg.readyTimeoutMs) { downloads.states.first { it[key].isTerminal() }[key] }
+        if (id != null) {
+            val settled = downloads.awaitAttempt(id, cfg.readyTimeoutMs)
+            // A ready-timeout is NOT a download failure: the attempt is still streaming, and an
+            // attempt's own wall ceiling is max(stallWallFloorMs, expectedBytes/8) — up to ~30 min
+            // for a 14.5 MB track. Nothing else cancels it: onPrepareFailed re-enqueues the same
+            // key at the same USER_NOW rank, which the live attempt out-ranks, so the incumbent just
+            // keeps going. Without this the user is told the download failed and is then billed for
+            // the rest of the transfer on cellular.
+            if (settled == null) downloads.cancelAttempt(id, keepPart = true)
+            return settled
+        }
+        val settled = withTimeoutOrNull(cfg.readyTimeoutMs) { downloads.states.first { it[key].isTerminal() }[key] }
+        // No id to cancel precisely, so cancel by key — same reasoning, coarser blast radius.
+        if (settled == null) downloads.cancel(key, keepPart = true)
+        return settled
     }
 
     private suspend fun onPrepareFailed(
