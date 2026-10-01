@@ -86,6 +86,13 @@ class AppContainer(
     /** Android Home-screen projection. Platform-owned state, injected — see [HomeSnapshotHolder]. */
     home: HomeSnapshotHolder = HomeSnapshotHolder(),
     /**
+     * The filesystem every file-touching component uses. Injected rather than defaulted to
+     * `FileSystem.SYSTEM`, which is a JVM-only declaration and therefore does not resolve in
+     * commonMain — the iOS klib compile fails on it. `commonMain` must not name a JVM-only symbol,
+     * so each platform passes its own (both are the same `FileSystem.SYSTEM` at runtime).
+     */
+    val fs: FileSystem,
+    /**
      * The shared ring. A platform graph can pass its own [log] instead so it can bind a console
      * mirror and hand the same buffer to DriverFactory before the SQLite open — a schema wipe
      * must never land in a ring nobody reads.
@@ -146,7 +153,6 @@ class AppContainer(
     val history: History get() = data.history
     val searchHistory: SearchHistoryRepo get() = data.searchHistory
     val homeCache: HomeCacheRepo get() = data.homeCache
-    val fs: FileSystem get() = files.fs
     val paths: Paths get() = files.paths
     val fileLog: FileLogSink get() = files.fileLog
     val provider: SaavnProvider get() = net.provider
@@ -175,7 +181,6 @@ class AppContainer(
     // ---- graph construction ----------------------------------------------------------------
 
     private fun buildFiles(): FileGraph {
-        val fs = FileSystem.SYSTEM
         val sink =
             FileLogSink(
                 fs = fs,

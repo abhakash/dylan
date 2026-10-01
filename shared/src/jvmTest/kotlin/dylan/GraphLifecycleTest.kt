@@ -334,6 +334,7 @@ class GraphLifecycleTest {
             scope = scope,
             baseDir = dir,
             driverFactory = DriverFactory(dir + "/dylan.db", log),
+            fs = okio.FileSystem.SYSTEM,
             netMonitor = TestNet,
             httpEngine = MockEngine { respondError(HttpStatusCode.NotFound) },
             engineFactory = { unusedEngine() },

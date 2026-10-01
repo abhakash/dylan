@@ -12,6 +12,16 @@ import kotlin.experimental.ExperimentalNativeApi
 enum class Lane { MAIN, IO, DB, STATE }
 
 /**
+ * A lane-confined operation ran on the wrong lane. Thrown, not logged-and-continued: lane
+ * confinement is what makes the shared mutable state in this app safe (the state lane owns the
+ * queue, the DB lane owns the driver), so a violation is a correctness bug that must stop the
+ * line that caused it rather than corrupt something further downstream.
+ */
+class LaneViolation(
+    message: String,
+) : IllegalStateException(message)
+
+/**
  * Carries the active lane across a `withContext` so a *coroutine* can be asked which lane it
  * is in ([AppDispatchers.assertInContext]). A dispatcher cannot tag an already-created
  * coroutine's context, which is why the thread-scoped [AppDispatchers.assert] exists too.
@@ -133,12 +143,17 @@ class AppDispatchers(
     @OptIn(ExperimentalNativeApi::class)
     suspend fun assertInContext(lane: Lane) {
         val actual = coroutineContext[LaneTag]?.lane
-        kotlin.assert(actual == lane) { "expected $lane, on ${actual ?: "no lane"}" }
+        if (actual != lane) throw LaneViolation("expected $lane, on ${actual ?: "no lane"}")
     }
 
     /**
      * Thread-scoped check, for non-suspending code running inside an [on] block. One thread-local
-     * read; the message is only built when assertions are on, which no release build sets.
+     * read.
+     *
+     * This used to use `kotlin.assert`, which was wrong twice over: it is JVM-only, so it did not
+     * even resolve in commonMain metadata (the iOS klib compile failed on it), and it compiles out
+     * entirely when assertions are disabled — meaning the invariant this class exists to enforce was
+     * silently absent from every release build. Hence [LaneViolation].
      *
      * Answers "no lane" on iOS, where [lanePublication] has no hook to publish with, and it is
      * weaker than [assertInContext] everywhere, because a `limitedParallelism(1)` lane can be
@@ -148,7 +163,7 @@ class AppDispatchers(
     @OptIn(ExperimentalNativeApi::class)
     fun assert(lane: Lane) {
         val actual = slot.get()
-        kotlin.assert(actual == lane) { "expected $lane, on ${actual ?: "no lane"}" }
+        if (actual != lane) throw LaneViolation("expected $lane, on ${actual ?: "no lane"}")
     }
 
     private fun dispatcherOf(lane: Lane): CoroutineDispatcher =

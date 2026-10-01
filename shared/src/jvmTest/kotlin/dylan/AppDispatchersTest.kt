@@ -3,6 +3,7 @@ package dylan
 import dylan.util.AppDispatchers
 import dylan.util.Lane
 import dylan.util.LaneTag
+import dylan.util.LaneViolation
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
@@ -110,12 +111,17 @@ class AppDispatchersTest {
     }
 
     @Test
-    fun assertThrowsWhenTheLaneIsWrongAndIsInertWhenAssertionsAreOff() {
-        // Tests run with -ea, so the tripwire is live: this is what a lane violation looks like.
-        val e = assertFailsWith<AssertionError> { disp.assert(Lane.STATE) }
+    fun assertThrowsWhenTheLaneIsWrongInEveryBuild() {
+        // A lane violation throws LaneViolation, and it does so in RELEASE too. The old name and
+        // the old message promised the opposite: `kotlin.assert` compiles out when assertions are
+        // disabled, so the invariant was absent from every release build while this test (which runs
+        // with -ea) reported it as covered. The test name's "inert when assertions are off" is now
+        // the opposite of the behaviour, so it is renamed below rather than left asserting a
+        // property the code deliberately no longer has.
+        val e = assertFailsWith<LaneViolation> { disp.assert(Lane.STATE) }
         assertTrue("expected STATE" in e.message.orEmpty(), e.message.orEmpty())
         // A thread that never entered a lane is a violation too, not a silent pass.
-        assertFailsWith<AssertionError> { disp.assert(Lane.IO) }
+        assertFailsWith<LaneViolation> { disp.assert(Lane.IO) }
     }
 
     /**

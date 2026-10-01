@@ -378,6 +378,7 @@ class IosGraph private constructor(
                             scope = sharedScope,
                             baseDir = baseDir,
                             driverFactory = DriverFactory(log),
+                            fs = okio.FileSystem.SYSTEM,
                             netMonitor = net,
                             httpEngine = Darwin.create(),
                             engineFactory = {
