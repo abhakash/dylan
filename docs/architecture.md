@@ -1,12 +1,27 @@
 # Dylan architecture — seams, lanes, logging contract
 
-## Seams (only interfaces; each has a second impl today)
+## Seams
 
-| Seam | Prod | Alt |
-|------|------|-----|
-| `MusicProvider` | `CatalogProvider` (Saavn) | test fakes |
-| `SearchChannel` | WS + HTTP (`SaavnSearchChannel`) | HTTP-only fallback |
-| `PlayerEngine` | `ExoPlayerEngine` / `IosPlayerEngine` | `FakeEngine` in tests |
+| Seam | Prod | Second impl |
+|------|------|-------------|
+| `PlayerEngine` | `ExoPlayerEngine` (androidApp) / `IosPlayerEngine` (iosMain) | `FakePlayerEngine`, checked against the shared `EngineContractTest` |
+| `MusicProvider` | `SaavnProvider` (`provider/saavn/SaavnProvider.kt:52`) | test fakes only — `GraphHarness.StubProvider`, `GatedProvider`, `DownloadEngineTest` |
+| `SearchChannel` | `SaavnSearchChannel` — **one** class; WS is a latency fast path, HTTP is the authority | **none.** `HttpSuggest` (`SaavnSearchChannel.kt:553`) is a private collaborator inside that class, not a second implementation |
+| `NetMonitor` | Android `NetworkCapabilities` (`Util.android.kt:80`), Darwin `NWPathMonitor` (`Util.ios.kt:45`), JVM fixed stub (`Util.jvm.kt:26`) | `FakeNetMonitor` |
+| `NativeAudioOutput` | Swift `NativeAudioOutputImpl` over `AVQueuePlayer` | — (iOS-only seam) |
+
+`SearchChannel` is the one place where the interface is aspirational: `container.net.searchChannel`
+is typed `SaavnSearchChannel`, not `SearchChannel` (`AppContainer.kt:153`, `Graphs.kt:52`), so
+production cannot be substituted behind it today. `MusicProvider` is the same
+(`AppContainer.kt:152`). Both are still worth the indirection — the test fakes are real
+consumers — but neither is a swap point a product change could use.
+
+The reliability ordering inside `SaavnSearchChannel` is deliberate and inverted from the
+obvious one: the WS frame carries no query echo and no request id
+(`SaavnSearchChannel.kt:76-81`), so FIFO position is strictly *weaker* correlation than
+HTTP's implicit correlation by construction. Every doubt — offline, cooldown, timeout, socket
+error, undecodable frame, a mispaired demand — falls back to HTTP rather than rendering a
+plausible answer for the wrong query.
 
 `IosGraph` reuses `AppContainer` — startup reconciler, restore-from-snapshot,
 weekly GC, and download engine are shared, not mirrored.
@@ -35,19 +50,33 @@ opened, no Ktor client is built, no component is instantiated.
   the old eager behaviour rather than to a broken graph.
 - `fun start()` — idempotent and re-entry safe (one `compareAndSet`); publishes the four
   background jobs.
-- `suspend fun stop()` — `cancelAndJoin`s every coroutine the container launched, resets
-  `protectedKeys`, flushes and closes the log trail, and closes the three `HttpClient`s
-  plus the shared `HttpClientEngine`. The container **takes ownership** of the engine it
-  is given. `start()` after `stop()` relaunches the background work; the HTTP layer is
-  not rebuilt, so a container that stopped and must serve again is replaced.
+- `suspend fun stop()` — `cancelAndJoin`s every coroutine the container launched, stops the
+  `DownloadEngine`, closes the three `HttpClient`s plus the shared `HttpClientEngine`, flushes
+  **and closes** the log trail, and resets `protectedKeys` (`AppContainer.kt:324-337`). The
+  container **takes ownership** of the engine it is given. `start()` after `stop()` relaunches
+  the background work; the HTTP layer is not rebuilt, so a container that stopped and must
+  serve again is replaced.
 - `suspend fun shutdown()` — `stop()` plus every scope handed out by `componentScope()`.
-  Terminal. This is what a platform teardown path calls (`IosGraph.dispose()`).
+  Terminal.
+
+**Who actually calls them.** Exactly one production path reaches `stop()`:
+`IosGraph.dispose()` → `container.shutdown()` → `stop()` (`IosGraph.kt:197`), driven from
+Swift by `AppEnvironment.teardown()` on `applicationWillTerminate` (`DylanApp.swift:238-240`
+→ `:143` → `DylanBridge.swift:413`). **Android never calls either** — `MainActivity.onDestroy`
+only fire-and-forget flushes the log sink (`MainActivity.kt:64-68`) and
+`DylanMediaService.onDestroy` releases the session and engine
+(`DylanMediaService.kt:420-447`); the container's Ktor clients, HTTP engine, state-lane
+`SupervisorJob` and file-log handle are left to process death. So `stop()` is a real,
+exercised lifecycle step on iOS and an unclaimed one on Android, and
+`GraphLifecycleTest.kt:172,219,234` is currently the only thing covering the Android-shaped
+usage.
 
 **Job ownership.** The container creates the `SupervisorJob`; components receive a
 `CoroutineScope` from `container.componentScope(name)` and own no `Job`. `shutdown()`
 reaches all of them. `DownloadEngine` is the one remaining site that still builds its own
-`SupervisorJob` (it recreates it on every `start()`, so stop/start works, but ownership
-still belongs in the container).
+`SupervisorJob` — but it recreates it on every `start()` rather than reusing a cancelled one
+(`DownloadEngine.kt:174`), which is the fix for the old stop/start brick; ownership still
+belongs in the container.
 
 ## Lanes (dispatchers)
 
@@ -85,20 +114,35 @@ dispatch per emission onto a pool iOS shares with `state`/`dbLane`/`io`.
 - `LogBuffer`: in-memory ring (default 512 entries, `minLevel` INFO release / DEBUG
   debug builds), lock-free COW ring + additive sinks. Every entry: `ts/level/tag/msg/metaJson`.
 - `FileLogSink`: persistent trail at `<baseDir>/logs/dylan.log.{0,1,2}` —
-  512 KB per file, `filesToKeep = 2` archives **+ live file = 3 files max**
-  (~1.5 MB cap). Async `DROP_OLDEST` channel (1024); single writer drains in batches,
-  flushing after each idle window (50 ms) — crash window ≈ 50 ms of tail.
+  `FILE_BYTES_DEFAULT = 512_000` B per file, `filesToKeep = 2` archives **+ live file =
+  3 files max** (~1.5 MB cap; the figure is 512 000, not 512 KiB). Async `DROP_OLDEST`
+  channel (1024); single writer drains in batches, flushing after each idle window (50 ms)
+  — crash window ≈ 50 ms of tail.
 - Line format: `2025-08-24T01:46:40.000Z I/dl: enqueue saavn:s1 bits=128`
   (`<UTC ms> <LEVEL_INITIAL>/<tag>: <msg> [meta]`). Query tags like `dl`, `play`,
   `boot`; see `docs/triage.md` for greps.
-- Byte accounting uses UTF-8 bytes (`encodeToByteArray().size`), not chars.
-- Lifecycle: `AppContainer.onBackground()` and `stop()` fire-and-forget
-  `FileLogSink.flush(timeoutMs = 2000)` on the io lane — never blocks UI/background
-  budget. `stop()` additionally `close()`s the handle (reopened lazily on the next write);
-  `shutdown()` is the last flush.
+- Byte accounting is UTF-8, via a reused `okio.Buffer` staging write rather than a per-line
+  `encodeToByteArray()` allocation — okio's fluent `writeUtf8` returns the sink, not the
+  byte count, so the byte count has to come from `staging.size` (`FileLogSink.kt:45-48,106-125`).
+- Lifecycle, and who reaches it:
+  - `AppContainer.onBackground()` → `flushLogAsync()`: a fire-and-forget
+    `flush(timeoutMs = 2000)` on the io lane (`AppContainer.kt:505-515`). Never blocks the
+    background budget. Reached from `MainActivity.onStop` (Android) and
+    `IosGraph.onBackground()` (iOS).
+  - `MainActivity.onDestroy` adds its own fire-and-forget flush, because Android never calls
+    `stop()` (`MainActivity.kt:61-69`).
+  - `stop()` → `closeLogTrail()`: a **suspending** `flush(2000)` then `close()`
+    (`AppContainer.kt:517-521`, reached at `:331`). `close()` drops the file handle and is
+    reopened lazily by the next write (`FileLogSink.kt:86-89,106-113`), so it loses no bytes —
+    it only trades a held descriptor for a reopen. It is the **only** production caller of
+    `FileLogSink.close()`, and it is iOS-terminate-only, as above.
+  - `shutdown()` adds no flush of its own: it calls `stop()` first (`AppContainer.kt:347`),
+    so the last flush is the one inside `stop()`.
 - Boot line carries version + session for correlation without touching playback:
-  `I/boot: container up v=0.1.0 session=<uuid> dir=<baseDir> openMs=<n>`
-  (`APP_VERSION` in `AppContainer` companion, synced with root `VERSION`). It is emitted
-  at the end of `open()`, so it is the first line in the file trail.
+  `I/boot: container up v=<APP_VERSION> session=<uuid> dir=<baseDir> openMs=<n>`
+  (`AppContainer.kt:396`, emitted at the end of `open()` so it is the first line in the trail).
+  `APP_VERSION` is a hand-maintained literal (`AppContainer.kt:532`) and has **drifted**:
+  it reads `0.1.0` while root `VERSION` is `1.0.0`. `bump-version.sh` writes `VERSION` and
+  the pbxproj, never this constant, so the boot line under-reports the shipped version.
 - Platform mirrors: Android binds a logcat sink (`Dylan:<tag>`); iOS logs via
   `NSLog` on scope failures. Console mirrors are additive — the file is the record.

@@ -2,6 +2,15 @@
 
 Everything that can turn a build red, and what specifically makes it red.
 
+`tools/check.sh` is the local equivalent of the hermetic presubmit set, plus
+`assembleDebug` + `assembleRelease` and an assertion that both APKs exist and are
+non-empty. It is the shortest way to reproduce presubmit before opening a PR:
+
+```bash
+./tools/check.sh                    # hermetic gates + both APK flavors
+DYLAN_LIVE_GATES=1 ./tools/check.sh # also runs probeCi + contractDrift (live API)
+```
+
 ## Presubmit (every push / PR) — hermetic, no network
 
 | Gate | Task | Fails on |
@@ -18,7 +27,29 @@ Everything that can turn a build red, and what specifically makes it red.
 `:shared:jvmTest` so a cached/UP-TO-DATE result can never be reported as green,
 while leaving `compileKotlinJvm` / `compileTestKotlinJvm` incremental and
 build-cacheable. `--rerun-tasks` forces a full main + test recompile on every
-run for no correctness gain.
+run for no correctness gain. It appears in `ci.yml:89`, `builds.yml:63` and
+`tools/check.sh:17`; `release.yml:52` uses it too, though that workflow's gate
+is the same trio minus Android lint.
+
+### the presubmit graph is a fan, not a chain
+
+`wrapper-validation` gates everything; then four jobs run as **siblings**
+(`lint`, `test/jvm`, `ios/klib`, `gosign` — `ci.yml:39,71,142,227`), and only
+`android/debug` and `ios/simulator` wait for `lint` + `test/jvm`
+(`ci.yml:106,166`). So `ios/klib` and `gosign` can be green while `lint` is red:
+they are not downstream of the linters, and a klib compile will not catch a
+ktlint violation. Branch protection that requires only the five `ios/*`/`android/*`
+job names leaves `lint` unrequired.
+
+### one flag, one place
+
+`--no-configuration-cache` survives in exactly one invocation in the tree: the
+shipped iOS build phase (`iosApp/iosApp.xcodeproj/project.pbxproj:213`). It is
+load-bearing there — the Kotlin embed task reads `CONFIGURATION` / `SDK_NAME` /
+`ARCHS` / `TARGET_BUILD_DIR` / `FRAMEWORKS_FOLDER_PATH` from the Xcode
+environment, which a configuration-cache replay would not reproduce. There is no
+`configuration-cache` setting in `gradle.properties`, so CC is off everywhere
+else by omission rather than by decision.
 
 ## Nightly / manual (schedule + `workflow_dispatch`) — hits the live JioSaavn API
 
@@ -78,9 +109,18 @@ no longer depends on `workingDir`.
 
 ## Release / build lanes
 
-`builds.yml` has a `gate` job (`ktlintCheck detekt :shared:jvmTest --rerun`)
-that every build job `needs:` — no APK, IPA or `.aab` is produced from a tree
-that has not been linted and tested in that same run.
+`builds.yml` has a `gate` job (`ktlintCheck detekt :shared:jvmTest --rerun`,
+`builds.yml:63`) that every build job `needs:` (`builds.yml:67,105,178,223`) — no
+APK, IPA or `.aab` is produced from a tree that has not been linted and tested in
+that same run. It is needed because the tag push from `version.yml` carries
+`[skip ci]`, so `ci.yml` never runs for it.
+
+**The gate is narrower than presubmit on purpose and narrower by omission:** it omits
+`:androidApp:lintDebug`, which `ci.yml:54` and `tools/check.sh:13` both run. A release can
+therefore be cut from a tree that has never been Android-linted. Separately, the
+`platform: android/ios/all` input on `builds.yml` is declared but never read — all four
+`if:` conditions test `inputs.flavor` only (`builds.yml:68,106,179,224`), so a
+`platform: android` dispatch still builds the iOS lanes.
 
 `release.yml` materialises `keystore.properties` + `dylan-release.keystore`
 from secrets and **exits 1 when either secret is missing** (an earlier version
