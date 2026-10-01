@@ -52,6 +52,13 @@ jobs:
           gradle-home-cache-cleanup: true
       - name: ktlint + detekt + Android lint
         run: ./gradlew ktlintCheck detekt :androidApp:lintDebug
+      - name: pbxproj structure check (iosApp/Tools/check_pbxproj.py)
+        # Hermetic: pure static parse of iosApp/iosApp.xcodeproj/project.pbxproj —
+        # no secrets, no network, no Xcode, so it is presubmit/fork-safe.
+        # The script resolves both the pbxproj and the `iosApp/` Swift walk
+        # relative to CWD, so it MUST run from inside iosApp/.
+        working-directory: iosApp
+        run: python3 Tools/check_pbxproj.py
       - name: Upload lint reports
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

@@ -57,15 +57,24 @@ jobs:
       - uses: gradle/actions/setup-gradle@0b6dd653ba04f4f93bf581ec31e66cbd7dcb644d # v4
         with:
           cache-read-only: ${{ github.ref != 'refs/heads/main' }}
-      - name: ktlint + detekt + JVM tests
+      - name: ktlint + detekt + Android lint + JVM tests
+        # :androidApp:lintDebug MUST stay here: tag pushes carry [skip ci] so
+        # ci.yml's `lint` job never runs for a release, and without this task a
+        # prod APK/AAB could be cut from a tree Android Lint never inspected.
         # --rerun re-executes only the test task; --rerun-tasks would force a
         # full main+test recompile for no correctness gain.
-        run: ./gradlew ktlintCheck detekt :shared:jvmTest --rerun
+        run: ./gradlew ktlintCheck detekt :androidApp:lintDebug :shared:jvmTest --rerun
 
   android-debug:
     name: android/debug
     needs: gate
-    if: github.event_name == 'push' || inputs.flavor == 'all' || inputs.flavor == 'debug'
+    # flavor picker AND platform picker, each with the same `push` escape hatch
+    # as the flavor guard: a `v*` tag push has no workflow_dispatch inputs (the
+    # `inputs` context is empty), so `github.event_name == 'push'` is the only
+    # clause that keeps the prod/release lane running on tags.
+    if: >-
+      (github.event_name == 'push' || inputs.flavor == 'all' || inputs.flavor == 'debug')
+      && (github.event_name == 'push' || inputs.platform == 'all' || inputs.platform == 'android')
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -103,7 +112,11 @@ jobs:
   android-prod:
     name: android/prod
     needs: gate
-    if: github.event_name == 'push' || inputs.flavor == 'all' || inputs.flavor == 'prod'
+    # See android-debug: tag push => both guards fall through to the `push`
+    # clause, so version.yml's prod Android release is unaffected.
+    if: >-
+      (github.event_name == 'push' || inputs.flavor == 'all' || inputs.flavor == 'prod')
+      && (github.event_name == 'push' || inputs.platform == 'all' || inputs.platform == 'android')
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -176,7 +189,10 @@ jobs:
   ios-debug:
     name: ios/debug
     needs: gate
-    if: github.event_name == 'push' || inputs.flavor == 'all' || inputs.flavor == 'debug'
+    # Same shape as android-debug, with the platform clause narrowed to `ios`.
+    if: >-
+      (github.event_name == 'push' || inputs.flavor == 'all' || inputs.flavor == 'debug')
+      && (github.event_name == 'push' || inputs.platform == 'all' || inputs.platform == 'ios')
     runs-on: macos-14
     timeout-minutes: 30
     steps:
@@ -221,7 +237,10 @@ jobs:
   ios-prod:
     name: ios/prod-unsigned
     needs: gate
-    if: github.event_name == 'push' || inputs.flavor == 'all' || inputs.flavor == 'prod'
+    # See android-debug: tag push => prod iOS IPA still built for every platform.
+    if: >-
+      (github.event_name == 'push' || inputs.flavor == 'all' || inputs.flavor == 'prod')
+      && (github.event_name == 'push' || inputs.platform == 'all' || inputs.platform == 'ios')
     runs-on: macos-14
     timeout-minutes: 40
     steps:
