@@ -528,8 +528,8 @@ class AppContainer(
     }
 
     companion object {
-        /** Keep in sync with root VERSION (bump-version.sh is the writer). */
-        const val APP_VERSION = "0.1.0"
+        /** Shipped version. Generated into `AppVersion.kt` from the root `VERSION` file at build time. */
+        const val APP_VERSION: String = dylan.di.APP_VERSION
         const val LOG_FLUSH_TIMEOUT_MS = 2_000L
         private const val FILE_SINK_KEY = "file"
         private const val GC_LAST_KEY = "gc_last_ms"
