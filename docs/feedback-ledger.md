@@ -63,7 +63,7 @@ Single `Sheet` enum; `Playing`-only glyphs; `isPlaying` + `showsPause`; song-key
 | I-ci-release | Silent debug-signed release | **Superseded** | Accurate as written, and the audit's counter-claim that `release.yml` "still does exactly this" is **false** — see §6. Both release paths now fail closed: `release.yml:63-67` exits 1 when either keystore secret is missing, and `:109-114` runs `apksigner verify --print-certs` on every APK and fails if the chain says `Android Debug` |
 | I-ios-release ✓ | xcpretty double-archive, literal `$(DEVELOPMENT_TEAM)`, `altool`, `-allowProvisioningUpdates` | **Done (follow-up)** | Templated `exportOptions.plist` with a `sed` substitution and an unset-`APPLE_TEAM_ID` guard (`ios-release.yml:64-72`), `DEVELOPMENT_TEAM` passed on the `xcodebuild` line (`:81`), tee'd logs, `fastlane pilot` |
 | I-provision-stub ✓ | Fixtures presented as live; `refresh` overclaims | **Done (follow-up)** | `[offline fixture — …]` label in the output (`main.go:307`) |
-| I-docs/version ✓ | No arch docs, stale versions, `1.0` fallback | **Partial** | `docs/{architecture,triage,signing,build-and-gates}.md` exist. The sentinel is now `0.1.0`, not `0.0.0` (`androidApp/build.gradle.kts:48`), and the pbxproj is machine-synced from `VERSION` (`sync-ios-version.sh`). **`AppContainer.APP_VERSION` is a hand-maintained literal and has drifted** — it reads `0.1.0` while `VERSION` is `1.0.0` (`AppContainer.kt:532`), and `bump-version.sh` writes neither, so the boot line under-reports the shipped version. See §7 |
+| I-docs/version ✓ | No arch docs, stale versions, `1.0` fallback | **Done (follow-up)** | `docs/{architecture,triage,signing,build-and-gates}.md` exist. The sentinel is `0.1.0`, not `0.0.0` (`androidApp/build.gradle.kts:48`), and the pbxproj is machine-synced from `VERSION` (`sync-ios-version.sh`). **`APP_VERSION` is no longer hand-maintained**: it is generated into `build/generated/dylan/di/AppVersion.kt` from the same root `VERSION` file `versionName` derives from (`shared/build.gradle.kts`), and `AppVersionTest` asserts the compiled constant against that file. It had drifted to `0.1.0` vs a `1.0.0` `VERSION`, so every boot line under-reported the installed version; a "keep in sync" comment cannot prevent that. |
 | I-pinning/config-cache ✓ | SHA pinning, CC flag contradiction | **Done, with one exception** | All **71** `uses:` in the tree are SHA-pinned (not the 68 the row claimed) and `gradle.properties` sets no `configuration-cache`, so CC is off as the de-facto behaviour. Exactly **one** `--no-configuration-cache` survives, and it is the shipped iOS build phase (`project.pbxproj:213`) — see §6 |
 
 ## 5. Hacks sweep (P0/P1/P2 catalog)
@@ -78,7 +78,7 @@ Single `Sheet` enum; `Playing`-only glyphs; `isPlaying` + `showsPause`; song-key
 | 6 ✓ | `tryEmit` drops | **Done** — 256 buffer + checked emit + `log.w` |
 | 7 ✓ | State `conflate` | **Done** (see U-conflate) |
 | 8 ✓ | 18× silent bridge catches | **Done (follow-up)** — user-initiated calls toast; background reads stay silent-log by design |
-| 9 | `as? … ?? []` erasure | **Partial** — the contract guard exists at the queue site (`Stores.swift:58`, which type-checks every element before the cast) and at the home-sections site (`Stores.swift:336`), but the suggestions cast (`Stores.swift:148`) and the four `compactMap { $0 as? KSong }` sites in `DylanBridge.swift` (`:179,248,285`) still drop mismatches silently. The earlier claim of "guards at all 3 sites" is **false as written** |
+| 9 | `as? … ?? []` erasure | **Done (follow-up)** — every collection crossing the bridge is now checked. The queue (`Stores.swift:58`) and home-sections (`Stores.swift:336`) sites type-check element-wise, the suggestions cast (`Stores.swift:145`) asserts on a mismatch, and the three `compactMap { $0 as? KSong }` sites in `DylanBridge.swift` now go through one `checkedCast(_:_:)` helper that reports the **actual** offending element type. All five crossings are covered; the guard is debug-only, so release behaviour is unchanged |
 | 10 ✓ | Swallowed PRAGMAs | **Done** — logged via the `LogBuffer` param |
 | 11 ✓ | Unconditional `removeAllItems` | **Done, in Swift and stronger than described** — the window diff lives in `NativeAudioOutputImpl.prepareOnMain` (`:113-135`): a same-head re-prepare keeps the audible item and only calls `replaceTail` (`:156-166`), and the head re-arms its own `Prepared` (`:141-153`) because an `AVPlayerItem` has no second `.readyToPlay` transition. The `replaceTail` helper the ledger named is a **Swift** function, not a Kotlin one |
 | 12-26 | Search/HTTP timeouts, FileLogSink caps, debounce constants, `consecutiveErrors`, AppContainer swallows, part-cap/backoff, probe `!!`, rename `check` | **Pending (deferred tech-debt)** — tuned constants with comments. One has since been fixed for a different reason: the bulk client no longer sets `requestTimeoutMillis` (`Clients.kt:57-71`), because a whole-request cap was capping the streaming GET and making both `stallWallFloorMs` and the 8 KB/s rate-wall policy dead. The remaining ones still need device-measured data, not guesses |
@@ -120,19 +120,47 @@ lifecycle.
 
 ## 7. Open items
 
-1. `streamInto` structured-concurrency rewrite (needs a device/sim E2E safety net)
+Re-verified against the tree on 2026-10-01 after W4. Items 1, 9 and 10 were listed here but were
+**already fixed** — the row described a function or a literal that no longer exists. Corrected below.
+
+1. ~~`streamInto` structured-concurrency rewrite~~ — **Done, and the row was stale.** `streamInto`
+   no longer exists: W3 split the download package and the transfer body moved to
+   `Transfer.kt`, which uses `supervisorScope` (`:467`) and `awaitContent` (`:652`). §5 #5 already
+   recorded this correctly, so this list contradicted its own §5.
 2. `resyncFault` escalation bound — **Done**: 3 strikes per itemId → skip, reset on a mapped
    TrackChanged (`Orchestrator.kt:1041-1052`)
 3. `removeAllItems` window diff on iOS — **Done** (see §5 #11)
-4. `as?` contract tests + debug asserts — **Partial** (see §5 #9)
+4. `as?` contract tests + debug asserts — **Done (follow-up)**: the three remaining
+   `compactMap { $0 as? KSong }` sites in `DylanBridge.swift` now go through `checkedCast(_:_:)`,
+   which reports the offending element type in a debug-only `assertionFailure`; release behaviour
+   is unchanged. All five bridge collection crossings are now checked.
 5. Versioned `.sqm` migration before prod — **Done** (`1.sqm`; see D-migration)
-6. P1/P2 constant tuning with device measurements
+6. P1/P2 constant tuning with device measurements — **Blocked**: needs a device on `adb`.
 7. SHA-pinning — **Done** (71/71). `configuration-cache` — off by omission, not by decision;
    the one surviving `--no-configuration-cache` is in the shipped iOS build phase and is
    load-bearing there (the embed task reads Xcode env vars that CC would not replay)
 8. iOS `xcodebuild` verification — **Done** in CI for the simulator (`ci.yml:200-212`) plus
    `:shared:iosSimulatorArm64Test` (`:196-199`). Still outstanding: a **device** archive, and
    the `Embed Frameworks` question in `iosApp/BUILD-NOTES.md` §3.3
-9. `AppContainer.APP_VERSION` drift (see I-docs/version) — a real, unfixed defect
-10. `iosApp/Tools/check_pbxproj.py` is not in any workflow and asserts nothing about
-    `DEVELOPMENT_TEAM` or the missing app icon
+9. ~~`AppContainer.APP_VERSION` drift~~ — **Done**: `APP_VERSION` is now generated into
+   `build/generated/dylan/di/AppVersion.kt` from the root `VERSION` file by
+   `shared/build.gradle.kts`, with `AppVersionTest` asserting the compiled constant against the
+   file it is generated from. The "keep in sync" comment that had drifted is gone.
+10. ~~`check_pbxproj.py` is not in any workflow~~ — **Done**: wired into `ci.yml`'s presubmit
+    `lint` job with `working-directory: iosApp` (the documented repo-root invocation crashes,
+    because the script resolves its paths relative to CWD).
+
+### Remaining, with the reason each is still open
+
+| Item | Why it is still open |
+|---|---|
+| `builds.yml` `platform` input was dead; gate omitted `:androidApp:lintDebug` | **Fixed** in W4 — see commit `716be33`. Both jobs now honour the picker, with a `push` escape hatch so the tag-triggered prod lane still runs. |
+| iOS Home showed 5 Jump-Back-In entries, Android 20 | **Fixed** in W4. `Stores.swift` cited `recent(5)` from "Android HomeScreen", but that is the *Library* screen (`LibraryScreen.kt:69`); Android Home reads `recent(20)` (`HomeScreen.kt:81`). Both screens now match their Android counterparts. |
+| Prefetch row rendered as a checkmark setting | **Fixed in wording, not in behaviour.** `prefetchEnabled` is a `true` constant with no setter anywhere (`AppConfig.kt:157`) and Android has no prefetch row at all, so the row now states the fixed behaviour instead of implying a user control. Making it a real toggle is the follow-up. |
+| iOS bridge `as?` erasure | **Fixed** — see item 4. |
+| Android never calls `container.stop()`/`shutdown()` | **Open, and deliberately not "fixed".** `MainActivity.onDestroy` fires on rotation (no `configChanges` in the manifest), so calling `stop()` there would tear down playback on every config change. The log flush that `stop()` would have performed already happens on `onStop` → `onBackground()` → `flushLogAsync()`. A process-scoped teardown belongs on `Application.onTerminate`, which Android never calls in production, so the honest statement is that Android relies on process death — not a missing call. |
+| `DEVELOPMENT_TEAM = ""` in 3 target configs; no `Assets.xcassets` | **Blocked**: needs a real Apple Developer team ID and an icon. Blocks any device archive. |
+| `Embed Frameworks` phase double-signs what KGP embeds | **Open**: needs a signed-device build to prove, and the `Embed Frameworks` phase is what signs the framework today, so removing it is not safe until the replacement is wired. |
+| P1-1 side-channel launches (27 in `Orchestrator.kt`) | **Open, Partial**: a full reducer/Effect refactor. Every one is gen-checked, so this is a structure/ownership improvement rather than a live bug. |
+| D-2c `Orchestrator`'s private `toSong` (`Orchestrator.kt:1376`) | **Open, Partial**: four copies became one `SongMapper`; the Orchestrator's was kept separate deliberately during parallel work. |
+| §5 #2 120 s-as-control-flow | **Partial by design, not a defect**: the watchdog logs and skips, `readyTimeoutMs` owns failure. W4 made the give-up point and the kill point share one literal so they cannot drift, and the Orchestrator now cancels the attempt when the wait expires. |

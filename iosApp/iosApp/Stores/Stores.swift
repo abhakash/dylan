@@ -328,8 +328,11 @@ final class HomeStore {
     func refresh(_ g: KGraph) async {
         loading = true
         defer { loading = false }
-        // E5 parity: Jump Back In shows at most 5 (Android HomeScreen recent(5)).
-        jumpBack = await g.historyRecent(5)
+        // E5 parity: Jump Back In on Home shows at most 20 — Android HomeScreen.kt:81 reads
+        // history.recent(20). The old comment here claimed Android Home was recent(5), but that is
+        // the *Library* screen (LibraryScreen.kt:69); the two were counting different screens, so
+        // iOS Home silently showed a quarter of Android's.
+        jumpBack = await g.historyRecent(20)
         let sections = await g.homeSections()
         // Android takes feed.sections.first — trending albums rail (plan §11.4).
         if let items = sections.first?.items, !(items is [KMiniEntity]) {

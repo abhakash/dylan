@@ -52,6 +52,13 @@ jobs:
           gradle-home-cache-cleanup: true
       - name: ktlint + detekt + Android lint
         run: ./gradlew ktlintCheck detekt :androidApp:lintDebug
+      - name: lane discipline check (tools/lane-check.sh)
+        # Hermetic: a grep over shared/src/commonMain plus the ALLOWED table in the script.
+        # The runtime Lane assertion only fires when a wrong-lane call actually executes, so a
+        # rarely-taken branch would never trip it — this is the lexical gate that fails at PR time.
+        # The script also fails on a STALE ALLOWED entry, so an exception cannot outlive the line
+        # it was granted for.
+        run: ./tools/lane-check.sh
       - name: pbxproj structure check (iosApp/Tools/check_pbxproj.py)
         # Hermetic: pure static parse of iosApp/iosApp.xcodeproj/project.pbxproj —
         # no secrets, no network, no Xcode, so it is presubmit/fork-safe.

@@ -81,6 +81,29 @@ typealias KEngineErr = EngineErr
 //   NOTE: was spelled `shared.EngineEvent` — unprefixed spelling is wrong.
 typealias KEngineEvent = EngineEvent
 
+// ---- bridge contract guards ----------------------------------------------------
+// A Kotlin `List<T>` crosses as NSArray. `as? [KSong] ?? []` therefore has two very different
+// failure modes that look identical at the call site: an EMPTY list (legitimately nothing to
+// show) and a TYPE MISMATCH (the contract broke and we silently showed nothing). The latter is
+// the one that costs hours, because the symptom is "the screen is just empty" with no error.
+//
+// So every collection crossing the bridge is checked element-wise before the cast. `assertionFailure`
+// is debug-only by construction: in a release build it compiles out and release behaviour is
+// unchanged, which is the right trade — we do not want to crash a user's phone over a bad cast.
+@inline(__always)
+private func checkedCast<T>(
+    _ raw: Any?,
+    _ label: @autoclosure () -> String
+) -> [T] {
+    guard let raw else { return [] }
+    if let typed = raw as? [T] { return typed }
+    // Reached only when the array holds something other than T. Report the real shape so the
+    // failure names the actual type rather than just "mismatch".
+    let actual = (raw as? [Any])?.first.map { String(describing: type(of: $0)) } ?? "empty"
+    assertionFailure("bridge contract: \(label()) expected [\(T.self)] but got [\(actual)]")
+    return (raw as? [T]) ?? []
+}
+
 /// Engine event constructors (flattened classes per A3; singletons per A4).
 enum Events {
     static func prepared(_ itemId: String) -> EngineEventPrepared {
@@ -176,7 +199,7 @@ extension KGraph {
     ) async -> ([KSong], Int64) {
         do {
             let paged = try await container.provider.search(query: q, page: Int32(page))
-            return ((paged.items.compactMap { $0 as? KSong }), paged.total)
+            return (checkedCast(paged.items, "searchSongsPaged items"), paged.total)
         } catch {
             bridgeLog.error("search failed: \(error.localizedDescription)")
             onToast?("Check your connection and try again.")
@@ -245,7 +268,7 @@ extension KGraph {
 
     func favoritesAll() async -> [KSong] {
         do {
-            return try await container.favorites.all().compactMap { $0 as? KSong }
+            return checkedCast(try await container.favorites.all(), "favorites.all()")
         } catch {
             bridgeLog.error("favorites.all failed: \(error.localizedDescription)")
             return []
@@ -282,7 +305,10 @@ extension KGraph {
 
     func historyRecent(_ limit: Int) async -> [KSong] {
         do {
-            return try await container.history.recent(limit: Int32(limit)).compactMap { $0 as? KSong }
+            return checkedCast(
+                try await container.history.recent(limit: Int32(limit)),
+                "history.recent(limit: \(limit))"
+            )
         } catch {
             bridgeLog.error("history.recent failed: \(error.localizedDescription)")
             return []

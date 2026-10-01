@@ -620,16 +620,22 @@ struct SettingsPanel: View {
                         Task { await env.prefs.setHighQuality(true) }
                     }
                     thinDivider
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Prefetch next track").font(.system(size: 15, weight: .medium))
-                            Text("One track ahead · ~3 MB on metered").font(.dylLabelSmall)
+                    // Not a setting: `prefetchEnabled` is a compile-time `true` in AppConfig with no setter
+                        // anywhere, and Android has no prefetch row at all. Rendering it as a
+                        // checkmark row implied a user control that does not exist, so it is stated
+                        // as the fixed behaviour it is. Making it a real toggle is the follow-up
+                        // (plumb a setter through Prefs, then add the Android row to match).
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Prefetch next track").font(.system(size: 15, weight: .medium))
+                                Text("Always on · one track ahead, ~3 MB on metered")
+                                    .font(.dylLabelSmall)
+                            }
+                            .foregroundStyle(DylanTokens.textPrimary)
+                            Spacer()
+                            Image(systemName: env.prefetchEnabled ? "checkmark" : "minus")
+                                .foregroundStyle(DylanTokens.textSecondary)
                         }
-                        .foregroundStyle(DylanTokens.textPrimary)
-                        Spacer()
-                        Image(systemName: env.prefetchEnabled ? "checkmark" : "minus")
-                            .foregroundStyle(DylanTokens.primary)
-                    }
                     .padding(.horizontal, DylanTokens.s16)
                     .padding(.vertical, DylanTokens.s6 + 2)
                 }
