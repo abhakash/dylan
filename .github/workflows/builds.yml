@@ -67,7 +67,7 @@ jobs:
           APK=$(ls androidApp/build/outputs/apk/debug/*.apk | head -n1)
           cp "$APK" "dylan-debug-$VER-$SHA.apk"
           sha256sum "dylan-debug-$VER-$SHA.apk" | tee debug.sha256
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: dylan-android-debug-${{ steps.ver.outputs.ver }}-${{ steps.ver.outputs.sha }}
           path: |
@@ -136,7 +136,7 @@ jobs:
           cp androidApp/build/outputs/apk/release/*.apk "dylan-prod-$VER-$SHA.apk"
           cp androidApp/build/outputs/bundle/release/*.aab "dylan-prod-$VER-$SHA.aab" || true
           sha256sum dylan-prod-* | tee prod.sha256
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: steps.keys.outputs.skip != 'true'
         with:
           name: dylan-android-prod-${{ steps.ver.outputs.ver }}-${{ steps.ver.outputs.sha }}
@@ -185,7 +185,7 @@ jobs:
           if [ $EXIT -ne 0 ]; then cat /tmp/xcode-sim-debug.log; exit $EXIT; fi
       - name: Upload Xcode logs
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: xcode-debug-log
           path: /tmp/xcode-*.log
@@ -252,7 +252,7 @@ jobs:
             exit 1
           fi
           echo "Confirmed unsigned."
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: dylan-ios-prod-unsigned-${{ steps.ver.outputs.ver }}-${{ steps.ver.outputs.sha }}
           path: |
@@ -262,7 +262,7 @@ jobs:
           retention-days: 30
       - name: Upload Xcode build log
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: xcode-prod-log
           path: /tmp/xcode-*.log
