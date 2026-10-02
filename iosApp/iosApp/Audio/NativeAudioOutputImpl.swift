@@ -273,9 +273,13 @@ final class NativeAudioOutputImpl: NSObject, KNativeAudioOutput {
         )
     }
 
+    /// Synchronous by contract: `PlayerEngine.currentTimeMs()` is read by `skipBy` as the base for
+    /// a relative skip, so it cannot hop to the main queue and wait. It therefore reads AVPlayer's
+    /// clock directly, which is safe off-main for a property read (the alternative — returning 0
+    /// from an async hop — would make every skip from a background caller jump to zero).
     @objc(currentTimeMs)
     func currentTimeMs() -> Int64 {
-        onMain { self.currentTimeOnMain() }
+        currentTimeOnMain()
     }
 
     private func currentTimeOnMain() -> Int64 {
@@ -302,9 +306,11 @@ final class NativeAudioOutputImpl: NSObject, KNativeAudioOutput {
             self.dropStatusObservers()
             self.kvoToken?.invalidate()
             self.kvoToken = nil
-            if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
-            if let routeObserver { NotificationCenter.default.removeObserver(routeObserver) }
-            if let interruptionObserver { NotificationCenter.default.removeObserver(interruptionObserver) }
+            if let endObserver = self.endObserver { NotificationCenter.default.removeObserver(endObserver) }
+            if let routeObserver = self.routeObserver { NotificationCenter.default.removeObserver(routeObserver) }
+            if let interruptionObserver = self.interruptionObserver {
+                NotificationCenter.default.removeObserver(interruptionObserver)
+            }
             self.endObserver = nil
             self.routeObserver = nil
             self.interruptionObserver = nil
