@@ -4,7 +4,6 @@ import dylan.cache.CacheManager
 import dylan.config.AppConfig
 import dylan.db.Cached_files
 import dylan.db.Dylan
-import dylan.db.Songs
 import dylan.download.DownloadEngine
 import dylan.download.DownloadJob
 import dylan.download.EnqueueResult
@@ -20,6 +19,7 @@ import dylan.model.Song
 import dylan.model.SongKey
 import dylan.model.message
 import dylan.repo.SettingsStore
+import dylan.repo.toSong
 import dylan.util.AppDispatchers
 import dylan.util.Lane
 import dylan.util.NetClass
@@ -1265,7 +1265,7 @@ class Orchestrator(
                 if (chunk.isEmpty()) continue
                 for (row in db.dylanQueries.selectSongsByIds(chunk).executeAsList()) {
                     val key = SongKey(row.provider, row.song_id)
-                    if (key in wanted) out[key] = toSong(row)
+                    if (key in wanted) out[key] = row.toSong()
                 }
             }
         }
@@ -1372,21 +1372,6 @@ class Orchestrator(
         val sync = engine?.currentTimeMs() ?: -1L
         return if (sync >= 0) sync else lastPosMs
     }
-
-    private fun toSong(r: Songs): Song =
-        Song(
-            key = SongKey(r.provider, r.song_id),
-            title = r.title,
-            subtitle = r.subtitle,
-            albumId = r.album_id,
-            albumName = r.album_name,
-            artUrl150 = r.art_url_150,
-            artUrl500 = r.art_url_500,
-            durationS = r.duration_s,
-            has320 = r.has_320 == 1L,
-            resolveRef = r.resolve_ref,
-            permaToken = r.perma_token,
-        )
 }
 
 fun Phase.keyOrNull(): SongKey? =
