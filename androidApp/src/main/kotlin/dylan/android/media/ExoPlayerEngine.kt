@@ -125,6 +125,11 @@ class ExoPlayerEngine(
             handler = handler,
             onRouteLost = { emit(EngineEvent.RouteLost) },
         )
+
+    /**
+     * OS output telemetry, mirrored to the UI by [MediaHub] rather than folded into the shared
+     * `PlayerState`; `MediaHub`'s KDoc carries the reasoning.
+     */
     val audioRoute: StateFlow<AudioRoute?> = routes.route
 
     val player: ExoPlayer =

@@ -262,7 +262,10 @@ fun NowPlayingSheet(
             }
 
             val route = rememberAudioRoute()
-            if (route != null && route.kind != RouteKind.SPEAKER) {
+            // Phase matters: AudioRouteMonitor seeds its flow at construction by replaying current
+            // outputs, so with BT headphones paired and nothing playing this chip claimed
+            // "PLAYING ON <headphones>" over an idle player. Only while a track is actually playing.
+            if (state.phase is dylan.model.Phase.Playing && route != null && route.kind != RouteKind.SPEAKER) {
                 Spacer(Modifier.height(10.dp))
                 Text(
                     "PLAYING ON ${route.productName?.uppercase() ?: when (route.kind) {

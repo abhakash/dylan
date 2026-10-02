@@ -188,6 +188,12 @@ class QueueInvariantViolation(
  * carry the position the track will be prepared at. That is what lets a skip keep the abandoned
  * download's position, a restore carry a position across a process restart, and a rebuffer
  * ([EngineEvent.Prepared]) leave the position untouched.
+ *
+ * The audio output route is deliberately not a field here, although `docs/codebase-audit.md` §3.6
+ * asks for one. Every field above is either user intent or derived from the queue algebra; the
+ * route is neither — it is OS output telemetry that changes with no intent behind it, nothing
+ * shared reads it, and the one route fact that does change behaviour (a playback device unplugged)
+ * is already an event, [dylan.playback.EngineEvent.RouteLost]. See `MediaHub` for the full note.
  */
 data class PlayerState(
     val phase: Phase = Phase.Idle,

@@ -35,6 +35,12 @@ sealed interface EngineEvent {
         val kind: EngineErr,
     ) : EngineEvent
 
+    /**
+     * The one part of the audio output route that is *actionable*: the device playback was routed
+     * to went away. The route itself is deliberately NOT a `PlayerState` field — it is OS output
+     * telemetry rather than player state (it changes with no intent behind it, and the queue algebra
+     * never reads it), so a route change is modelled here as the transition it is. See `MediaHub`.
+     */
     data object RouteLost : EngineEvent
 
     data class Interrupted(
