@@ -137,7 +137,11 @@ class CacheManager(
         }
         val spared = claimed.filterNot { it.key in liveProtection(exemptKeys) }
         val (unlinked, failed) = unlinkAll(spared)
-        finishReap(unlinked, failed)
+        // A spared claim is a claim nothing is going to destroy, so it must not stay claimed:
+        // `reapEvicting` finishes EVICTING rows on the next boot with no protection check at all,
+        // so a row left here is the file the user is listening to, deleted on next launch. It
+        // goes back to READY exactly like a failed unlink does.
+        finishReap(unlinked, failed + spared)
         if (demoted > 0) notifyOnce(FOOTER_PIN_BUDGET)
     }
 
@@ -147,12 +151,20 @@ class CacheManager(
             disp.assertInContext(Lane.IO)
             val doomed =
                 withContext(disp.on(Lane.DB)) {
-                    db.transactionWithResult { db.dylanQueries.claimAllUnprotected().executeAsList() }
+                    db.transactionWithResult {
+                        // The class rule: the protection set is republished inside the same
+                        // transaction as the claim, or the guard reads whatever the *last*
+                        // mutating transaction happened to leave behind. Every other mutator here
+                        // does this; clear-cache did not, so it claimed against a stale table —
+                        // which is the whole TOCTOU the table exists to remove, just one layer up.
+                        publishProtection(emptySet())
+                        db.dylanQueries.claimAllUnprotected().executeAsList()
+                    }
                 }.map { it.toClaim() }
             if (doomed.isEmpty()) return@withContext 0L
             val spared = doomed.filterNot { it.key in liveProtection(emptySet()) }
             val (unlinked, failed) = unlinkAll(spared)
-            finishReap(unlinked, failed)
+            finishReap(unlinked, failed + spared)
             val freed = unlinked.sumOf { it.bytes }
             log.i(
                 "cache",
@@ -223,6 +235,15 @@ class CacheManager(
      * and the unlink leaves claimed rows behind, and nothing else would ever revisit them. A
      * rendition whose file is already gone is simply dropped; a failed unlink returns to READY.
      * Idempotent, so a second call is a no-op.
+     *
+     * **Protection is consulted here, at the point of destruction, not only at the point of
+     * claim.** An EVICTING row is a *promise made under the protection set of an earlier
+     * process*; protection is not static, so between the claim and the next boot a key that was
+     * evictable can become the track the user is listening to. This used to unlink whatever it
+     * found, which is how a claim interrupted by a crash — or a claim left behind by any path
+     * that did not unlink what it claimed — became the currently-playing file destroyed on the
+     * next launch. A protected claim goes back to READY instead, exactly like a failed unlink, and
+     * the next sweep re-derives whether it is still the right victim.
      */
     suspend fun reapEvicting(limit: Int = REAP_BATCH): Int =
         withContext(disp.on(Lane.IO)) {
@@ -231,11 +252,17 @@ class CacheManager(
                     .take(limit)
                     .map { it.toClaim() }
             if (stale.isEmpty()) return@withContext 0
-            val present = stale.filter { fs.exists(pathOf(it)) }
+            val spared = stale.filter { it.key in liveProtection(emptySet()) }
+            val doomed = stale - spared.toSet()
+            val present = doomed.filter { fs.exists(pathOf(it)) }
             val (unlinked, failed) = unlinkAll(present)
-            val vanished = stale - present.toSet()
-            finishReap(unlinked, failed + vanished)
-            log.i("cache", "reaped ${unlinked.size + vanished.size}/${stale.size} interrupted eviction(s)")
+            val vanished = doomed - present.toSet()
+            finishReap(unlinked, failed + vanished + spared)
+            log.i(
+                "cache",
+                "reaped ${unlinked.size + vanished.size}/${stale.size} interrupted eviction(s), " +
+                    "${spared.size} now-protected spared",
+            )
             unlinked.size + vanished.size
         }
 
@@ -344,12 +371,33 @@ class CacheManager(
 
     private fun pathOf(claim: Claim): Path = paths.final(claim.key, claim.bitrate, claim.ext)
 
+    /**
+     * Split [claims] into those whose bytes are gone and those whose bytes are still on disk.
+     *
+     * `mustExist = false` is stated explicitly rather than left to okio's default, because the
+     * argument is semantic and a default is a poor place to keep it: an absent path is a
+     * **successful** unlink — the goal, "no file at this path", already holds — and only an explicit
+     * `mustExist = true` turns it into a `FileNotFoundException`, which would read as a failed
+     * unlink and send the claim to `failed`, which restores the row to READY so the next sweep
+     * re-claims it, forever, with a *retryable* error logged for a file that is not there.
+     *
+     * A path that exists but cannot be removed throws `IOException` under either setting; that is
+     * the only case that must keep the row, and the only one that reaches `failed`.
+     *
+     * Measured on the resolved okio 3.18.1: its default is already `false`, so passing it changes no
+     * behaviour today. It is written out because that default is not part of okio's contract, and
+     * because this argument is the difference between two opposite correct actions.
+     *
+     * The `reapEvicting` caller already separates the two cases explicitly (`doomed.filter
+     * { fs.exists(...) }` → `vanished`); this makes the same distinction hold for every unlink path
+     * without each of them re-deriving it.
+     */
     private fun unlinkAll(claims: List<Claim>): Pair<List<Claim>, List<Claim>> {
         val unlinked = mutableListOf<Claim>()
         val failed = mutableListOf<Claim>()
         claims.forEach { claim ->
             // A failed unlink keeps the row: the next sweep retries, and nothing is lost.
-            val ok = runCatching { fs.delete(pathOf(claim)) }.isSuccess
+            val ok = runCatching { fs.delete(pathOf(claim), mustExist = false) }.isSuccess
             if (ok) unlinked += claim else failed += claim
         }
         failed.forEach { log.e("cache", "unlink failed, row kept for retry: ${it.key.provider}:${it.key.songId}") }

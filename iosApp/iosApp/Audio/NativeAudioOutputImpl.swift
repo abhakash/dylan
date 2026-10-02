@@ -98,12 +98,13 @@ final class NativeAudioOutputImpl: NSObject, KNativeAudioOutput {
         }
     }
 
-    // ---- NativeAudioOutput ------------------------------------------------------------
-    // ObjC selectors are suffixed (prepareItems:, bindEventsSink:, etc.) with swift_name mapping
-    // to clean Swift names (prepare(items:), bindEvents(sink:), etc.). `release` is mangled to
-    // `release_` in ObjC to avoid NSObject collision but Swift name remains `release()`.
-    // Explicit @objc(selector) ensures the Swift witness uses the ObjC selector expected by the
-    // Kotlin header (`shared.h` @protocol SharedNativeAudioOutput, swift_name NativeAudioOutput).
+    /// ---- NativeAudioOutput ------------------------------------------------------------
+    // ObjC selectors are the Kotlin mangling of the interface's own parameter names
+    // (`prepare(items:)` -> `prepareItems:`), restated here with `@objc(selector:)` so the Swift
+    // witness carries the exact selector the Kotlin header requires rather than relying on the
+    // importer's inference agreeing. `NativeAudioOutput` has no `release()` (that is
+    // `PlayerEngine`, on the other side of the seam) — this class's terminal method is `dispose()`,
+    // whose zero-argument selector is simply `dispose`.
 
     @objc(prepareItems:)
     func prepare(items: [KLocalTrack]) {
@@ -239,16 +240,22 @@ final class NativeAudioOutputImpl: NSObject, KNativeAudioOutput {
 
     /// Relative seek, from the output's own `currentTime()` — never from a caller-supplied
     /// position, which is a 10 Hz sample of this same clock and therefore already stale.
+    ///
+    /// The hop is load-bearing, not symmetry: the Kotlin engine seam calls this from the shared
+    /// *state lane*, and AVFoundation objects are not thread-safe — reading `currentItem` off the
+    /// main thread while `prepare`/`replaceUpNext` are mutating the same queue on it is a data
+    /// race, not a style question. (Unlike `currentTimeMs`, a skip has no synchronous contract:
+    /// nothing reads it back inline, so deferring it costs nothing.)
     @objc(skipForwardMs:)
     func skipForward(ms: Int64) {
-        skipOnMain(byMs: ms)
+        onMain { self.skipOnMain(byMs: ms) }
     }
 
     /// A negative amount is not a direction change, it is a no-op — the same
     /// `ms.coerceAtLeast(0L)` the Kotlin `PlayerEngine.skipBackward` default applies.
     @objc(skipBackwardMs:)
     func skipBackward(ms: Int64) {
-        skipOnMain(byMs: ms > 0 ? -ms : 0)
+        onMain { self.skipOnMain(byMs: ms > 0 ? -ms : 0) }
     }
 
     /// Clamped against the item's duration **only when that duration is known**. An `AVPlayerItem`

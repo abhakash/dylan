@@ -103,8 +103,32 @@ class JobQueue(
             next to if (victim == null) EnqueueResult.Queued(incoming.id) else EnqueueResult.Preempted(victim)
         }
 
-    /** A job coming back from a timed deferral or a preemption: same attempt id, same budget. */
-    fun readmit(job: DownloadJob): Unit = mutate { it.withPending(job) to Unit }
+    /**
+     * A job coming back from a timed deferral or a preemption: same attempt id, same budget.
+     *
+     * It must NOT displace a *strictly better* request already queued for the same key. The
+     * same-key preemption is the case that needs this, and it is not hypothetical: [offer] parks
+     * the better job in `pending` and cancels the running incumbent, and `withPending` resolves a
+     * same-key collision by *removing* the pending entry. So the incumbent's own readmit — the
+     * first thing `DownloadEngine.onCancelled` does — filtered the better job straight back out and
+     * re-queued itself: a `USER_NOW` that arrived for a prefetching track was silently replaced by
+     * the prefetch it had just displaced, and the user's skip became a background job behind every
+     * bulk download. The `.part` is untouched either way — it is keyed by song, not by attempt —
+     * so dropping the incumbent here loses its budget and nothing else.
+     *
+     * @return false when a strictly better request already holds the key and this job was
+     *   therefore retired rather than re-queued, so the caller does not report a requeue that
+     *   did not happen.
+     */
+    fun readmit(job: DownloadJob): Boolean =
+        mutate { s ->
+            val queued = s.pending.firstOrNull { it.key == job.key }
+            if (queued != null && queued.rank < job.rank) {
+                s to false
+            } else {
+                s.withPending(job) to true
+            }
+        }
 
     fun remove(key: SongKey): DownloadJob? =
         mutate { s ->

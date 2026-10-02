@@ -103,12 +103,27 @@ internal class PartStore(
         return bp
     }
 
-    /** Fold the writer's last word into the index and the sidecar. Never suspends, never throws. */
+    /**
+     * Fold the writer's last word into the index and the sidecar. Never suspends, never throws.
+     *
+     * **A `.part` that is not there is not persisted.** `runJob` calls this from its `finally`,
+     * which runs *after* `commit` has renamed the part away and called [forget] — so this used to
+     * re-insert the key it had just removed and write a sidecar describing a file that no longer
+     * exists. Three consequences, none of them visible: a `.part.meta` accumulated on disk for
+     * every completed download and never reclaimed (`fullSweep`'s allowlist does not match a
+     * four-segment name, so it is not garbage by that rule either); [loadFromDisk] then seeded a
+     * phantom resumable part for an already-cached track on the next boot, because the sidecar is
+     * the only thing it reads; and the index over-reported by one, which is what
+     * [withinBudget] gates the cap sweep on. The filesystem is already this class's authority on
+     * what is on disk — [note] corrects `partBytes` from `fileSize` for the same reason — so this
+     * is the same rule applied to the other half of the record.
+     */
     fun persist(
         key: SongKey,
         bp: Breakpoint,
     ) {
         val part = paths.part(key, bp.quality.bits)
+        if (!fs.exists(part)) return
         index.mutate { current ->
             val prev = current[key] ?: ref(key, part, Priority.USER_BULK, clock.nowMs(), bp)
             current + (key to prev.copy(breakpoint = bp))

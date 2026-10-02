@@ -92,9 +92,14 @@ class FlowAdapter<T : Any>(
                 try {
                     val piped = if (conflate == Conflation.LATEST_ONLY) flow.conflate() else flow
                     piped.collect { v ->
-                        // One coroutine-context element lookup, compiled out in release: the
-                        // invariant the whole iOS store layer rests on, checked on every delivery
-                        // rather than trusted.
+                        // One coroutine-context element lookup, per delivery. The comment that used
+                        // to sit here said "compiled out in release". That was true of the
+                        // `kotlin.assert` it replaced and is FALSE of the check now in place:
+                        // `assertInContext` throws `LaneViolation` unconditionally, in every
+                        // build, on every target. It matters in both directions — this must not be
+                        // deleted on the strength of a stale comment, and if the hop ever does go
+                        // wrong it fails loudly on device instead of quietly rendering SwiftUI
+                        // state off the main actor.
                         lanes.disp.assertInContext(Lane.MAIN)
                         onEach(v)
                     }

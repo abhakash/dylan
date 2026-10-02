@@ -49,6 +49,7 @@ import kotlin.test.assertTrue
  * it came from, because "the provider returns null" was the old contract and the whole point of
  * [CatalogResult] is that the reason is now part of the value.
  */
+@Suppress("LargeClass")
 class SaavnProviderTest {
     private val clock = MutableClock()
     private val lanes = TestLanes()
@@ -275,8 +276,33 @@ class SaavnProviderTest {
         }
     }
 
+    /**
+     * The provider's contract is that every outcome of a catalog call is a [CatalogResult]. One
+     * documented field shape broke it: `image` is declared untyped on the DTO precisely because the
+     * API has shipped `string → object → null`, and reading an object with `jsonPrimitive` **throws**.
+     * So an object-shaped card did not cost one card — an `IllegalArgumentException` came out of
+     * `searchPage` itself and took the whole page with it, past the very type that exists to make
+     * failures values. (`MapperFixturesTest` pins the detail: the artwork survives, and an
+     * unreadable `duration` next to it is still a named drift.)
+     */
+    @Test
+    fun aFieldThatChangedShapeCannotThrowOutOfTheProvider() {
+        val page =
+            """{"total":"1","start":"1","results":[{"id":"a","title":"A","type":"song",
+               "image":{"150x150":"https://c.saavncdn.com/a-150x150.jpg"},"more_info":{"duration":"10"}}]}"""
+        withProvider(okClient { page }) { p ->
+            val ok = p.searchPage("a", 1) as CatalogResult.Ok
+            val card = ok.value.items.single()
+            assertEquals("A", card.title)
+            assertEquals("https://c.saavncdn.com/a-150x150.jpg", card.artUrl150)
+        }
+    }
+
     // ── negative cache ───────────────────────────────────────────────────────────────────────
 
+    // Split by section would scatter the fixture-per-assertion naming that makes this file
+    // readable; the sections are already delimited. Suppressed on the class rather than baselined
+    // so the exception is visible here instead of in a generated XML file.
     @Test
     fun aWalledEndpointIsNotReRequestedForTheNegativeTtl() {
         requests.clear()
@@ -315,6 +341,134 @@ class SaavnProviderTest {
         }
         scope.cancel()
         assertEquals(1, requests.size, "only the online attempt reaches the wire: $requests")
+    }
+
+    /**
+     * The negative cache is keyed by *endpoint*, and one endpoint serves many ids — so it may only
+     * replay facts about the endpoint.
+     *
+     * A 404 is a fact about **one album**. Recorded against `content.getAlbumDetails`, it answered
+     * every *other* numeric album with `NOT_FOUND` for the whole TTL — a wrong answer, not a stale
+     * one, with no way for the caller to tell it from a real miss. The origin returned the second
+     * album's page; the app never asked.
+     */
+    @Test
+    fun aNotFoundOnOneAlbumIsNotReplayedForEveryOtherAlbum() {
+        requests.clear()
+        val album = fixture("album_detail_full.json")
+        val http =
+            client { req ->
+                requests += req.url.toString()
+                if (req.url.toString().contains("albumid=111")) {
+                    respond(content = "{}", status = HttpStatusCode.NotFound)
+                } else {
+                    respond(
+                        content = album,
+                        status = HttpStatusCode.OK,
+                        headers = headersOf("Content-Type", listOf("application/json")),
+                    )
+                }
+            }
+        withProvider(http) { p ->
+            assertEquals(ErrorCode.NOT_FOUND, (p.albumDetail("111") as CatalogResult.Err).code)
+            val other = p.albumDetail("222") as CatalogResult.Ok
+            assertEquals("Awarapan 2", other.value.title, "a real album must still load")
+            assertTrue(
+                requests.size == 2,
+                "one request per album: a per-request 404 must not become an endpoint-wide verdict ($requests)",
+            )
+        }
+    }
+
+    /**
+     * The same argument for the other per-request status: a malformed query is a 400 about *that*
+     * query. `search.getResults` is one endpoint for every keystroke.
+     */
+    @Test
+    fun aBadRequestOnOneQueryIsNotReplayedForEveryOtherQuery() {
+        requests.clear()
+        val page = fixture("search_getresults_p1.json")
+        val http =
+            client { req ->
+                requests += req.url.toString()
+                if (req.url.toString().contains("q=bad")) {
+                    respond(content = "{}", status = HttpStatusCode.BadRequest)
+                } else {
+                    respond(
+                        content = page,
+                        status = HttpStatusCode.OK,
+                        headers = headersOf("Content-Type", listOf("application/json")),
+                    )
+                }
+            }
+        withProvider(http) { p ->
+            assertEquals(ErrorCode.NETWORK, (p.searchPage("bad", 1) as CatalogResult.Err).code)
+            assertTrue(p.searchPage("good", 1) is CatalogResult.Ok)
+            assertEquals(2, requests.size, "a 400 is about the query, not the endpoint: $requests")
+        }
+    }
+
+    /** 5xx is genuinely endpoint-scoped, so it *is* replayed — the negative cache's real purpose. */
+    @Test
+    fun anOriginFailureIsStillReplayedForTheWholeEndpoint() {
+        requests.clear()
+        withProvider(statusClient(HttpStatusCode.InternalServerError)) { p ->
+            repeat(3) { assertTrue(p.searchPage("a", it + 1) is CatalogResult.Err) }
+            assertEquals(1, requests.size, "a 5xx is a fact about the origin: $requests")
+        }
+        assertTrue(ResilientClient.isEndpointScoped(503))
+        assertTrue(ResilientClient.isEndpointScoped(429))
+        assertTrue(ResilientClient.isEndpointScoped(403))
+        assertTrue(ResilientClient.isEndpointScoped(null), "a transport failure says something about the host")
+        assertTrue(
+            ResilientClient.isEndpointScoped(200, ErrorCode.DRIFT),
+            "a bot wall arrives as a 200 and is still a fact about the origin",
+        )
+        assertFalse(ResilientClient.isEndpointScoped(404), "404 is about one album")
+        assertFalse(ResilientClient.isEndpointScoped(400), "400 is about one query")
+    }
+
+    /**
+     * The origin's `Retry-After` is a stronger statement than our own 30 s floor, and it used to be
+     * parsed in production *nowhere*: a 429 saying "an hour" was replayed for 30 s and then
+     * re-requested, which is precisely the request the header was asking us not to make. Honoured,
+     * capped at two minutes — an origin must not be able to park the catalog indefinitely.
+     */
+    @Test
+    fun aRateLimitIsParkedForAsLongAsTheOriginAsked() {
+        requests.clear()
+        withProvider(statusClient(HttpStatusCode.TooManyRequests, retryAfter = "3600")) { p ->
+            assertEquals(ErrorCode.RATE_LIMITED, (p.searchPage("a", 1) as CatalogResult.Err).code)
+            clock.advanceMs(AppConfig().catalogNegativeTtlMs + 1)
+            assertEquals(
+                ErrorCode.RATE_LIMITED,
+                (p.searchPage("a", 2) as CatalogResult.Err).code,
+                "past our own TTL but inside the origin's window the answer must be replayed",
+            )
+            assertEquals(
+                1,
+                requests.size,
+                "the origin asked for an hour; we must not spend a request at 30s: $requests",
+            )
+            clock.advanceMs(ResilientClient.MAX_NEGATIVE_TTL_MS)
+            p.searchPage("a", 3)
+            assertEquals(2, requests.size, "the clamp must still expire: $requests")
+        }
+    }
+
+    /** A `Retry-After` shorter than our floor must not become permission to hammer. */
+    @Test
+    fun aShortRetryAfterNeverShortensTheFloor() {
+        requests.clear()
+        withProvider(statusClient(HttpStatusCode.TooManyRequests, retryAfter = "1")) { p ->
+            p.searchPage("a", 1)
+            clock.advanceMs(2_000)
+            p.searchPage("a", 2)
+            assertEquals(1, requests.size, "1 s of origin patience is not our backoff: $requests")
+            clock.advanceMs(AppConfig().catalogNegativeTtlMs)
+            p.searchPage("a", 3)
+            assertEquals(2, requests.size, "…but the floor still expires: $requests")
+        }
     }
 
     // ── LRU + single flight ──────────────────────────────────────────────────────────────────

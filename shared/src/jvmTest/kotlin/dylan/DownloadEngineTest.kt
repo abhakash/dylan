@@ -295,6 +295,13 @@ internal const val FAST_COOLDOWN_MS = 5L
 private const val REQUEST_WAIT_MS = 20_000L
 private const val REQUEST_POLL_MS = 10L
 
+/**
+ * Short on purpose: the property under test is that the displaced attempt settles *at all*, so a
+ * generous timeout would turn a regression into a slow pass. `awaitAttempt` returning null is the
+ * failure this is written to catch.
+ */
+private const val AWAIT_SETTLE_MS = 5_000L
+
 abstract class DownloadEngineFixture {
     internal val testLog =
         dylan.diag.LogBuffer(minLevel = dylan.diag.LogLevel.DEBUG).also { buf ->
@@ -658,6 +665,62 @@ class DownloadEngineTest : DownloadEngineFixture() {
         id: String,
         reason: Priority,
     ) = DownloadJob(SongKey("saavn", id), reason, 128, 0L)
+
+    @Test
+    fun aDisplacedAttemptCannotEvictTheBetterRequestThatDisplacedIt() {
+        // A user skips to a track that is already prefetching. `offer` parks the USER_NOW in
+        // `pending` and cancels the running incumbent; the incumbent's `onCancelled` then readmits
+        // itself, and because `withPending` resolves a same-key collision by *removing* the
+        // pending entry, the readmit filtered the USER_NOW straight back out and re-queued the
+        // prefetch. The user's "now" became a background job behind every bulk download.
+        val q = JobQueue(8)
+        val prefetch = q.offer(job("s1", Priority.PREFETCH_NEXT)) as EnqueueResult.Queued
+        val incumbent = assertNotNull(q.claimNext(), "the prefetch must be running for there to be a victim")
+        assertEquals(prefetch.id, incumbent.id)
+
+        val preempt = q.offer(job("s1", Priority.USER_NOW))
+        assertTrue(preempt is EnqueueResult.Preempted, "a strictly better request must preempt, got $preempt")
+
+        // What `DownloadEngine.onCancelled` does on the victim's behalf. The USER_NOW is parked in
+        // `pending`; without the guard the victim's readmit filtered it back out and re-queued the
+        // prefetch under its own lower rank.
+        assertFalse(
+            q.readmit(incumbent),
+            "the displaced attempt must retire rather than re-queue itself over its own displacer",
+        )
+        // The engine's worker releases the key in its own `finally`, after `onCancelled` runs.
+        q.release(SongKey("saavn", "s1"))
+        assertEquals(
+            Priority.USER_NOW,
+            assertNotNull(q.claimNext(), "the displacer must still be runnable").reason,
+            "the request that displaced the prefetch is the one that must run",
+        )
+    }
+
+    @Test
+    fun aReadmitIsStillHonouredWhenNothingBetterOwnsTheKey() {
+        // The other half: `readmit` is how a deferred job (429, breaker wait) and a cross-key
+        // preemption victim come back at all. Refusing it must be the *strictly better* case only.
+        val q = JobQueue(8)
+        val deferred = q.offer(job("s1", Priority.PREFETCH_NEXT)) as EnqueueResult.Queued
+        val claimed = assertNotNull(q.claimNext())
+        assertTrue(q.readmit(claimed.copy(attempts = 2)), "nothing better owns the key, so this is a real requeue")
+        q.release(SongKey("saavn", "s1"))
+        val back = assertNotNull(q.claimNext(), "a deferred job must be able to come back")
+        assertEquals(deferred.id, back.id, "with its own attempt id")
+        assertEquals(2, back.attempts, "and its attempt budget")
+
+        // An equal-rank pending entry is a replacement, not a retirement: the guard is *strictly
+        // better*, so a second requeue of the same attempt still lands. Without the rank check
+        // being strict this would be the `>=` that retires a job against itself.
+        assertTrue(q.readmit(claimed.copy(attempts = 3)), "an equal-rank pending entry is replaced")
+        q.release(SongKey("saavn", "s1"))
+        assertEquals(
+            3,
+            assertNotNull(q.claimNext()).attempts,
+            "and the replacement is the one that ran",
+        )
+    }
 
     @Test
     fun breakerCountsThenOpensThenProbesOnce() {
@@ -1154,6 +1217,32 @@ class DownloadEngineMaintenanceTest : DownloadEngineFixture() {
 
     // ---- engine: the rest of the pipeline ------------------------------------------------------
 
+    /**
+     * `runJob`'s `finally` runs `parts.persist` *after* `commit` renamed the `.part` away and
+     * called `parts.forget`, which re-inserted the key it had just removed and wrote a `.part.meta`
+     * describing a file that no longer existed. The sidecar is the only thing `PartStore.loadFromDisk`
+     * reads, so the next boot seeded a phantom *resumable* part for an already-cached track — and
+     * `fullSweep`'s allowlist does not match a four-segment name, so the file was never reclaimed.
+     */
+    @Test
+    fun aCompletedDownloadLeavesNoSidecarForAPartThatIsGone() =
+        runBlocking {
+            mockBody = mp4Body(1_000)
+            mockHeaders = mapOf("Content-Length" to "1000", "Content-Type" to "audio/mp4")
+            val st = runJob()
+            assertTrue(st is JobState.Done, "got $st")
+            val left =
+                FileSystem.SYSTEM
+                    .list(audioDir)
+                    .map { it.name }
+                    .sorted()
+            assertEquals(
+                listOf("saavn_s1_128.m4a"),
+                left,
+                "a committed download leaves exactly its final file: no .part, no .part.meta describing it",
+            )
+        }
+
     @Test
     fun successConsumesIntentRow() =
         runBlocking {
@@ -1291,6 +1380,91 @@ class DownloadEngineMaintenanceTest : DownloadEngineFixture() {
             assertTrue(settled is JobState.Cancelled, "the abandoned attempt must settle, got $settled")
             assertTrue(parts().isNotEmpty(), "keepPart=true must not delete the bytes")
             assertTrue(assertNotNull(provider.gate).complete(Unit))
+        }
+
+    /**
+     * The two halves of a preemption are different facts and only one of them used to be published.
+     * The displaced *attempt* got no terminal entry at all, so a caller holding its id — which is
+     * exactly what `attemptOf` returns while the job runs — waited out its whole timeout and was
+     * told nothing happened, which is indistinguishable from a slow transfer.
+     */
+    @Test
+    fun aDisplacedAttemptSettlesSoItsWaiterDoesNotWaitOutTheTimeout() =
+        runBlocking {
+            // The victim has to be the *lower* priority one, so the running job is a prefetch and
+            // the displacer is the user's own skip.
+            provider.gate = CompletableDeferred()
+            engine.start()
+            val key = SongKey("saavn", "s1")
+            engine.enqueue(DownloadJob(key, Priority.PREFETCH_NEXT, 128, 0L))
+            withTimeout(JOB_TIMEOUT_MS) { engine.states.first { it[key] is JobState.Resolving } }
+            val displaced = assertNotNull(engine.attemptOf(key), "a running job must be awaitable")
+
+            assertTrue(
+                engine.enqueue(DownloadJob(key, Priority.USER_NOW, 128, 1L)) is EnqueueResult.Preempted,
+                "the USER_NOW must displace the prefetch",
+            )
+
+            assertEquals(
+                JobState.Cancelled,
+                engine.awaitAttempt(displaced, AWAIT_SETTLE_MS),
+                "the displaced attempt must settle promptly; a timeout here means it never settles at all",
+            )
+            assertTrue(assertNotNull(provider.gate).complete(Unit), "the gate must be open for the replacer's resolve")
+        }
+
+    /**
+     * C1: a preemption must retire an *attempt*, never a *worker*.
+     *
+     * `worker` used to register `currentHandle()` — its own coroutine `Job` — as the per-attempt
+     * handle, and `cancelWorker` calls `Job.cancel` on it. `Job.cancel` cancels the job *and its
+     * children*, so each preemption also cancelled the `while (true)` around the attempt, and
+     * `runJob`'s `catch (CancellationException) { …; throw }` left through both. Nothing replaces a
+     * worker (`start()` is a one-shot CAS) and `WORKER_COUNT` is 2, so the pool reached zero
+     * consumers and *every* later download sat in the queue until its caller's readyTimeoutMs —
+     * two ordinary user skips from a bricked engine.
+     *
+     * The interleaving is exact and short: both workers park in RESOLVE behind [provider].gate, so
+     * each is holding a live handle with a job body on the stack. The first `USER_NOW` displaces a
+     * `PREFETCH_NEXT` and kills that worker; the second kills the other. The assertion is
+     * behavioural, not a pool counter: both displacers must reach `Done`, which needs a live
+     * worker each.
+     */
+    @Test
+    fun twoPreemptionsDoNotRetireTheWorkersThatAreLeftToServeThem() =
+        runBlocking {
+            listOf("s2", "s3", "s4").forEach { insertSong("saavn", it, "enc-$it") }
+            mockBody = mp4Body(1_000)
+            mockHeaders = mp4Headers("1000")
+            // Park both workers in RESOLVE so each really is mid-attempt with a live handle.
+            provider.gate = CompletableDeferred()
+            engine.start()
+            val parked = listOf(SongKey("saavn", "s1"), SongKey("saavn", "s2"))
+            parked.forEachIndexed { i, k -> engine.enqueue(DownloadJob(k, Priority.PREFETCH_NEXT, 128, i.toLong())) }
+            withTimeout(JOB_TIMEOUT_MS) { engine.states.first { s -> parked.all { k -> s[k] is JobState.Resolving } } }
+
+            // One skip per worker. Waiting for the first replacer to be *claimed* before issuing the
+            // second is not politeness: it pins the second victim to the other parked prefetch
+            // instead of racing which owner `preemptable` happens to return, so this cannot fail for
+            // a reason that has nothing to do with preemption. That wait is itself the first red
+            // signal — a retired worker never claims anything again.
+            val first = engine.enqueue(DownloadJob(SongKey("saavn", "s3"), Priority.USER_NOW, 128, 2L))
+            assertTrue(first is EnqueueResult.Preempted, "the first USER_NOW must displace a prefetch, got $first")
+            withTimeout(JOB_TIMEOUT_MS) { engine.states.first { s -> s[SongKey("saavn", "s3")] is JobState.Resolving } }
+
+            val second = engine.enqueue(DownloadJob(SongKey("saavn", "s4"), Priority.USER_NOW, 128, 3L))
+            assertTrue(second is EnqueueResult.Preempted, "the second USER_NOW must displace the other, got $second")
+
+            assertTrue(assertNotNull(provider.gate).complete(Unit), "the gate must be open for the replacers' resolves")
+            val replacers = listOf(SongKey("saavn", "s3"), SongKey("saavn", "s4"))
+            withTimeout(JOB_TIMEOUT_MS) {
+                engine.states.first { s -> replacers.all { s[it] is JobState.Done || s[it] is JobState.Failed } }
+            }
+            replacers.forEach { key ->
+                val st = engine.states.value[key]
+                assertTrue(st is JobState.Done, "$key was never served — the pool retired a worker: $st")
+                assertNotNull(cachedRow(key.songId), "$key must be committed, so a worker really ran it")
+            }
         }
 
     @Test

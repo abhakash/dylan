@@ -19,9 +19,11 @@ import dylan.util.DISK_UNKNOWN
 import dylan.util.Lane
 import dylan.util.NetClass
 import dylan.util.freeDiskBytes
+import dylan.util.fsRename
 import io.ktor.client.HttpClient
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
@@ -167,6 +169,18 @@ class DownloadEngine(
     private val netClass: () -> NetClass,
     private val qualityPref: suspend () -> Quality,
     private val otherEndpointsHealthy: () -> Boolean = { true },
+    /**
+     * Free bytes on the audio volume. [dylan.util.freeDiskBytes] is a top-level `expect fun`, so
+     * without this parameter the `diskFloorBytes` branch below is unreachable from a test and
+     * `cfg.diskFloorBytes` is untested config. Defaulted, so production behaviour is unchanged.
+     */
+    private val freeDisk: (String) -> Long = ::freeDiskBytes,
+    /**
+     * The `.part` → final rename. `dylan.util.fsRename` goes through `java.nio` on the JVM, which an
+     * okio `FileSystem` decorator cannot intercept, so the "the rename failed" half of the
+     * `STORAGE` verdict is otherwise untestable. Defaulted; behaviour unchanged without it.
+     */
+    private val rename: (String, String) -> Unit = ::fsRename,
     private val log: dylan.diag.LogBuffer,
 ) {
     // The scope is rebuilt on every start() so a stop()/start() cycle relaunches into a live
@@ -227,7 +241,14 @@ class DownloadEngine(
      */
     private val preempted = AtomicReference<Set<JobId>>(emptySet())
 
-    /** Coroutine handles of the jobs in flight, so a preemption can cancel the right one. */
+    /**
+     * Coroutine handles of the **attempts** in flight, so a preemption can cancel the right one.
+     *
+     * "Attempt", not "worker": an entry is the child [Job] one worker launched for one claimed
+     * job, never the worker's own `Job`. `Job.cancel` cancels the job it is called on *and that
+     * job's children*, so a handle that was the worker's own also cancelled the `while (true)`
+     * around it — see [worker].
+     */
     private val handles = AtomicReference<Map<SongKey, Job>>(emptyMap())
 
     /** At most one part sweep in flight, however many enqueues arrive. */
@@ -383,11 +404,31 @@ class DownloadEngine(
                 wake.receive()
                 continue
             }
-            val handle = currentHandle()
-            handles.mutate { it + (job.key to handle) }
-            log.d("dl", "w$index start ${job.label} attempt=${job.attempts}")
+            // **The handle is the attempt's own child job, never this coroutine.** `Job.cancel`
+            // cancels the job it is called on *and that job's children*, so a handle taken from
+            // `coroutineContext[Job]` here is this worker's own job: cancelling a displaced
+            // attempt also cancelled the `while (true)` around it, `runJob`'s
+            // `catch (CancellationException) { …; throw }` then left through both, and the worker
+            // was gone. Nothing replaces a worker and `start()` is a one-shot CAS, so
+            // `WORKER_COUNT` preemptions bricked every download for the life of the process and
+            // the only symptom was one "engine job crashed" line from the sibling.
+            //
+            // LAZY so the handle is registered before the job body can execute a single
+            // instruction; a preemption that lands after this registration always finds a live
+            // handle, and one that lands before it is the pre-existing "finished between the
+            // queue's snapshot and here" case `enqueue` already handles.
+            val attempt = scope.launch(start = CoroutineStart.LAZY) { runJob(job) }
+            handles.mutate { it + (job.key to attempt) }
             try {
-                runJob(job)
+                log.d("dl", "w$index start ${job.label} attempt=${job.attempts}")
+                attempt.start()
+                // `join` does not rethrow what the attempt failed with, and the attempt is a child
+                // of the engine's SupervisorJob, so neither can end this loop. The pool cannot
+                // shrink below WORKER_COUNT while the scope is live: the only thing that ends a
+                // worker is scope cancellation, i.e. stop(). The `finally` is what keeps a
+                // stop()/start() cycle re-claimable — the engine outlives its scope, so a claimed
+                // key left in `owners` would make that song permanently unclaimable in the next.
+                attempt.join()
             } finally {
                 handles.mutate { it - job.key }
                 queue.release(job.key)
@@ -396,14 +437,12 @@ class DownloadEngine(
         }
     }
 
-    private suspend fun currentHandle(): Job = kotlin.coroutines.coroutineContext[Job] ?: error("worker without a job")
-
     private fun poke() {
         // CONFLATED wake cannot drop unless closed; log loudly if it ever does.
         if (wake.trySend(Unit).isFailure) log.w("dl", "wake channel closed, workers may stall")
     }
 
-    /** False when no worker owned [key], i.e. no cancellation was delivered. */
+    /** False when no *attempt* held [key], i.e. no cancellation was delivered. */
     private fun cancelWorker(key: SongKey): Boolean {
         val handle = handles.load()[key] ?: return false
         handle.cancel(PreemptSignal())
@@ -491,7 +530,7 @@ class DownloadEngine(
                         live.store(parts.note(key, quality, onDisk, job.reason))
                         val need = max(0L, (live.load().totalBytes ?: paddedEstimate(cfg, songRow, quality)) - onDisk)
                         cacheManager.enforceBudget(netNewBytes = need)
-                        val free = freeDiskBytes(paths.audioDir.toString())
+                        val free = freeDisk(paths.audioDir.toString())
                         if (free != DISK_UNKNOWN && free < max(cfg.diskFloorBytes, 2 * need)) {
                             return fail(key, job, DylanFailure(ErrorCode.STORAGE, key), job.id)
                         }
@@ -641,10 +680,22 @@ class DownloadEngine(
             return
         }
         clearMark(preempted, job.id)
-        // Not terminal for the key: the same attempt goes back with its `.part` and its budget
-        // intact, so waiters and the UI keep seeing a live entry until the fresh Done lands.
+        // Terminal FOR THE ATTEMPT, not for the key — the two are different facts and only the
+        // attempt one was being published. This branch published neither, so a waiter holding the
+        // displaced attempt's id (which is what `attemptOf` handed it a moment earlier) sat in
+        // `withTimeoutOrNull` until its deadline and was then told "nothing happened", which is
+        // indistinguishable from a slow download: playback's generation change had nothing to act
+        // on. The key deliberately stays live below — the `.part` and the budget go back.
+        attemptStates.update { bounded(it - job.id + (job.id to JobState.Cancelled), TERMINAL_RETENTION) }
+        // A strictly better request may already own the key (the same-key preemption: the USER_NOW
+        // that displaced this attempt is parked in the queue), and then this one is retired instead
+        // — reporting a requeue that did not happen is how the log and the UI end up describing a
+        // job nobody is running.
+        if (!queue.readmit(job.copy(attempts = attempts))) {
+            log.i("dl", "preempted ${job.label} retired: a better request owns ${key.provider}:${key.songId}")
+            return
+        }
         log.i("dl", "preempted ${job.label} requeued attempt=$attempts")
-        queue.readmit(job.copy(attempts = attempts))
         publish(key, JobState.Queued)
     }
 
@@ -663,14 +714,14 @@ class DownloadEngine(
             withContext(disp.on(Lane.DB)) { db.dylanQueries.isFavorite(key.provider, key.songId).executeAsOne() }
         val prev = library.previousRow(key)
         if (prev?.isSameArtifact(quality.bits, ext, finalSize) == true) {
-            if (!renamePart(part.toString(), finalPath.toString(), log)) {
+            if (!renamePart(part.toString(), finalPath.toString(), log, rename)) {
                 return fail(key, job, DylanFailure(ErrorCode.STORAGE, key), job.id)
             }
             parts.forget(key)
             log.i("dl", "done(refetch) ${job.label} bytes=$finalSize ms=${now - t0}")
             return finish(key, JobState.Done(finalSize, quality.bits), job.id)
         }
-        if (!renamePart(part.toString(), finalPath.toString(), log)) {
+        if (!renamePart(part.toString(), finalPath.toString(), log, rename)) {
             return fail(key, job, DylanFailure(ErrorCode.STORAGE, key), job.id)
         }
         parts.forget(key)
@@ -764,6 +815,10 @@ class DownloadEngine(
          * Two slots, not one. One slot means a `USER_NOW` cannot preempt an equal-priority
          * `USER_NOW`, so a three-second skip costs the remainder of a whole transfer; two means one
          * in flight and one queued, which is the minimum that makes a track boundary not stall.
+         *
+         * A hard floor, not a starting size: a preemption cancels an *attempt*, and [worker] is a
+         * `while (true)` around the attempt rather than the attempt itself, so no cancellation a
+         * caller can trigger retires a worker.
          */
         const val WORKER_COUNT = 2
         const val QUEUE_CAPACITY = 256

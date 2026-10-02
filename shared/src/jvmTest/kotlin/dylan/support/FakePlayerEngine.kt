@@ -187,6 +187,21 @@ class FakePlayerEngine internal constructor(
         pauseCount++
         // pollRunnable publishes the current position once more, then stops re-posting.
         mutablePosition.value = positionMs
+        stopPolling()
+    }
+
+    /**
+     * Cancel the poll loop, rather than only forgetting the reference to it.
+     *
+     * `pollJob = null` alone left the loop *running*: its exit test is `!playing`, evaluated after
+     * the `delay`, so it survived until its next tick. A `play()` inside that window found
+     * `pollJob == null`, could not cancel the survivor, and started a second loop — two loops then
+     * advanced one position, and the media clock ran at 2x. `ExoPlayerEngine.pollPosition` does
+     * `handler.removeCallbacks(pollRunnable)`, i.e. it really does stop, so this is the faithful
+     * shape and the one the position/rate contract rules are calibrated against.
+     */
+    private fun stopPolling() {
+        pollJob?.cancel()
         pollJob = null
     }
 
@@ -245,7 +260,7 @@ class FakePlayerEngine internal constructor(
         if (isReleased) return
         isReleased = true
         playing = false
-        pollJob = null
+        stopPolling()
         script.close()
     }
 
@@ -320,7 +335,10 @@ class FakePlayerEngine internal constructor(
             positionMs = ended.durationHintMs ?: positionMs
             mutablePosition.value = positionMs
             playing = false
-            pollJob = null
+            // Cancelling the loop we are running *in* is safe and is the point: `isActive` goes
+            // false, so the `while` below exits instead of surviving to its next tick and racing
+            // a later `play()` into a second loop.
+            stopPolling()
             script(EngineEvent.QueueExhausted)
             return
         }
@@ -390,7 +408,7 @@ class FakePlayerEngine internal constructor(
 
     fun shutdown() {
         isReleased = true
-        pollJob = null
+        stopPolling()
         pumpJob = null
         script.close()
     }

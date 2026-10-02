@@ -2,6 +2,7 @@ package dylan
 
 import app.cash.sqldelight.db.QueryResult
 import app.cash.sqldelight.db.SqlDriver
+import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
 import dylan.db.DriverFactory
 import dylan.db.Dylan
 import dylan.diag.LogBuffer
@@ -178,6 +179,125 @@ class CacheMigrationTest {
     }
 
     @Test
+    fun aV0StoreWithAnOrphanCachedRowStillMigrates() {
+        // Totality against the hazard the migration header does not name: this chain runs with
+        // foreign keys ON (the JVM factory supplies them as driver *properties*, which is the only
+        // form that survives SQLDelight's transaction and the JDBC pool), so `INSERT INTO library
+        // ... SELECT ... FROM cached_files` enforces the new library -> songs foreign key.
+        //
+        // A v0 store can hold a cached_files row whose song is gone — that is precisely what
+        // `deleteOrphanLibrary` exists to repair, because v0 enforced the cascade only on
+        // connections that happened to have the pragma on. Left in place it aborts the migration
+        // *before* `DROP TABLE cached_files`, so nothing is wiped and every later open re-runs the
+        // same chain and fails identically: the install is permanently unopenable.
+        withV0Store { store ->
+            store.seedV0()
+            // FKs are OFF on this connection (no driver property), which is how the orphan arose.
+            store.exec("DELETE FROM songs WHERE provider = 'saavn' AND song_id = '2'")
+            assertEquals(
+                1L,
+                store.num("SELECT COUNT(*) FROM cached_files WHERE song_id = '2'"),
+                "precondition: an orphaned cache row survived the song it pointed at",
+            )
+            store.close()
+            store.reopen()
+
+            assertEquals(Dylan.Schema.version, store.userVersion())
+            assertEquals(
+                listOf("1", "3"),
+                store.rows("SELECT song_id FROM library ORDER BY song_id"),
+                "the two songs survive; the orphan is dropped, not the migration",
+            )
+            assertEquals(0L, store.num("SELECT COUNT(*) FROM cached_files WHERE song_id = '2'"))
+            assertTotals(store, bytes = 4_000L, count = 2L)
+            // The rest of the chain still ran, i.e. this did not stop at the first failure: the
+            // index below is the LAST statement in 1.sqm.
+            // Every index 1.sqm creates, and none left over from v0: the chain is asserted by its
+            // artefacts, so a chain that stopped halfway cannot pass by having run most of itself.
+            assertEquals(
+                listOf(
+                    "idx_cached_lru",
+                    "idx_cached_pinned",
+                    "idx_favorites",
+                    "idx_history",
+                    "idx_history_song",
+                    "idx_home_cache",
+                    "idx_intent_priority",
+                    "idx_media_state",
+                    "idx_search_history",
+                    "idx_songs_album",
+                    "idx_songs_gc",
+                ),
+                store.rows("SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_%' ORDER BY name"),
+                "the whole chain must have run",
+            )
+            assertEquals(3L, store.num("SELECT COUNT(*) FROM favorites"), "favourites are untouched by the copy")
+            assertEquals(0L, store.num("SELECT priority FROM download_intents WHERE song_id = '1'"))
+        }
+    }
+
+    /**
+     * H4: the COPY is total against the new CHECKs, not only against the new foreign key.
+     *
+     * v0's `cached_files` enforced none of library's four CHECKs — that is the whole reason the
+     * table is rebuilt rather than ALTERed — so a real v0 store can hold `bitrate = 0`, `ext = ''`,
+     * `bytes < 0` or `play_count < 0`. Copied verbatim each of those raises a CHECK violation on
+     * the INSERT, which aborts the chain *before* `DROP TABLE cached_files`: nothing is wiped,
+     * `setUserVersion` never runs, and every later open re-runs the identical chain and fails
+     * identically. With `DriverFactory.isCorrupt` now correctly refusing to wipe anything that is
+     * not content corruption there is no longer any path that recovers it — a permanently
+     * unopenable install.
+     *
+     * The pin repair shipped with the FK fix; these four did not. The assertion is the whole chain
+     * (the index list below is the LAST statement in 1.sqm) plus the repaired values, so a clamp
+     * that merely deleted the row instead would fail on the count.
+     */
+    @Test
+    fun aV0StoreWithCheckViolatingRowsStillMigratesAndRepairsTheValues() {
+        withV0Store { store ->
+            store.seedV0()
+            // One row per CHECK, all four in one v0 store: the point is that a *single* bad row is
+            // enough to wedge the install, so they must all be repairable together.
+            store.exec("UPDATE cached_files SET bitrate = 0 WHERE song_id = '1'")
+            store.exec("UPDATE cached_files SET ext = '' WHERE song_id = '2'")
+            store.exec("UPDATE cached_files SET bytes = -1, play_count = -5 WHERE song_id = '3'")
+            store.close()
+            store.reopen()
+
+            assertEquals(Dylan.Schema.version, store.userVersion(), "the chain must have completed")
+            assertEquals(
+                listOf("1", "2", "3"),
+                store.rows("SELECT song_id FROM library ORDER BY song_id"),
+                "a clamp repairs the value; it must not drop the track",
+            )
+            assertEquals(
+                listOf(
+                    "saavn|1|1|m4a|1000|2",
+                    "saavn|2|320|m4a|2000|0",
+                    "saavn|3|128|mp3|0|0",
+                ),
+                store.rows(REPAIRED_SHAPE + " ORDER BY song_id"),
+                "each CHECK-violating value is clamped to the nearest legal one, in place",
+            )
+            // media_objects is seeded from the repaired library rows, so it inherits the clamps
+            // rather than re-reading the v0 columns.
+            assertEquals(
+                listOf("saavn|1|1|m4a|1000", "saavn|2|320|m4a|2000", "saavn|3|128|mp3|0"),
+                store.rows(REPAIRED_ASSET_SHAPE + " ORDER BY song_id"),
+            )
+            // 1000 + 2000 + the clamped -1 -> 0.
+            assertEquals(3_000L, store.num("SELECT final_bytes FROM cache_totals WHERE id = 0"))
+            assertEquals(3L, store.num("SELECT final_count FROM cache_totals WHERE id = 0"))
+            // The whole chain ran, not most of it: the last statement in 1.sqm is this index.
+            assertTrue(
+                store.rows("SELECT name FROM sqlite_master WHERE type = 'index'").contains("idx_intent_priority"),
+                "the chain must have reached its last statement",
+            )
+            assertEquals(3L, store.num("SELECT COUNT(*) FROM favorites"), "favourites are untouched by the copy")
+        }
+    }
+
+    @Test
     fun aStoreFromANewerBuildIsRefusedNotWiped() {
         withStore { store ->
             store.seedV0()
@@ -312,6 +432,26 @@ class CacheMigrationTest {
         }
     }
 
+    /**
+     * A store built WITHOUT the `foreign_keys` connection property — which is what the JVM factory
+     * used to do, and what a v0 Android store effectively was, since the pragma was issued after
+     * the driver had already run `create`/`migrate`. Foreign-key enforcement is therefore off for
+     * the whole seed, which is the only way a `cached_files` row can outlive its song. Reopened
+     * through [DriverFactory], i.e. with foreign keys ON.
+     */
+    private fun withV0Store(block: (Store) -> Unit) {
+        val dir = "${FileSystem.SYSTEM_TEMPORARY_DIRECTORY}/dylan-v0-${System.nanoTime()}"
+        FileSystem.SYSTEM.createDirectories(dir.toPath())
+        val path = "$dir/dylan.db"
+        try {
+            val raw = JdbcSqliteDriver("jdbc:sqlite:$path")
+            Dylan.Schema.create(raw)
+            block(Store(path, raw))
+        } finally {
+            runCatching { FileSystem.SYSTEM.deleteRecursively(dir.toPath()) }
+        }
+    }
+
     private companion object {
         const val PIN_SHAPE =
             "SELECT provider || '|' || song_id || '|' || pinned || '|' || COALESCE(pinned_at_ms, '') FROM library"
@@ -319,6 +459,15 @@ class CacheMigrationTest {
             "SELECT provider || '|' || song_id || '|' || bitrate || '|' || ext || '|' || bytes || '|' || " +
                 "cached_at_ms || '|' || COALESCE(last_used_ms, '') || '|' || play_count || '|' || pinned || '|' || " +
                 "COALESCE(pinned_at_ms, '') FROM library"
+
+        /** The four columns 1.sqm clamps, so one row string carries all four repairs. */
+        const val REPAIRED_SHAPE =
+            "SELECT provider || '|' || song_id || '|' || bitrate || '|' || ext || '|' || bytes || " +
+                "'|' || play_count FROM library"
+
+        /** The same four columns on the per-rendition table seeded from the repaired rows. */
+        const val REPAIRED_ASSET_SHAPE =
+            "SELECT provider || '|' || song_id || '|' || bitrate || '|' || ext || '|' || bytes FROM media_objects"
     }
 
     private fun assertTotals(

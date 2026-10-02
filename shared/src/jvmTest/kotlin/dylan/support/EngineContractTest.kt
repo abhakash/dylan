@@ -199,6 +199,46 @@ abstract class EngineContractTest {
             )
         }
 
+    /**
+     * A pause must *stop* the poll, not merely stop wanting its result.
+     *
+     * The shape that breaks this is a poll loop whose exit test reads the transport's playing flag
+     * on its next tick: a `pause()` that only forgets the loop's handle leaves it running for one
+     * more tick, and a `play()` inside that window cannot cancel what it can no longer see, so a
+     * second loop starts and the media clock advances at 2x. `ExoPlayerEngine.pollPosition` does
+     * `handler.removeCallbacks(pollRunnable)`, so a real engine cannot do this — which is exactly
+     * why the rule belongs in the conformance suite a real engine is meant to be dropped into.
+     *
+     * Stated as a rate rather than an exact count, for the reason [clockBand] gives: the resume
+     * lands mid-poll-grid, and 2x of [QUARTER_TRACK_MS] is 5000 ms, far outside any 1x band.
+     */
+    @Test
+    fun pausingStopsThePollSoAResumeCannotDoubleIt() =
+        withEngine { c ->
+            // A long item on purpose. `settle()` is `advanceUntilIdle`, which on a self-rescheduling
+            // poll loop runs until the item ENDS — so a short window plus a settle-while-playing
+            // would consume the whole track and leave nothing to measure. Nothing here settles
+            // while playing; every wait is a bounded `advancePlaybackTime`.
+            c.engine.prepare(c.window("a", durationMs = LONG_MS))
+            c.settle()
+            c.drain()
+            c.play()
+            c.advancePlaybackTime(QUARTER_TRACK_MS)
+            val before = c.position()
+            assertTrue(before > 0L, "precondition: playback advanced: $before")
+
+            // Resume *within* one poll interval, which is the window the handle-losing shape hides in.
+            c.engine.pause()
+            c.play()
+            c.advancePlaybackTime(QUARTER_TRACK_MS)
+            val gained = c.position() - before
+            assertTrue(
+                gained in clockBand(QUARTER_TRACK_MS, 1.0f),
+                "one play() means one poll loop: a 2x clock would gain " +
+                    "${clockBand(QUARTER_TRACK_MS, 2.0f)}, got $gained",
+            )
+        }
+
     @Test
     fun currentTimeMsIsThePublishedPosition() =
         withEngine { c ->
@@ -521,6 +561,9 @@ abstract class EngineContractTest {
         const val TRACK_MS: Long = 10_000L
         const val HALF_TRACK_MS: Long = 5_000L
         const val QUARTER_TRACK_MS: Long = 2_500L
+
+        /** Long enough that a bounded `advancePlaybackTime` never reaches the end of the item. */
+        const val LONG_MS: Long = 600_000L
 
         /** A round relative-seek amount, comfortably inside [TRACK_MS]. */
         const val SKIP_STEP_MS: Long = 1_000L

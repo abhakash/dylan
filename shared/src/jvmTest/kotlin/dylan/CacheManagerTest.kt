@@ -452,6 +452,106 @@ class CacheManagerTest {
         }
 
     /**
+     * The class rule is that the protection table is republished inside the same transaction as
+     * the claim. `clearCacheExcludingProtected` did not, so it claimed against whatever the *last*
+     * mutating transaction happened to leave in `protected_keys` — a track the user had started
+     * playing since then was claimable, and `reapEvicting`, which finishes EVICTING rows on the
+     * next boot with no protection check at all, unlinked the file the user was listening to.
+     */
+    @Test
+    fun clearCacheCannotLeaveAProtectedSongClaimedForTheBootReap() =
+        runTest(scheduler) {
+            val fs = FileSystem.SYSTEM
+            val paths = Paths(tmp.toPath() / "audio", fs)
+            fs.createDirectories(paths.audioDir)
+            val key = SongKey("saavn", "p1")
+            val file = paths.final(key, 128, "m4a")
+            fs.write(file) { write(ByteArray(10_000_000)) }
+            // The user starts playing p1 *after* the table was last written: the flow knows, the
+            // table does not.
+            db.transaction { db.dylanQueries.clearProtectedKeys() }
+            protectedKeys.value = setOf(key)
+
+            cacheManager.clearCacheExcludingProtected()
+
+            assertTrue(fs.exists(file), "clear cache must not unlink the playing track")
+            assertEquals(
+                0,
+                db.dylanQueries
+                    .evictingObjects()
+                    .executeAsList()
+                    .count { it.song_id == "p1" },
+                "and it must not be left claimed: nothing here is going to destroy that row",
+            )
+            cacheManager.reapEvicting()
+            assertTrue(fs.exists(file), "the boot reap must not be the thing that finally deletes it")
+            assertEquals(
+                1L,
+                db.dylanQueries
+                    .cachedCountAndBytes()
+                    .executeAsOne()
+                    .song_count,
+                "precondition, and the real assertion: the protected row is still the library's",
+            )
+        }
+
+    /**
+     * The other half of the same rule, and the reachable one: `reapEvicting` is the destroyer that
+     * runs on the *next* boot, with no claim in front of it to have honoured the protection set.
+     * An EVICTING row is a promise made under an earlier process's protection set, and protection
+     * is not static — a key that was evictable then can be the track the user is listening to now.
+     */
+    @Test
+    fun theBootReapDoesNotUnlinkAnInterruptedEvictionTheTrackHasSinceBecomeProtected() =
+        runTest(scheduler) {
+            val fs = FileSystem.SYSTEM
+            val paths = Paths(tmp.toPath() / "audio", fs)
+            fs.createDirectories(paths.audioDir)
+            val key = SongKey("saavn", "n1")
+            // Only n1 is claimed, so the assertion is about n1 and nothing else.
+            listOf("p1", "p2", "n2").forEach { db.dylanQueries.deleteCached("saavn", it) }
+            val file = paths.final(key, 128, "m4a")
+            fs.write(file) { write(ByteArray(10_000_000)) }
+            db.transaction { db.dylanQueries.clearProtectedKeys() }
+            assertEquals(
+                1,
+                db.dylanQueries
+                    .claimAllUnprotected()
+                    .executeAsList()
+                    .size,
+                "precondition: claimed",
+            )
+            assertTrue(fs.exists(file), "precondition: claimed, not yet unlinked")
+
+            // The user starts playing the track the interrupted eviction was going to destroy.
+            protectedKeys.value = setOf(key)
+            assertEquals(0, cacheManager.reapEvicting(), "a now-protected claim is not reaped")
+            assertTrue(fs.exists(file), "the boot reap must not be the thing that deletes it")
+            assertEquals(
+                0,
+                db.dylanQueries
+                    .evictingObjects()
+                    .executeAsList()
+                    .count { it.song_id == "n1" },
+                "and it must go back to READY, so the next sweep re-derives it",
+            )
+
+            // Not an amnesty: the restored row is an ordinary READY one, so the next budget pass
+            // re-derives whether it is still the right victim, and reclaims it once it is.
+            assertEquals(
+                1L,
+                db.dylanQueries
+                    .cachedCountAndBytes()
+                    .executeAsOne()
+                    .song_count,
+                "the row is still there",
+            )
+            protectedKeys.value = emptySet()
+            cacheManager.enforceBudget(netNewBytes = 90_000_000L)
+            assertFalse(fs.exists(file), "and it is evictable again the moment nothing protects it")
+        }
+
+    /**
      * CA-2/CA-3's class fix: the claim statement itself consults the `protected_keys` table, so
      * there is no window between "decide who is protected" and "delete them" for a caller to slip
      * into. Asserted at the SQL boundary, which is where the guarantee now lives.

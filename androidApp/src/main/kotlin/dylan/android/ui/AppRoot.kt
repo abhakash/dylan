@@ -34,8 +34,13 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.Saver
+import androidx.compose.runtime.saveable.listSaver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.snapshots.SnapshotStateList
+import androidx.compose.runtime.toMutableStateList
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.TransformOrigin
@@ -82,6 +87,59 @@ internal sealed interface Screen {
 /** Single sheet machine: only one of NP / Queue / Settings is ever presented. */
 internal enum class Sheet { Closed, Np, Queue, Settings }
 
+/**
+ * The nav stack and the open sheet survive rotation and process death.
+ *
+ * The manifest declares no `configChanges`, so a rotation destroys and recreates the Activity —
+ * a plain `remember` would drop the user back to the Home tab (and, in Search, discard a
+ * submitted query) on every rotation. `Screen` is a sealed interface over data classes that
+ * Bundle cannot store, so it is encoded as length-prefixed strings; a length prefix keeps an
+ * album/artist id containing the separator round-tripping.
+ */
+private val backStackSaver =
+    listSaver<SnapshotStateList<Screen>, String>(
+        save = { stack -> stack.map(Screen::encode) },
+        restore = { encoded ->
+            val restored = encoded.mapNotNull(::decodeScreen).toMutableStateList()
+            if (restored.isEmpty()) listOf(Screen.Tab(0)).toMutableStateList() else restored
+        },
+    )
+
+private val sheetSaver =
+    Saver<Sheet, Int>(
+        save = { it.ordinal },
+        restore = { Sheet.entries.getOrNull(it) },
+    )
+
+private fun Screen.encode(): String =
+    when (this) {
+        is Screen.Tab -> "t$index"
+        is Screen.Album -> "a${id.length}:$id"
+        is Screen.Artist -> "r${name.length}:$name$token"
+        Screen.Downloads -> "d"
+    }
+
+private fun decodeScreen(encoded: String): Screen? {
+    val body = encoded.substring(1)
+    return when (encoded.firstOrNull()) {
+        't' -> body.toIntOrNull()?.let { Screen.Tab(it) }
+        'd' -> Screen.Downloads
+        'a' -> splitHead(body)?.let { Screen.Album(it.first) }
+        'r' -> splitHead(body)?.let { Screen.Artist(it.first, it.second) }
+        else -> null
+    }
+}
+
+/** `len:head…tail` → (head, tail); null when the encoding is malformed. */
+private fun splitHead(body: String): Pair<String, String>? {
+    val colon = body.indexOf(':')
+    if (colon <= 0) return null
+    val len = body.substring(0, colon).toIntOrNull() ?: return null
+    val rest = body.substring(colon + 1)
+    if (len > rest.length) return null
+    return rest.substring(0, len) to rest.substring(len)
+}
+
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 fun AppRoot(
@@ -90,8 +148,8 @@ fun AppRoot(
     onReportDrawn: () -> Unit,
 ) {
     val state by container.orchestrator.state.collectAsStateWithLifecycle()
-    val backStack = remember { mutableStateListOf<Screen>(Screen.Tab(0)) }
-    var sheet by remember { mutableStateOf(Sheet.Closed) }
+    val backStack = rememberSaveable(saver = backStackSaver) { mutableStateListOf<Screen>(Screen.Tab(0)) }
+    var sheet by rememberSaveable(stateSaver = sheetSaver) { mutableStateOf(Sheet.Closed) }
 
     // Stable across recompositions: a fresh lambda instance here is a changed parameter for all
     // six screens, so none of them could skip.
@@ -134,6 +192,14 @@ fun AppRoot(
     // Empty current ⇒ close everything (NP/queue/settings never outlive the session).
     LaunchedEffect(state.current) {
         if (state.current == null) sheet = Sheet.Closed
+    }
+
+    // reportFullyDrawn is a side effect on the Activity, not on the composition: calling it here
+    // ran it on every state emission (AppRoot reads `state`), and a side effect belongs after a
+    // frame rather than inside one. One shot, after the first frame is composed.
+    LaunchedEffect(Unit) {
+        androidx.compose.runtime.withFrameNanos { }
+        onReportDrawn()
     }
 
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
@@ -239,7 +305,6 @@ fun AppRoot(
             }
         }
     }
-    onReportDrawn()
 }
 
 private enum class NpAnchor { Open, Closed }

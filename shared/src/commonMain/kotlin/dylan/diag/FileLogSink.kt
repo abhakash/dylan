@@ -47,8 +47,8 @@ class FileLogSink(
     // replacement for `line.encodeToByteArray().size`.
     private val staging = okio.Buffer()
 
-    // Serializes drainLoop writes vs explicit flush() so background/stop flushes
-    // can never interleave bytes with the writer coroutine on the shared sink.
+    // Serializes drainLoop writes vs explicit flush() vs close() so background/stop/teardown
+    // paths can never interleave bytes with the writer coroutine on the shared sink.
     private val writeMutex = Mutex()
 
     init {
@@ -82,10 +82,23 @@ class FileLogSink(
         }
     }
 
-    /** Closes the file handle; reopened lazily on the next write. Never throws. */
-    fun close() {
-        runCatching { out?.close() }
-        out = null
+    /**
+     * Closes the file handle; reopened lazily on the next write. Never throws.
+     *
+     * Takes [writeMutex], which is the point: `out` and `written` are plain fields and
+     * `writeEntryLocked` is the only code allowed to touch them, so a close that skips the lock can
+     * shut the handle while the writer is between its read of `out` and its `s.write` on that very
+     * sink. The write then throws, and the `runCatching` in `writeEntryLocked` swallows it — the
+     * line is simply missing from the trail, with nothing in the log to say so.
+     *
+     * `suspend` for that reason: taking the lock is a suspension, and a non-suspending `close()` could
+     * only take it by blocking, which is the same bug wearing a different hat.
+     */
+    suspend fun close() {
+        writeMutex.withLock {
+            runCatching { out?.close() }
+            out = null
+        }
     }
 
     private suspend fun drainLoop() {
@@ -116,12 +129,20 @@ class FileLogSink(
             staging.writeUtf8(line)
             written += staging.size
             s.write(staging, staging.size)
-            staging.clear()
             if (written >= maxBytesPerFile) rotate()
         }.onFailure {
             runCatching { out?.close() }
             out = null
         }
+        // `finally`, not inline in the happy path above. `staging` is a *reused* buffer, so a
+        // write that throws between `writeUtf8` and `s.write` — a full disk, an unlinked file, a
+        // handle closed underneath us — used to leave the failed line's bytes sitting in it. The
+        // next entry then appended to that residue: `staging.size` counted old+new, so `written`
+        // inflated by the stale line on every subsequent failure (accelerating rotation), and
+        // `s.write(staging, …)` re-emitted the dead line into the trail. One I/O error therefore
+        // permanently corrupted both the byte accounting and the log itself — which is the worst
+        // possible moment for it, since an I/O error is exactly when the trail is being read.
+        staging.clear()
     }
 
     /**

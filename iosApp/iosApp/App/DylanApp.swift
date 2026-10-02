@@ -40,8 +40,9 @@ final class AppEnvironment {
     /// UI-side online signal (NWPathMonitor status; shared NetMonitor only tracks metered-ness).
     var isOnline: Bool = true
 
-    /// UI-side cached-key set from the library downloads store.
-    var cachedKeys: Set<String> { Set(library.downloads.map { $0.song.key.token }) }
+    /// UI-side cached-key set, published by `LibraryStore.loadDownloads`. Every row asks this on
+    /// every render, so it is a stored set rather than a computed one (see `LibraryStore`).
+    var cachedKeys: Set<String> { library.cachedTokens }
 
     /// Offline copy shared by every row tap (mirrors Android Copy.OFFLINE / shared ErrorCode.OFFLINE).
     var offlineCopy: String { "You're offline — saved music still plays." }
@@ -180,7 +181,7 @@ final class AppEnvironment {
 
     /// Cached glyph derives from actual cached_files presence (§11.4 Library), not the pin flag.
     func isCached(_ song: KSong) -> Bool {
-        library.downloads.contains { $0.song.key.token == song.key.token }
+        library.cachedTokens.contains(song.key.token)
     }
 
     func toggleFavorite(_ song: KSong) async {

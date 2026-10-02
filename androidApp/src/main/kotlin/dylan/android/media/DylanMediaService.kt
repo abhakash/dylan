@@ -22,6 +22,7 @@ import dylan.di.AppContainer
 import dylan.diag.LogBuffer
 import dylan.model.Phase
 import dylan.model.PlayerState
+import dylan.util.VersionedCell
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
@@ -35,7 +36,24 @@ class DylanMediaService : MediaSessionService() {
     private var engine: ExoPlayerEngine? = null
     private var routeJob: Job? = null
     private var stateJob: Job? = null
-    private var resumeFuture: ListenableFuture<MediaSession.MediaItemsWithStartPosition>? = null
+
+    /** The resumption pre-warm, cancelled with the service — see [prewarmResume]. */
+    private var prewarmJob: Job? = null
+
+    /**
+     * The pre-warmed resumption table, invalidated on every state emission.
+     *
+     * A [VersionedCell] rather than two plain `var`s (`resumeFuture` + `resumeGeneration`). Both
+     * halves are written from the `dylan-media` HandlerThread (`onPlaybackResumption`), the `state`
+     * lane (the collector, and the `onCreate` pre-warm — the same lane but *different coroutines*,
+     * and the pre-warm suspends on I/O between its two halves) and the main thread (`onDestroy`).
+     * Two unsynchronised fields plus a "did the generation move?" re-read is a check-then-act
+     * across the invalidation: the pre-warm reads generation *n*, the collector bumps to *n+1* and
+     * clears the future, and the pre-warm's re-read — a load free to still observe *n* — stores the
+     * pre-move table *after* the invalidation, so the next controller is handed a queue the user
+     * has already left. The cell makes the whole compare-and-set one CAS; see its KDoc.
+     */
+    private val resume = VersionedCell<ListenableFuture<MediaSession.MediaItemsWithStartPosition>>()
 
     /** Set once the user swipes the task away; arms [stopWhenPlaybackEnds]. */
     private var taskRemoved = false
@@ -88,9 +106,7 @@ class DylanMediaService : MediaSessionService() {
             }
         // Pre-warm the resumption table off the session looper: by the time
         // Media3 asks, onPlaybackResumption serves an immediate future.
-        container.scope.launch {
-            resumeFuture = Futures.immediateFuture(computeResumptionItems())
-        }
+        prewarmResume()
         // Build initial buttons — disabled by default until first state emission corrects them.
         val initialButtons = buildMediaButtons(Transport(canNext = false, canPrev = false))
         // Every controller command routes through the Orchestrator: the Exo timeline is only a
@@ -134,6 +150,7 @@ class DylanMediaService : MediaSessionService() {
             MediaSession
                 .Builder(this, sessionPlayer)
                 .setSessionActivity(sessionActivity)
+                .setBitmapLoader(e.artworkLoader)
                 .setCustomLayout(initialButtons)
                 .setMediaButtonPreferences(initialButtons)
                 .setCallback(
@@ -170,19 +187,7 @@ class DylanMediaService : MediaSessionService() {
                         override fun onPlaybackResumption(
                             mediaSession: MediaSession,
                             controller: MediaSession.ControllerInfo,
-                        ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> {
-                            // Never block: serve the pre-warmed future, or resolve
-                            // async and complete. Slow I/O degrades to empty (no
-                            // resume) instead of stalling Media3's timeout.
-                            resumeFuture?.let { return it }
-                            val c = DylanApp.of(this@DylanMediaService).container
-                            val f =
-                                androidx.concurrent.futures.ResolvableFuture
-                                    .create<MediaSession.MediaItemsWithStartPosition>()
-                            c.scope.launch { f.set(computeResumptionItems()) }
-                            resumeFuture = f
-                            return f
-                        }
+                        ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> = resumeNow()
                     },
                 ).build()
         addSession(session!!)
@@ -203,17 +208,110 @@ class DylanMediaService : MediaSessionService() {
                         s.setCustomLayout(buttons)
                         s.setMediaButtonPreferences(buttons)
                     }.onFailure { log.d("service", "custom layout rejected: ${it.message}") }
-                    // The per-controller command set is what SystemUI reads; the session-wide
-                    // setAvailableCommands has no ControllerInfo-free form.
-                    val commands = playerCommands(projection)
-                    for (controller in s.connectedControllers) {
-                        runCatching {
-                            s.setAvailableCommands(controller, sessionCommands(), commands)
-                        }.onFailure { log.d("service", "available commands rejected: ${it.message}") }
-                    }
+                    applyAvailableCommands(s, projection)
+                    // The `resume` setting is rewritten by the Orchestrator whenever this state
+                    // moves (Orchestrator.saveSnapshot), so a table computed before the move
+                    // describes a queue the user has already left. Drop the cache; the next
+                    // controller connection recomputes it behind the same bounded future.
+                    invalidateResume()
                     stopWhenPlaybackEnds()
                 }
             }
+    }
+
+    /**
+     * Retire the cached table: the `resume` setting is rewritten by the Orchestrator whenever this
+     * state moves (`Orchestrator.saveSnapshot`, in the shared module), so a table computed before
+     * the move describes a queue the user has already left.
+     *
+     * The guarantee, which is now real: **a pre-warm that was already in flight when the state
+     * moved cannot cache the table it read before the move.** [prewarmResume] captured the
+     * generation *before* its I/O and stores with [VersionedCell.publishIfCurrent], a CAS against
+     * the state it read — so this bump, arriving at any point before that store, makes the store
+     * fail instead of interleaving with it. There is no window in which both take effect.
+     */
+    private fun invalidateResume() {
+        resume.invalidate()
+    }
+
+    /**
+     * The resumption table, computed off the caller's thread and published only if no state
+     * emission invalidated it in the meantime.
+     *
+     * [MediaSession.Callback.onPlaybackResumption] runs on the `dylan-media` HandlerThread and must
+     * return immediately, so the table is always produced by suspending I/O; what varies is
+     * whether the *caller* gets an already-settled future (the pre-warm won the cell) or a
+     * `ResolvableFuture` this call installs and then completes. Either way the caller blocks on
+     * nothing.
+     */
+    private fun resumeNow(): ListenableFuture<MediaSession.MediaItemsWithStartPosition> {
+        val generation = resume.generation()
+        val pending =
+            androidx.concurrent.futures.ResolvableFuture
+                .create<MediaSession.MediaItemsWithStartPosition>()
+        // Whichever caller wins the cell publishes `pending` and is the one that fills it; a loser
+        // returns the winner's future rather than racing a second table. `getOrPut` returns the
+        // published value, so both callers end up on the same future.
+        val published =
+            resume.getOrPut {
+                container.scope.launch { pending.set(computeResumptionItems()) }
+                pending
+            }
+        if (published !== pending) return published
+        // Our table is built; retire the cell so the next controller re-reads the setting instead
+        // of replaying this one. `clearIf` leaves the generation alone — no state moved, so
+        // invalidating here would needlessly expire an unrelated in-flight pre-warm.
+        resume.clearIf(generation, pending)
+        return pending
+    }
+
+    /**
+     * Build the table now and publish it as an immediate future, for the `onCreate` pre-warm.
+     *
+     * The generation is captured *before* the suspending read, so a table assembled across a state
+     * emission is discarded rather than published — see [invalidateResume].
+     */
+    private fun prewarmResume() {
+        val generation = resume.generation()
+        prewarmJob =
+            container.scope.launch {
+                val items = computeResumptionItems()
+                resume.publishIfCurrent(generation, Futures.immediateFuture(items))
+            }
+    }
+
+    /**
+     * [MediaSession.getConnectedControllers] is confined to the session's application thread, and
+     * in Media3 1.11 that thread is NOT the one the builder ran on: `MediaSessionImpl`'s
+     * constructor builds its `applicationHandler` from `player.getApplicationLooper()` — here the
+     * `dylan-media` HandlerThread — and `getConnectedControllers` calls `verifyApplicationThread()`
+     * as its first instruction, throwing `IllegalStateException` from anywhere else. (Everything
+     * else this collector touches is free-threaded: `setCustomLayout`, `setMediaButtonPreferences`
+     * and `setAvailableCommands` all `postOrRun` onto that same handler internally.)
+     *
+     * Reading it inline on the state lane therefore threw on the FIRST emission — a StateFlow
+     * always emits its current value — which killed this collector before it could refresh the
+     * buttons, publish the command set, or reach `stopWhenPlaybackEnds`.
+     */
+    private fun applyAvailableCommands(
+        s: MediaSession,
+        projection: Transport,
+    ) {
+        // The per-controller command set is what SystemUI reads; the session-wide
+        // setAvailableCommands has no ControllerInfo-free form.
+        val commands = playerCommands(projection)
+        val e = engine ?: return
+        // FIFO on one looper: several state emissions queue several posts and the last one wins.
+        // A post made after release is dropped by the dead handler, which is the right no-op.
+        e.postToMedia {
+            if (session !== s) return@postToMedia
+            runCatching {
+                for (controller in s.connectedControllers) {
+                    runCatching { s.setAvailableCommands(controller, sessionCommands(), commands) }
+                        .onFailure { log.d("service", "available commands rejected: ${it.message}") }
+                }
+            }.onFailure { log.d("service", "connected controllers unreadable: ${it.message}") }
+        }
     }
 
     /**
@@ -408,8 +506,20 @@ class DylanMediaService : MediaSessionService() {
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = session
 
+    /**
+     * `super.onTaskRemoved` is deliberately NOT called. Media3 1.11's base implementation reaches the
+     * player from the main thread — `isAnySessionPlaying()` calls `session.getPlayer()`, which chains
+     * into `MediaSessionImpl.getPlayerWrapper()`, whose first instruction is `verifyApplicationThread()`
+     * — and this session's application looper is the `dylan-media` thread (Media3 builds its
+     * `applicationHandler` from `player.getApplicationLooper()`), not the main looper the service
+     * callback runs on. `Service.onTaskRemoved` is dispatched on the main thread with no catch, so the
+     * base call throws `IllegalStateException` out of the service callback and takes the process with it.
+     *
+     * The base rule is also redundant here: it is "if playback is not ongoing, pause and stopSelf",
+     * which is exactly what [stopWhenPlaybackEnds] decides from the shared phase — and it decides it
+     * better, because it re-runs on every phase change instead of freezing one snapshot of the answer.
+     */
     override fun onTaskRemoved(rootIntent: Intent?) {
-        super.onTaskRemoved(rootIntent)
         taskRemoved = true
         // One decision here is not a decision: playback can end, or the user can pause, long after
         // the swipe. Arm the rule and let the state collector re-apply it on every phase change.
@@ -419,12 +529,19 @@ class DylanMediaService : MediaSessionService() {
 
     override fun onDestroy() {
         log.i("service", "onDestroy")
-        resumeFuture?.cancel(false)
-        resumeFuture = null
+        // Cancel the future that is actually cached, then retire the cell. Read first: `invalidate`
+        // publishes the null in the same write that bumps the generation, so a read afterwards
+        // would find nothing to cancel. Cancelling an already-settled future is a no-op, and a
+        // `ResolvableFuture` whose producer is still running answers `set` with false rather than
+        // throwing.
+        resume.peek()?.cancel(false)
+        invalidateResume()
         routeJob?.cancel()
         routeJob = null
         stateJob?.cancel()
         stateJob = null
+        prewarmJob?.cancel()
+        prewarmJob = null
         DylanApp.of(this).mediaHub.publish(null)
         container.orchestrator.detachEngine()
         val s = session

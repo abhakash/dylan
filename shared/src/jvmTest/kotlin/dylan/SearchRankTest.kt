@@ -83,6 +83,77 @@ class SearchRankTest {
         assertEquals(titles.first(), rankSongs("laado", titles.map(::song)).first().title)
     }
 
+    /**
+     * `relevanceOrder` is the comparator every surface now shares (rankSongs/rankMinis, the Android
+     * merged submit list, the iOS submit list via `IosGraph.hitOrder`). Pins that it agrees with the
+     * pre-existing `(band, index)` form, and that positions are a true permutation — a dropped or
+     * repeated position would render a partial or duplicated list rather than merely misrank it.
+     */
+    @Test
+    fun relevanceOrderIsTheSharedComparatorAndAPermutation() {
+        val titles =
+            listOf(
+                "  Laado  ",
+                "LAADO",
+                "Laado",
+                "Laado\tRano",
+                "Phir Se Laado",
+                "Laado (Remix)",
+                "",
+            )
+        val expected = titles.indices.sortedWith(compareBy({ dylan.search.relevanceBand("laado", titles[it]) }, { it }))
+        assertEquals(expected, dylan.search.relevanceOrder("laado", titles), "must match the band+index form")
+
+        val order = dylan.search.relevanceOrder("laado", titles)
+        assertEquals(titles.indices.toList(), order.sorted(), "positions must be a permutation of the input")
+        assertEquals(titles.size, order.distinct().size, "no position may repeat")
+
+        assertEquals(listOf(0, 1, 2), order.take(3), "the first three are one band, so page order survives")
+        assertEquals(listOf(0, 1, 2), dylan.search.relevanceOrder("laado", listOf("Laado", "Laado", "Laado")).take(3))
+    }
+
+    /**
+     * The iOS mirror this replaces normalised with `trim().lowercased()`, which does NOT collapse an
+     * internal whitespace run. `fixtures/search_getresults_p1.json` ships exactly that
+     * (`"Tera Mera Rishta -  New Version"`), so on the old mirror a search for the single-spaced name
+     * scored that row OTHER and buried it below every fuzzy hit; the shared comparator scores it
+     * PREFIX and floats it.
+     */
+    @Test
+    fun internalWhitespaceRunsDoNotHideAFixtureTitle() {
+        val fixtureTitle = "Tera Mera Rishta -  New Version (From \"Awarapan 2\")"
+        val singleSpaced = "Tera Mera Rishta - New Version"
+        // Once the run collapses, the fixture title *starts with* the query, so it is PREFIX (1).
+        // The old mirror kept the double space and scored it OTHER (3).
+        assertEquals(1, dylan.search.relevanceBand(singleSpaced, fixtureTitle), "shared: PREFIX, not OTHER")
+
+        val ranked = rankSongs(singleSpaced, listOf(song("Unrelated"), song(fixtureTitle), song("Other")))
+        assertEquals(fixtureTitle, ranked.first().title, "a fixture title must not be buried by a whitespace run")
+    }
+
+    /** [rankMerged] is the songs ++ albums ++ artists interleave the submit list renders. */
+    @Test
+    fun rankMergedInterleavesBucketsBySharedBand() {
+        val albums = listOf(mini("album", "albumId", "l1", "Laado"), mini("album", "albumId", "l2", "Other"))
+        val artists = listOf(mini("artist", "artistId", "a1", "Laado Rano"), mini("artist", "artistId", "a2", "Third"))
+        // Flat order is songs ++ albums ++ artists, so "Phir Se Laado" (index 0) is the only CONTAINS.
+        val songs = listOf(song("Phir Se Laado"), song("Nothing Alike"))
+
+        fun titleOf(t: Any): String =
+            when (t) {
+                is Song -> t.title
+                is MiniEntity -> t.title
+                else -> error("unexpected bucket element $t")
+            }
+        val merged = dylan.search.rankMerged("laado", listOf(songs, albums, artists), ::titleOf)
+        // Band first, then flat position: EXACT "Laado" → PREFIX "Laado Rano" → CONTAINS
+        // "Phir Se Laado" → OTHER, whose three rows keep songs-before-albums-before-artists.
+        assertEquals(
+            listOf("Laado", "Laado Rano", "Phir Se Laado", "Nothing Alike", "Other", "Third"),
+            merged.map(::titleOf),
+        )
+    }
+
     @Test
     fun miniPagedKeepsOnlyWantedType() {
         val dto =

@@ -26,14 +26,21 @@ import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.jsonPrimitive
 
 private val json = dylanJson
 
+/**
+ * A primitive's content, or null. **Total by construction**: `jsonPrimitive` *throws* on an object
+ * or an array, and this function is called on fields the API has shipped in more than one shape
+ * (`image`, `year`, `duration`, `total`, `start`), so a `{"150x150": …}` object used to escape the
+ * whole mapper as an `IllegalArgumentException` — out of `decodeSongPage`, out of `searchPage`,
+ * through `MusicProvider`'s `CatalogResult` contract, into whatever the UI had. Nothing in this file
+ * may throw on catalog data; an unusable field is a field that is not there.
+ */
 internal fun JsonElement?.str(): String? =
     when (this) {
         null, is JsonNull -> null
-        else -> jsonPrimitive.contentOrNull
+        else -> (this as? JsonPrimitive)?.contentOrNull
     }
 
 fun art500(url: String?): String? {
@@ -66,7 +73,15 @@ internal fun mapCard(
         // filters out (`songs.filter { it.durationS > 0 }`), so the harness is blind to it by design.
         into += Drift(endpoint, DURATION_UNPARSED, moreInfo.duration.toString().take(DRIFT_DETAIL_CHARS))
     }
-    return mapSong(dto, moreInfo)
+    val song = mapSong(dto, moreInfo)
+    if (song == null) {
+        // `coerceInputValues` means a `"id": null` no longer fails the *decode* — it becomes `""`,
+        // and the card then died in `mapSong`'s identity guard with nothing recorded. The page was
+        // still short a row and the drift list still said the page was whole, which is the one thing
+        // `Ok(drift)` exists to make impossible.
+        into += Drift(endpoint, BLANK_IDENTITY, "id='${dto.id}' title='${dto.title.take(DRIFT_DETAIL_CHARS)}'")
+    }
+    return song
 }
 
 fun mapSong(
@@ -81,9 +96,8 @@ fun mapSong(
     // (not rights) decides NO_SOURCE vs resolvable downstream. The DTO keeps `rights` so lenient
     // parsing of live payloads is unaffected.
     val img150 =
-        d.image
-            .str()
-            ?.takeIf { it.isNotBlank() }
+        artUrlOf(d.image)
+            .takeIf { it.isNotBlank() }
             .orEmpty()
     val primary = primaryArtist(mi.artistMap)
     return Song(
@@ -143,16 +157,26 @@ private fun mapMiniOf(
         title = d.title.trim(),
         subtitle = d.subtitle.orEmpty(),
         type = type,
-        image = d.image.str().orEmpty(),
+        image = artUrlOf(d.image),
         permaToken = d.permaUrl,
     )
 
-/** Why a mini card was dropped. */
+/**
+ * Why a mini card was dropped, or `""` for a card that maps.
+ *
+ * This is the *whole* answer, not just the perma-token case: a card with no id and no title also
+ * returns null from [mapMini], and it used to reach the caller as a silently missing row — the
+ * `Ok(drift)` contract says a short page is a page that says so.
+ */
 internal fun miniDropReason(d: SongDto): String =
-    when (d.type ?: TYPE_SONG) {
-        TYPE_ALBUM -> if (permaAlbumToken(d.permaUrl) == null) NO_PERMA_TOKEN else ""
-        TYPE_ARTIST -> if (permaArtistToken(d.permaUrl) == null) NO_PERMA_TOKEN else ""
-        else -> ""
+    when {
+        d.id.isBlank() || d.title.isBlank() -> BLANK_IDENTITY
+        else ->
+            when (d.type ?: TYPE_SONG) {
+                TYPE_ALBUM -> if (permaAlbumToken(d.permaUrl) == null) NO_PERMA_TOKEN else ""
+                TYPE_ARTIST -> if (permaArtistToken(d.permaUrl) == null) NO_PERMA_TOKEN else ""
+                else -> ""
+            }
     }
 
 // ── pages ─────────────────────────────────────────────────────────────────────────────────────
@@ -278,8 +302,8 @@ fun mapAlbum(
         id = a.id,
         title = a.title.trim(),
         subtitle = a.subtitle,
-        artUrl150 = a.image.str().orEmpty(),
-        artUrl500 = art500(a.image.str()).orEmpty(),
+        artUrl150 = artUrlOf(a.image),
+        artUrl500 = art500(artUrlOf(a.image)).orEmpty(),
         year = a.year.str(),
         songs = songs,
     )
@@ -290,7 +314,7 @@ fun mapArtist(
     drift: MutableList<Drift> = mutableListOf(),
 ): Artist? {
     if (a.name.isBlank()) return null
-    val img150 = a.image.str().orEmpty()
+    val img150 = artUrlOf(a.image)
     return Artist(
         id = a.artistId.str().orEmpty(),
         name = a.name.trim(),
@@ -461,6 +485,7 @@ fun mapSuggestions(
 internal const val CARD_DECODE = "CARD_DECODE"
 internal const val NO_MORE_INFO = "NO_MORE_INFO"
 internal const val NO_PERMA_TOKEN = "NO_PERMA_TOKEN"
+internal const val BLANK_IDENTITY = "BLANK_IDENTITY"
 internal const val DURATION_UNPARSED = "DURATION_UNPARSED"
 internal const val BODY_NOT_JSON = "BODY_NOT_JSON"
 internal const val FRAME_NOT_JSON = "FRAME_NOT_JSON"

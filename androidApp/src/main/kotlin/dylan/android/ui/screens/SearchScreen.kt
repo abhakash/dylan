@@ -27,6 +27,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -66,8 +67,11 @@ fun SearchScreen(
 ) {
     val t = LocalDylanTokens.current
     val scope = androidx.compose.runtime.rememberCoroutineScope()
-    var query by remember { mutableStateOf("") }
-    var submitted by remember { mutableStateOf<String?>(null) }
+    // Saveable: a rotation destroys this Activity (no configChanges in the manifest), and losing
+    // the typed query — or the submitted one, whose `LaunchedEffect(submitted)` would then never
+    // re-run — throws away work the user cannot get back.
+    var query by rememberSaveable { mutableStateOf("") }
+    var submitted by rememberSaveable { mutableStateOf<String?>(null) }
     val demand = remember { MutableStateFlow("") }
     val actions = rememberSongActions(container)
     val favKeys = rememberFavoriteKeys(container)

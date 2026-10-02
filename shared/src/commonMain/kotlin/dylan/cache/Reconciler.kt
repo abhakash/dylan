@@ -35,8 +35,19 @@ class Reconciler(
     private val engine: DownloadEngine,
     private val cacheManager: CacheManager,
     private val log: dylan.diag.LogBuffer,
-    // Defaults to a private instance because AppContainer (owned by the DI wave) still builds this
-    // with the pre-settings argument list. One-line fix, in the wave's report: pass data.settings.
+    /**
+     * A *second* `SettingsStore`, private to this class, because `AppContainer` constructs the
+     * reconciler without the graph's `data.settings`. The real fix is one argument at that call
+     * site (`Reconciler(…, data.settings)`) and it is NOT made here because `AppContainer.kt` is
+     * owned by another change in flight.
+     *
+     * What is true today, and is the reason the duplication is currently harmless rather than a
+     * live bug: this instance touches exactly one key, [FULL_SWEEP_KEY], and it both writes and
+     * reads that key through *itself* — [fullSweepDue] and the `put` in [fullSweep] — so it can
+     * never be the one holding a stale copy. `SettingsStore`'s own KDoc used to claim a single
+     * instance was the invariant that made its cache safe; that claim was false from the moment this
+     * default existed, and the KDoc now states the real, narrower property instead.
+     */
     private val settings: SettingsStore = SettingsStore(db, disp, cfg),
 ) {
     private val clock = cfg.clock
@@ -74,14 +85,20 @@ class Reconciler(
         var dropped = 0
         rows.forEach { row ->
             val key = SongKey(row.provider, row.song_id)
-            val gone = runCatching { fs.delete(paths.final(key, row.bitrate.toInt(), row.ext)) }.isSuccess
-            withContext(disp.on(Lane.DB)) {
-                db.dylanQueries.dropObject(row.provider, row.song_id, row.bitrate, row.ext)
-            }
-            if (gone) {
+            // Same rule as `checkOne`, and it used to drop the row either way: the `dropObject` below
+            // was not inside the `gone` branch, so the log reported a failed unlink and the row went
+            // anyway. A non-playable rendition whose file we could not remove is still the row that
+            // describes those bytes, and dropping it turns them into untracked garbage on disk.
+            if (unlink(paths.final(key, row.bitrate.toInt(), row.ext))) {
+                withContext(disp.on(Lane.DB)) {
+                    db.dylanQueries.dropObject(row.provider, row.song_id, row.bitrate, row.ext)
+                }
                 dropped++
             } else {
-                log.e("reconciler", "could not unlink ${row.state.lowercase()} rendition ${key.provider}:${key.songId}")
+                log.e(
+                    "reconciler",
+                    "could not unlink ${row.state.lowercase()} rendition ${key.provider}:${key.songId}, row kept",
+                )
             }
         }
         if (rows.isNotEmpty()) log.i("reconciler", "reaped ${rows.size} non-playable rendition(s), $dropped unlinked")
@@ -134,9 +151,17 @@ class Reconciler(
     }
 
     /**
-     * One file, one stat. A mismatch drops the row only after a successful unlink — v0 deleted the
-     * row even when `fs.delete` failed, so one EACCES/EBUSY/EMFILE permanently lost the track and
-     * the next launch's orphan sweep then deleted the file for real (CA-4).
+     * One file, one stat. A mismatch drops the row **only after a successful unlink** — v0 deleted
+     * the row even when `fs.delete` failed, so one EACCES/EBUSY/EMFILE permanently lost the track
+     * and the next launch's orphan sweep then deleted the file for real (CA-4).
+     *
+     * The row was still being dropped on a failed unlink here, and the `log.e` below it claimed
+     * "row kept for retry" while the drop had already been issued: the class fix had landed in
+     * `CacheManager.unlinkAll` and never reached the reconciler, which is the *other* destroyer of
+     * library rows and the one that runs on every boot. A dropped row over a surviving file is the
+     * worst of the two states — `weeklyGc`'s `deleteOrphanLibrary` cannot repair it, and the file is
+     * now an orphan the next sweep will remove, so a transient unlink failure still cost the user
+     * the track. Exactly the failure the comment above describes.
      */
     private suspend fun checkOne(
         provider: String,
@@ -156,10 +181,32 @@ class Reconciler(
             return
         }
         log.w("reconciler", "cached file missing or short ${key.provider}:${key.songId} (row=$recorded B)")
-        val gone = runCatching { fs.delete(path) }.isSuccess
+        if (!unlink(path)) {
+            log.e("reconciler", "unlink failed, row kept for retry: ${key.provider}:${key.songId}")
+            return
+        }
         withContext(disp.on(Lane.DB)) { db.dylanQueries.dropObject(provider, songId, bitrate.toLong(), ext) }
-        if (!gone) log.e("reconciler", "unlink failed, row kept for retry: ${key.provider}:${key.songId}")
     }
+
+    /**
+     * False only when the file is *still there*, which is the caller's signal to keep the row.
+     *
+     * `mustExist = false` is stated explicitly rather than left to okio's default, because the
+     * argument is semantic and a default is a poor place to keep it. An absent path is a
+     * *successful* unlink: the goal, "no file at this path", already holds. Only an explicit
+     * `mustExist = true` turns it into a `FileNotFoundException`, and that would mean every vanished
+     * file is a "failed unlink" whose row is then kept "for retry" — forever, with a retryable error
+     * logged each weekly sweep, for a file that is not there.
+     *
+     * A path that exists but cannot be removed throws `IOException` under either setting; that is the
+     * CA-4 case, and it is the only one that must keep the row.
+     *
+     * Measured on the resolved okio 3.18.1: its default is already `false`, so passing it changes no
+     * behaviour today. It is written out because that default is not part of okio's contract.
+     * `ReconcilerTest.deleteMustExistIsWhatThrowsOnAnAbsentPath` pins the measurement, so a future
+     * okio that flips it fails here rather than in the field.
+     */
+    private fun unlink(path: okio.Path): Boolean = runCatching { fs.delete(path, mustExist = false) }.isSuccess
 
     private suspend fun currentBytes(
         provider: String,

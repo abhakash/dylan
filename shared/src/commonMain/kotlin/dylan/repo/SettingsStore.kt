@@ -15,10 +15,20 @@ import kotlinx.coroutines.withContext
  * every boot, `gc_last_ms` on every GC tick. Each of those was a full round trip through the
  * single-threaded DB lane, and it could not be made cheap by indexing a two-column table.
  *
- * So they are cached in memory, seeded once on first read and updated on write. The invariant
- * that makes this safe is that [SettingsStore] is the only writer to the `settings` table for
- * every key that is read through here; the Reconciler's weekly-sweep timestamp is the exception
- * and is read back through the same instance.
+ * So they are cached in memory, seeded once on first read and updated on write. Two properties make
+ * that safe, and both are enforced here rather than assumed:
+ *
+ *  - **Every access to [cache] is under [mutex].** It is a `LinkedHashMap`, and a `put` from one
+ *    coroutine concurrent with a `get` from another is an unsynchronised read of a container being
+ *    restructured: a resize can leave a present key unreachable, and the read can observe a bucket
+ *    array mid-swap. The old code read `cache[key]` *outside* the lock and wrote it inside, which is
+ *    exactly that race, on the hottest read path in the app.
+ *  - **The cache is the authority for a key this instance has written.** A `put` updates the table
+ *    first and the cache second, both under the lock, so a `get` after a `put` always returns the
+ *    value just written. It says nothing about *other* instances: each `SettingsStore` has its own
+ *    cache, so a key written through one is only visible to another when the other misses and reads
+ *    the table. There is one shared instance in the graph (`data.settings`); the reconciler holds a
+ *    second one for its own sweep key — see its KDoc for why that is currently harmless.
  */
 class SettingsStore(
     private val db: Dylan,
@@ -28,13 +38,14 @@ class SettingsStore(
     private val mutex = Mutex()
     private val cache = mutableMapOf<String, String>()
 
-    suspend fun get(key: String): String? {
-        cache[key]?.let { return it }
-        return mutex.withLock {
+    suspend fun get(key: String): String? =
+        mutex.withLock {
+            // The fast path is inside the lock, deliberately. Hoisting it out saves a lock
+            // acquisition on a hit and reintroduces the race the lock exists to prevent — and the
+            // lock is a coroutine `Mutex`, so acquiring it does not block a thread.
             cache[key] ?: withContext(disp.on(Lane.DB)) { db.dylanQueries.getSetting(key).executeAsOneOrNull() }
                 ?.also { cache[key] = it }
         }
-    }
 
     suspend fun put(
         key: String,

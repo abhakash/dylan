@@ -158,7 +158,10 @@ fun AlbumScreen(
                     }
                 }
             }
-            itemsIndexed(songs, key = { _, s -> s.key.songId }) { i, song ->
+            // One album can carry the same songId twice (a duplicated track in the catalogue listing), and a
+            // duplicate LazyColumn key is a hard crash, not a glitch. Occurrence-indexed for the
+            // same reason QueueSheet/SearchScreen namespace theirs.
+            itemsIndexed(songs, key = { i, s -> "${s.key.provider}:${s.key.songId}#$i" }) { i, song ->
                 val can = canPlay(isOnline, cachedKeys, song.key)
                 val pct = rememberDownloadPct(container, song.key)
                 SongRow(

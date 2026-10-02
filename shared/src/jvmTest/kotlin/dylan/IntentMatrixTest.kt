@@ -244,8 +244,54 @@ class IntentMatrixTest {
         }
 
     /**
+     * The clamp must describe the track being *played*, not the one the window was built with.
+     *
+     * `onTrackChanged` does not rebuild the window — the engine already held both items and rolled
+     * on its own — so the seek bound, which used to be a field written once per `prepareWindow`,
+     * still described the track that had just ended. A 10-minute track reached from a 1-minute one
+     * could not be seeked past 1:00. Neither real engine overrides `PlayerEngine.durationMs()`,
+     * so that cached fallback was the only clamp in production.
+     */
+    @Test
+    fun aSeekAfterAnAutoAdvanceClampsAgainstTheNewTrackNotThePreviousOne() =
+        runBlocking {
+            harness(cfg()) { h ->
+                h.seedCached("a", durationS = SHORT_TRACK_S)
+                h.seedCached("b", durationS = LONG_TRACK_S)
+                h.submit(
+                    Intent.PlayNow(
+                        listOf(
+                            testSong("a", durationS = SHORT_TRACK_S),
+                            testSong("b", durationS = LONG_TRACK_S),
+                        ),
+                        0,
+                    ),
+                )
+                h.awaitPlaying()
+                h.awaitWindow("saavn:a")
+                val window = h.engine.preparedWindows.last()
+                h.engine.script(EngineEvent.ItemEnded(window[0].itemId))
+                h.engine.script(EngineEvent.TrackChanged(window[1].itemId, TransitionReason.AUTO))
+                h.awaitState { it.current?.key?.songId == "b" && it.phase is Phase.Playing }
+                h.submit(Intent.Seek(MID_LONG_TRACK_MS))
+                h.settleIntents()
+                assertEquals(
+                    MID_LONG_TRACK_MS,
+                    h.engine.seeks.last(),
+                    "the clamp must follow the track that is now playing: a is ${SHORT_TRACK_S}s, " +
+                        "b is ${LONG_TRACK_S}s, and $MID_LONG_TRACK_MS ms is inside b only",
+                )
+            }
+        }
+
+    /**
      * `Prepared` is a buffering event. Calling `play()` from it made a rebuffer override a user
      * pause, so the notification and the app disagreed about the most important state.
+     *
+     * The scripted `Prepared` carries the *real* head itemId rather than a hand-written one: the
+     * old literal (`"g0:saavn:a:128"`) was a generation-0 id the state machine had long since
+     * moved past, so this test passed for a reason unrelated to its subject — it would have passed
+     * with the rebuffer handler deleted outright.
      */
     @Test
     fun aRebufferDoesNotOverrideAUserPause() =
@@ -256,13 +302,59 @@ class IntentMatrixTest {
                 h.submit(Intent.PlayNow(h.songs("a", "b"), 0))
                 h.awaitPlaying()
                 h.awaitWindow("saavn:a")
+                val head =
+                    h.engine.preparedWindows
+                        .last()
+                        .first()
+                        .itemId
                 h.submit(Intent.TogglePlayPause)
                 h.awaitState { it.phase is Phase.Paused }
                 val playsBefore = h.engine.playCount
-                h.engine.script(EngineEvent.Prepared("g0:saavn:a:128"))
+                h.engine.script(EngineEvent.Prepared(head))
                 delay(REBUFFER_SETTLE_MS)
                 assertEquals(playsBefore, h.engine.playCount, "a rebuffer must not resume a paused transport")
                 assertTrue(h.state.phase is Phase.Paused, "…and the state machine must still say paused")
+            }
+        }
+
+    /**
+     * Autoplay must not depend on which of the two "the window is ready" events arrives first.
+     *
+     * `FakePlayerEngine` publishes `Prepared` and then `TrackChanged`, and every autoplay test in
+     * the suite inherited that order — but Media3 announces the item transition for a freshly
+     * prepared window *before* it reports `STATE_READY` (`onMediaItemTransition` is driven by the
+     * playlist change, `onPlaybackStateChanged` by buffering). Under the real order the
+     * `TrackChanged` promoted `Ready → Playing` on its own, `onPrepared` then found no `Ready` to
+     * act on, and `engine.play()` was never called: the first `PlayNow` of a session produced a
+     * `Playing` state over a transport that was never told to start. The fake's ordering hid it
+     * completely, so this drives the reverse order explicitly.
+     */
+    @Test
+    fun autoplaySurvivesATrackChangedThatArrivesBeforePrepared() =
+        runBlocking {
+            harness(cfg()) { h ->
+                h.seedCached("a")
+                h.engine.autoEmit = false
+                h.submit(Intent.PlayNow(h.songs("a"), 0))
+                h.awaitState { it.phase is Phase.Ready }
+                h.awaitWindow("saavn:a")
+                val head =
+                    h.engine.preparedWindows
+                        .last()
+                        .first()
+                        .itemId
+                h.engine.script(EngineEvent.TrackChanged(head, TransitionReason.EXPLICIT))
+                h.awaitState { it.phase is Phase.Playing }
+                assertTrue(
+                    h.engine.playCount >= 1,
+                    "a TrackChanged that consumes the Ready must still autoplay, " +
+                        "or the real engine's ordering never starts the transport: " +
+                        "phase=${h.state.phase} playCount=${h.engine.playCount}",
+                )
+                // …and the later Prepared must not double-start it.
+                h.engine.script(EngineEvent.Prepared(head))
+                delay(REBUFFER_SETTLE_MS)
+                assertEquals(1, h.engine.playCount, "autoplay is once per ready, not once per event")
             }
         }
 
@@ -615,6 +707,13 @@ class IntentMatrixTest {
 
 private const val POSITION_MS = 1_000L
 private const val PAST_RESTART_MS = 5_000L
+
+/** A short track followed by a long one; the seek bound must follow the second, not the first. */
+private const val SHORT_TRACK_S = 60L
+private const val LONG_TRACK_S = 600L
+
+/** Comfortably past [SHORT_TRACK_S] and comfortably inside [LONG_TRACK_S]. */
+private const val MID_LONG_TRACK_MS = 300_000L
 private const val RESTART_THRESHOLD_MS = 3_000L
 private const val REBUFFER_SETTLE_MS = 200L
 private const val STALE_EVENT_SETTLE_MS = 300L

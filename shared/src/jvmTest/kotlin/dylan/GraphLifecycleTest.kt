@@ -18,6 +18,7 @@ import dylan.util.AppDispatchers
 import dylan.util.Lane
 import dylan.util.NetClass
 import dylan.util.NetMonitor
+import io.ktor.client.engine.HttpClientEngine
 import io.ktor.client.engine.mock.MockEngine
 import io.ktor.client.engine.mock.respondError
 import io.ktor.http.HttpStatusCode
@@ -43,6 +44,7 @@ import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 
 /**
@@ -235,6 +237,88 @@ class GraphLifecycleTest {
         assertFalse(job.isActive, "a component-scope coroutine survived shutdown()")
         c.start()
         assertEquals(0, c.backgroundJobCount, "a shut-down container accepted start()")
+    }
+
+    /**
+     * The terminal form of the previous test: the *playback graph's own* coroutines must stop too.
+     *
+     * `Orchestrator.init` launches its state-lane inbox loop and its states collector into whatever
+     * `scope` it is handed. The container used to hand it the platform scope, so both were children
+     * of the platform `SupervisorJob` — which `shutdown()` never cancels, because it owns
+     * `containerJob`. `noCoroutineOutlivesStop` could not see this: it asserts on
+     * `backgroundJobCount`, which counts only [AppContainer.bgJobs], so it passed green while the
+     * one component that owns every lane-confined field stayed live and went on turning intents
+     * into state.
+     *
+     * Asserted behaviourally rather than by counting children: an inbox that is still draining
+     * moves `_state`, and that is observable from outside the container.
+     */
+    @Test
+    fun shutdownStopsTheStateLaneInboxAndNotJustTheBackgroundJobs() {
+        val c = startedContainer("inbox")
+        val orch = c.orchestrator
+        runBlocking { awaitUntil("boot sweep", atLeast = 1) }
+
+        // Warm-up: prove the inbox really does move state, so the post-shutdown check is not vacuous.
+        val warm = orch.state.value
+        runBlocking {
+            orch.submit(dylan.playback.Intent.CycleRepeat)
+            withTimeoutOrNull(RESTART_TIMEOUT_MS) { while (orch.state.value == warm) delay(POLL_MS) }
+        }
+        assertNotEquals(warm, orch.state.value, "the inbox never ran; this assertion would be vacuous")
+
+        runBlocking { c.shutdown() }
+
+        val settled = orch.state.value
+        runBlocking {
+            orch.submit(dylan.playback.Intent.CycleRepeat)
+            delay(SETTLE_MS)
+        }
+        assertEquals(settled, orch.state.value, "the state-lane inbox survived shutdown()")
+    }
+
+    /**
+     * The container owns the [io.ktor.client.engine.HttpClientEngine] it is handed, and
+     * `shutdown()` is the only release path that is guaranteed to run exactly once. It used to
+     * delegate the close to `stop()`, which returns without doing anything unless it actually won
+     * the RUNNING→STOPPING CAS — so a container whose `open()` threw (phase rolled back to IDLE by
+     * `start()`) and which was then shut down kept three Ktor clients and an OkHttp/Darwin engine
+     * alive with nothing left that could ever close them.
+     */
+    @Test
+    fun shutdownClosesTheEngineEvenWhenStartNeverReachedRunning() {
+        val engine = CountingEngine()
+        val dir = freshDir("never-started")
+        val c =
+            AppContainer(
+                cfg = AppConfig(),
+                disp = disp,
+                scope = CoroutineScope(SupervisorJob() + disp.state),
+                baseDir = dir,
+                driverFactory = DriverFactory(dir + "/dylan.db", log),
+                fs = okio.FileSystem.SYSTEM,
+                netMonitor = TestNet,
+                httpEngine = engine,
+                engineFactory = { unusedEngine() },
+                log = log,
+            ).also { built += it }
+        runBlocking { c.open() } // opens fine, but start() is never called ⇒ phase stays IDLE
+        assertEquals(0, engine.closes.get(), "precondition: the engine is open")
+
+        runBlocking { c.shutdown() }
+        assertEquals(1, engine.closes.get(), "shutdown() did not close the shared engine")
+    }
+
+    /** An [HttpClientEngine] that records how many times it was closed, by delegating a real one. */
+    private class CountingEngine(
+        private val delegate: HttpClientEngine = MockEngine { respondError(HttpStatusCode.NotFound) },
+    ) : HttpClientEngine by delegate {
+        val closes = AtomicInteger(0)
+
+        override fun close() {
+            closes.incrementAndGet()
+            delegate.close()
+        }
     }
 
     // ---- bridge -----------------------------------------------------------------------------

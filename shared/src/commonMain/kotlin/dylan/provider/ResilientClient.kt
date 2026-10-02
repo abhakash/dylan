@@ -19,9 +19,11 @@ import io.ktor.utils.io.errors.IOException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 
 /**
@@ -116,8 +118,14 @@ class ResilientClient(
     /** Per-key in-flight loads: three concurrent opens of one album produce one request. */
     private val inflight = mutableMapOf<String, Deferred<*>>()
 
-    /** Endpoint → (failure, when it was observed). Replayed for [AppConfig.catalogNegativeTtlMs]. */
-    private val negative = mutableMapOf<String, Pair<CatalogResult.Err, Long>>()
+    /**
+     * Endpoint → (failure, when it was observed, how long it is good for). Replayed for that long.
+     *
+     * The TTL is per entry and not [AppConfig.catalogNegativeTtlMs] because the origin's
+     * `Retry-After` is a *stronger* statement than our own default backoff: replaying a 429 for
+     * 30 s when the origin said 3600 spends the request to be told the same thing again.
+     */
+    private val negative = mutableMapOf<String, NegativeEntry>()
 
     private val lock = Mutex()
 
@@ -134,6 +142,13 @@ class ResilientClient(
             val fresh: Deferred<CatalogResult<T>>,
         ) : Decision<T>
     }
+
+    /** One replayable failure: what it was, when it was seen, and how long it stands for. */
+    private class NegativeEntry(
+        val err: CatalogResult.Err,
+        val atMs: Long,
+        val ttlMs: Long,
+    )
 
     /**
      * Reads [key] from the LRU (or replays a recent failure), else runs [load] — collapsing
@@ -156,13 +171,27 @@ class ResilientClient(
                 // entry is completed from the moment the load finishes until this coroutine resumes
                 // to store, and a caller in that gap found no entry and led a duplicate load.
                 // Throwable, not Exception: a cancelled leader must release the key too.
+                //
+                // NonCancellable, and identity-checked. Both are load-bearing:
+                //  - `Mutex.withLock` from an already-cancelled coroutine throws CancellationException
+                //    *before it acquires* when the mutex is contended (`lock()` falls through to
+                //    `suspendCancellableCoroutine`, whose cancellability is decided at construction).
+                //    So a plain `withLock` in this catch returned without ever removing the entry,
+                //    leaving `inflight[key]` pointing at a finished deferred for the life of the
+                //    process: every later caller joined that zombie, so the key's TTL was dead and a
+                //    failed load was replayed as a permanent exception. See
+                //    `SingleFlightStressTest.aCancelledLeaderStillReleasesTheKey`.
+                //  - only *this* leader may remove *its own* entry, so a leader that was overtaken
+                //    cannot delete the successor's registration and let a second load through.
                 @Suppress("TooGenericExceptionCaught")
                 try {
                     val out = plan.fresh.await()
-                    lock.withLock { storeLocked(key, out) }
+                    withContext(NonCancellable) { lock.withLock { storeLocked(key, out) } }
                     out
                 } catch (t: Throwable) {
-                    lock.withLock { inflight.remove(key) }
+                    withContext(NonCancellable) {
+                        lock.withLock { if (inflight[key] === plan.fresh) inflight.remove(key) }
+                    }
                     throw t
                 }
             }
@@ -218,11 +247,11 @@ class ResilientClient(
     private suspend fun cachedError(endpoint: String): CatalogResult.Err? =
         lock.withLock {
             val hit = negative[endpoint] ?: return@withLock null
-            if (cfg.clock.nowMs() - hit.second > cfg.catalogNegativeTtlMs) {
+            if (cfg.clock.nowMs() - hit.atMs > hit.ttlMs) {
                 negative.remove(endpoint)
                 null
             } else {
-                hit.first
+                hit.err
             }
         }
 
@@ -251,24 +280,50 @@ class ResilientClient(
         // origin, not about one query, and without this every keystroke during a rate-limit window
         // spends a request to be told the same thing.
         cachedError(endpoint)?.let { return it }
-        val out = fetch(request, endpoint)
+        val fetched = fetch(request, endpoint)
         lock.withLock {
-            val failure = out as? CatalogResult.Err
-            if (failure == null || failure.code == ErrorCode.OFFLINE) {
+            val failure = fetched.result as? CatalogResult.Err
+            // Only a fact about the *endpoint* may be replayed for a different query or a different
+            // id. `content.getAlbumDetails` and `webapi.get` are one endpoint for every album and
+            // every artist, so a 404 or a 400 recorded against them answered every *other* album
+            // with NOT_FOUND/NETWORK for the whole TTL — a wrong answer, not a stale one, and one
+            // the caller has no way to tell from a real miss. Transport failures have no status and
+            // stay endpoint-scoped: a dead DNS or a refused connect is a property of the host.
+            if (failure == null ||
+                failure.code == ErrorCode.OFFLINE ||
+                !isEndpointScoped(fetched.status, failure.code)
+            ) {
                 negative.remove(endpoint)
             } else {
-                negative[endpoint] = failure to cfg.clock.nowMs()
-                val cut = cfg.clock.nowMs() - cfg.catalogNegativeTtlMs
-                negative.entries.removeAll { it.value.second < cut }
+                val now = cfg.clock.nowMs()
+                negative[endpoint] = NegativeEntry(failure, now, negativeTtlMs(fetched))
+                val cut = now - maxOf(cfg.catalogNegativeTtlMs, MAX_NEGATIVE_TTL_MS)
+                negative.entries.removeAll { it.value.atMs < cut }
             }
         }
-        return out
+        return fetched.result
+    }
+
+    /** One GET plus the two header facts the negative cache needs and [CatalogResult.Err] has no room for. */
+    private class Fetched(
+        val result: CatalogResult<CatalogBody>,
+        /** null when no status was ever seen (transport failure). */
+        val status: Int?,
+        val retryAfter: String?,
+    )
+
+    /** How long to park this endpoint: our floor, raised to whatever the origin asked for. */
+    private fun negativeTtlMs(f: Fetched): Long {
+        val floor = cfg.catalogNegativeTtlMs
+        val asked = retryAfterMs(f.retryAfter, MAX_NEGATIVE_TTL_MS) ?: return floor
+        // Never shorter than our own floor: a 2 s Retry-After is not permission to hammer.
+        return maxOf(floor, asked)
     }
 
     private suspend fun fetch(
         request: List<Pair<String, String>>,
         endpoint: String,
-    ): CatalogResult<CatalogBody> =
+    ): Fetched =
         try {
             val resp =
                 http.request(cfg.apiBaseUrl) {
@@ -277,7 +332,12 @@ class ResilientClient(
                     cfg.commonParams.forEach { (k, v) -> parameter(k, v) }
                     header(HttpHeaders.UserAgent, cfg.userAgent)
                 }
-            classify(endpoint, resp.status, resp.headers[HttpHeaders.RetryAfter]) { resp.bodyAsText() }
+            val retryAfter = resp.headers[HttpHeaders.RetryAfter]
+            Fetched(
+                classify(endpoint, resp.status, retryAfter) { resp.bodyAsText() },
+                resp.status.value,
+                retryAfter,
+            )
         } catch (e: CancellationException) {
             throw e
         } catch (transport: IOException) {
@@ -286,7 +346,7 @@ class ResilientClient(
             // platform, so the name check is the portable test.
             val code = if (isTimeout(transport)) ErrorCode.NETWORK_TIMEOUT else ErrorCode.NETWORK
             log.w("catalog", "$endpoint ${code.name} ${transport::class.simpleName}: ${transport.message}")
-            err(code, "${transport::class.simpleName}: ${transport.message}")
+            Fetched(err(code, "${transport::class.simpleName}: ${transport.message}"), null, null)
         }
 
     /**
@@ -327,6 +387,42 @@ class ResilientClient(
         fun isTimeout(t: Throwable): Boolean = t::class.simpleName?.contains("Timeout", ignoreCase = true) == true
 
         /**
+         * Whether a failure is a fact about the **endpoint** — something true of the next request to
+         * the same `__call` too — or about **this one request only**.
+         *
+         * Rate limits, geo-blocks, expired credentials, bot-walls, timeouts and 5xx are the origin's
+         * state. 404 and the remaining 4xx are the *request's*: one album not existing, one query
+         * malformed. Replaying those for every other album on the endpoint turns a single miss into
+         * 30 s of the catalog answering "not found" about albums that exist. A null status (a
+         * transport failure) is endpoint-scoped: a refused connect or a dead DNS says something
+         * about the host, and the cost of replaying it is one saved request.
+         *
+         * [code] matters for exactly one case: **DRIFT arrives as a 200**. A bot wall or a blank body
+         * is the origin's state, not the request's — every request in the window gets the same page —
+         * so it is replayed even though its status says nothing wrong.
+         */
+        fun isEndpointScoped(
+            status: Int?,
+            code: ErrorCode? = null,
+        ): Boolean =
+            when {
+                code == ErrorCode.DRIFT -> true
+                status == null -> true
+                status == TOO_MANY_REQUESTS ||
+                    status == UNAUTHORIZED ||
+                    status == FORBIDDEN ||
+                    status == REQUEST_TIMEOUT -> true
+                else -> status in SERVER_ERROR_RANGE
+            }
+
+        /**
+         * Ceiling on an honoured `Retry-After`, and the same 2-minute clamp the download breaker
+         * uses for the same reason: an origin that asks for an hour must not park the catalog for
+         * an hour, and a mis-parsed header must not park it at all.
+         */
+        const val MAX_NEGATIVE_TTL_MS: Long = 120_000L
+
+        /**
          * The mapping, in one place. `retryable` answers "can the app succeed by trying again
          * without the user doing anything", which is what both the negative cache and the download
          * retry policy key on.
@@ -354,9 +450,13 @@ class ResilientClient(
             }
 
         /**
-         * `Retry-After` in milliseconds, seconds form only (the HTTP-date form is not honoured;
-         * the caller falls back to the negative-cache TTL). Capped, because an origin that asks for
+         * `Retry-After` in milliseconds, seconds form only (the HTTP-date form is not honoured; the
+         * caller falls back to the negative-cache TTL). Capped, because an origin that asks for
          * an hour must not park the catalog for an hour.
+         *
+         * **This is now wired to production** — [negativeTtlMs] feeds it to the endpoint negative
+         * cache — so "seconds form only" is the one remaining gap: an origin that sends the RFC-1123
+         * form (which the download layer's own fixture shows the CDN does) gets the flat TTL.
          */
         fun retryAfterMs(
             header: String?,

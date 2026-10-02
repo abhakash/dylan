@@ -16,6 +16,12 @@ enum class Lane { MAIN, IO, DB, STATE }
  * confinement is what makes the shared mutable state in this app safe (the state lane owns the
  * queue, the DB lane owns the driver), so a violation is a correctness bug that must stop the
  * line that caused it rather than corrupt something further downstream.
+ *
+ * "Stop the line" is enforced at the top of each line, not by every caller in the middle of it:
+ * the state lane's single consumer is [dylan.playback.Orchestrator]'s inbox, whose `guard`
+ * rethrows this instead of logging and continuing. It is a *throw* in every build — there is no
+ * `assert` here that compiles out — and the only place it may be caught is a boundary that also
+ * ends the lane.
  */
 class LaneViolation(
     message: String,

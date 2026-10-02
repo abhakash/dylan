@@ -302,4 +302,104 @@ class MapperFixturesTest {
         assertEquals(Quality.BITRATE_320, Quality.of(320))
         assertEquals(Quality.BITRATE_128, Quality.of(160))
     }
+
+    // ── totality: the mapper may not throw, and may not drop silently ──────────────────────────
+
+    /**
+     * `JsonElement.jsonPrimitive` **throws** `IllegalArgumentException` on an object or an array,
+     * and `image` is declared untyped on the DTO precisely because the API has shipped
+     * `string → object → null`. So an object-shaped `image` (or `duration`, or a `total` that
+     * arrived as an object) did not cost one card: the exception escaped `decodeSongPage`, and from
+     * there `mapOnIo` and `searchPage` — past the `CatalogResult` contract that exists to make
+     * failures *values*. The whole page went with it.
+     */
+    @Test
+    fun anObjectShapedCardFieldCostsNoCardsAndThrowsNothing() {
+        val rows =
+            dylan.provider.saavn.decodeSongPage(
+                """{"total":"2","start":"1","results":[
+                  {"id":"a","title":"A","type":"song","image":{"150x150":"https://c.saavncdn.com/a-150x150.jpg"},
+                   "more_info":{"duration":"10"}},
+                  {"id":"b","title":"B","type":"song","image":{"150x150":"https://c.saavncdn.com/b-150x150.jpg"},
+                   "more_info":{"duration":{"seconds":200}}}
+                ]}""",
+                "test",
+                1,
+            )
+        assertEquals(listOf("A", "B"), rows.items.items.map { it.title }, "neither card may be lost: ${rows.drift}")
+        val first = rows.items.items.first()
+        assertEquals("https://c.saavncdn.com/a-150x150.jpg", first.artUrl150)
+        assertEquals(
+            "https://c.saavncdn.com/a-500x500.jpg",
+            first.artUrl500,
+            "the object shape still carries a usable picture, not a blank one",
+        )
+        assertFalse(durationKnown(rows.items.items[1].durationS), "an object duration is unknown, not zero-length")
+        assertTrue(
+            rows.drift.any { it.reason == dylan.provider.saavn.DURATION_UNPARSED },
+            "…and says so: ${rows.drift}",
+        )
+    }
+
+    /** The same shape on an envelope field: an unreadable `total` falls back, it does not throw. */
+    @Test
+    fun anObjectShapedEnvelopeFieldFallsBackInsteadOfThrowing() {
+        val rows =
+            dylan.provider.saavn.decodeSongPage(
+                """{"total":{"n":5},"start":"1","results":[{"id":"a","title":"A","more_info":{"duration":"10"}}]}""",
+                "test",
+                1,
+            )
+        assertEquals(1, rows.items.items.size)
+        assertEquals(1L, rows.items.total, "an unreadable total falls back to what we delivered")
+    }
+
+    /**
+     * A short page must always say so.
+     *
+     * `coerceInputValues` means `"id": null` no longer fails the *decode* — it becomes `""` — so the
+     * card died in the mapper's identity guard, where nothing recorded it. The page came back one row
+     * short with an **empty** drift list: byte-identical to a page the origin really sent that way,
+     * which is the exact indistinguishability `CatalogResult.Ok(drift)` exists to remove. (The
+     * `"id": null` fixture the existing test used happened to also carry `"more_info": null`, so it
+     * was counted by the NO_MORE_INFO branch and never reached this one.)
+     */
+    @Test
+    fun aCardWithNoIdentityIsDriftNotASilentDrop() {
+        val rows =
+            dylan.provider.saavn.decodeSongPage(
+                """{"total":"3","start":"1","results":[
+                  {"id":null,"title":"No id","type":"song","more_info":{"duration":"10"}},
+                  {"id":"b","title":"","type":"song","more_info":{"duration":"10"}},
+                  {"id":"c","title":"C","type":"song","more_info":{"duration":"10"}}
+                ]}""",
+                "test",
+                1,
+            )
+        assertEquals(listOf("C"), rows.items.items.map { it.title })
+        assertEquals(
+            2,
+            rows.drift.count { it.reason == dylan.provider.saavn.BLANK_IDENTITY },
+            "both unusable cards must be named: ${rows.drift}",
+        )
+    }
+
+    /** The same hole in the mini path, which is where suggestion and top-search rows come from. */
+    @Test
+    fun aMiniCardWithNoIdentityIsDriftToo() {
+        val rows =
+            dylan.provider.saavn.decodeMiniPage(
+                """{"total":"2","start":"1","results":[
+                  {"id":null,"title":"No id","type":"song"},
+                  {"id":"c","title":"C","type":"song"}
+                ]}""",
+                "album",
+                "test",
+                1,
+            )
+        assertTrue(
+            rows.drift.any { it.reason == dylan.provider.saavn.BLANK_IDENTITY },
+            "a mini that cannot be keyed must say so: ${rows.drift}",
+        )
+    }
 }

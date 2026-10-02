@@ -3,13 +3,19 @@
 -- and add the indexes the eviction, GC and trim queries were missing.
 --
 -- Both rebuilt tables are rebuilt rather than ALTERed because the new CHECK constraints cannot
--- be added to an existing table. cached_files is copied column-for-column, and the pin invariant
--- is repaired on the way in: v0 allowed pinned=1 with a NULL pinned_at_ms (and the mirror),
--- which is the phantom pin of §3.9 that nothing ever cleared.
+-- be added to an existing table. cached_files is copied row-for-row and column-for-column, with
+-- every value the new CHECKs cannot represent repaired on the way in: the pin invariant (v0
+-- allowed pinned=1 with a NULL pinned_at_ms and the mirror — the phantom pin of §3.9 that nothing
+-- ever cleared) and the four new CHECKs themselves, which v0 enforced on nothing.
 --
 -- 1.sqm is executed verbatim by Schema.migrate, so it must be dialect-valid SQL and must never
--- fail on real v0 data. Every COPY is therefore total: no filter, no CASE that can violate the
--- new CHECK, no NOT NULL on a column v0 allowed to be NULL.
+-- fail on real v0 data. Every COPY is therefore total: each copied column is either nullable in
+-- the target, or clamped so it cannot violate a new CHECK. Both halves of that are load-bearing,
+-- because a violation here raises a CHECK error and aborts the chain *before* the DROP TABLEs
+-- below — nothing is wiped, `setUserVersion` never runs, every later open re-runs the identical
+-- chain and fails identically, and the install is permanently unopenable. A partial migration is
+-- strictly worse than a rejected one, so this file clamps rather than filters: every v0 row
+-- survives, with the unrepresentable value repaired to the nearest legal one.
 
 CREATE TABLE library (
   provider     TEXT NOT NULL,
@@ -33,8 +39,41 @@ CREATE TABLE library (
   CHECK ((pinned = 0) = (pinned_at_ms IS NULL))
 );
 
+-- Totality against the new foreign key: this chain runs with foreign keys ON (the JVM factory
+-- supplies them as driver *properties*, which is the only form that survives SQLDelight's
+-- transaction and the JDBC pool), so the COPY below enforces the new library -> songs foreign
+-- key. A v0 store can hold a cached_files row whose song is gone — that is exactly what
+-- `deleteOrphanLibrary` exists to repair, because v0 only enforced the cascade on connections
+-- that happened to have the pragma on. Left in place it aborts the migration BEFORE
+-- `DROP TABLE cached_files`, so the file is not wiped and every subsequent open re-runs this same
+-- chain and fails identically: the install is permanently unopenable. An orphan row is
+-- unreachable garbage — the file it described is deleted by the next sweep as an orphan anyway —
+-- so it is dropped here rather than allowed to wedge the database. This is the only statement in
+-- the file that removes a row, and it is the only hazard a filter is the right answer for.
+DELETE FROM cached_files
+ WHERE NOT EXISTS (SELECT 1 FROM songs s
+                    WHERE s.provider = cached_files.provider AND s.song_id = cached_files.song_id);
+
+-- The second totality hazard, and the one the header cannot enumerate: v0's cached_files had
+-- none of library's four CHECKs (`bytes >= 0`, `bitrate > 0`, `ext <> ''`, `play_count >= 0`),
+-- which is the entire reason the table is rebuilt rather than ALTERed. Those columns cannot be
+-- added to an existing table, so a v0 row holding `bitrate = 0` or `ext = ''` copied verbatim
+-- raises a CHECK violation and the migration dies on the statement below — before
+-- `DROP TABLE cached_files`, hence before anything is wiped and before the version is set. The
+-- same wedging the FK hazard above produces, and reachable for the same reason: the v0 app
+-- enforced none of these, so real stores contain them.
+--
+-- Clamp rather than filter, exactly like the pin repair in the same statement: every row survives
+-- and an out-of-range value becomes the nearest legal one. `bytes` and `play_count` cannot be
+-- negative in any sense the rest of the app can use (one is a sum, one is a counter), `bitrate`
+-- must name a real tier, and an empty `ext` is an unknown container, which is the column's own
+-- DEFAULT.
 INSERT INTO library(provider, song_id, bitrate, ext, bytes, cached_at_ms, last_used_ms, play_count, pinned, pinned_at_ms)
-SELECT provider, song_id, bitrate, ext, bytes, cached_at_ms, last_used_ms, play_count,
+SELECT provider, song_id,
+       MAX(1, bitrate),
+       CASE WHEN ext = '' THEN 'm4a' ELSE ext END,
+       MAX(0, bytes), cached_at_ms, last_used_ms,
+       MAX(0, play_count),
        CASE WHEN pinned = 1 THEN 1 ELSE 0 END,
        CASE WHEN pinned = 1 THEN COALESCE(pinned_at_ms, cached_at_ms) ELSE NULL END
   FROM cached_files;

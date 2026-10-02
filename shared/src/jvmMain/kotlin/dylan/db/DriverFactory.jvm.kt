@@ -102,8 +102,33 @@ actual class DriverFactory(
         }
     }
 
+    /**
+     * Positive evidence of corruption, or nothing.
+     *
+     * Two things make this more than `verdict != "ok"`:
+     *
+     * 1. A probe that could not *run* used to return `true`. It cannot open the file, so it has
+     *    learned nothing about the bytes — and returning `true` inverted the policy this method
+     *    exists to enforce. With the opt-in set, every transient condition (a locked file, a full
+     *    disk, a briefly unavailable mount) became "delete the user's favourites, history and
+     *    cache". It now returns `false` and the original open failure propagates with the library
+     *    intact, which is the direction this class was rewritten to fail in.
+     * 2. But *some* failures ARE evidence: a file whose header is not a database reports
+     *    `SQLITE_NOTADB` and a structurally broken one reports `SQLITE_CORRUPT`, and neither can be
+     *    produced by a healthy file. Those still wipe. The line is between "the bytes are wrong"
+     *    and "the bytes could not be reached", and only the former justifies deleting them.
+     *
+     * A schema mismatch deliberately falls on the *keep* side: `PRAGMA integrity_check` is a
+     * content check, and a database whose `user_version` is simply wrong is a perfectly healthy
+     * file. Measured, not assumed — see `DriverFactoryWipeGateTest`.
+     */
     private fun isCorrupt(): Boolean {
-        val driver = JdbcSqliteDriver("jdbc:sqlite:$dbPath", connectionProperties())
+        val driver =
+            runCatching { JdbcSqliteDriver("jdbc:sqlite:$dbPath", connectionProperties()) }
+                .getOrElse {
+                    log.e("db", "integrity_check could not open $dbPath: ${it.message}")
+                    return false
+                }
         return try {
             val verdict =
                 driver
@@ -121,11 +146,35 @@ actual class DriverFactory(
                 true
             }
         } catch (e: Exception) {
-            log.e("db", "integrity_check could not run: ${e.message}")
-            true
+            if (isContentCorruption(e)) {
+                log.e("db", "integrity_check reports a corrupt file: ${e.message}")
+                true
+            } else {
+                log.e("db", "integrity_check could not run, treating the file as intact: ${e.message}")
+                false
+            }
         } finally {
-            driver.close()
+            runCatching { driver.close() }
         }
+    }
+
+    /**
+     * True only when the failure says the *file* is wrong, not when it says the file could not be
+     * reached. A bad header or a broken b-tree is evidence; `BUSY`, `LOCKED`, `CANTOPEN`,
+     * `READONLY`, `PERM`, `IOERR`, `FULL`, `NOMEM` are statements about the environment, and none
+     * of them justifies deleting a library.
+     *
+     * Matched on the driver's message rather than on `org.sqlite.SQLiteException.resultCode`:
+     * `sqlite-jdbc` is a transitive dependency (reached through `sqldelight`'s JDBC driver), so its
+     * types are not on this module's compile classpath. The two codes below are the only ones whose
+     * verdict is a fact about the file's contents, and SQLite's messages are stable and specific.
+     */
+    private fun isContentCorruption(e: Exception): Boolean {
+        val msg = e.message.orEmpty()
+        return "SQLITE_NOTADB" in msg ||
+            ("SQLITE_CORRUPT" in msg) ||
+            ("file is not a database" in msg) ||
+            ("database disk image is malformed" in msg)
     }
 
     private fun userVersion(driver: SqlDriver): Long = pragmaInt(driver, "PRAGMA user_version")

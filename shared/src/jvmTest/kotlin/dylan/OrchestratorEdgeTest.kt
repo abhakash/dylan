@@ -51,6 +51,7 @@ import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 internal class GatedProvider : MusicProvider {
@@ -93,6 +94,7 @@ abstract class OrchestratorEdgeFixture {
     internal lateinit var bulk: HttpClient
     internal lateinit var settings: SettingsStore
     internal val protectedKeys = MutableStateFlow<Set<SongKey>>(emptySet())
+
     internal var mockBody: ByteArray = ByteArray(0)
     internal var mockStatus: HttpStatusCode = HttpStatusCode.OK
 
@@ -417,6 +419,70 @@ class OrchestratorEdgeTest : OrchestratorEdgeFixture() {
             fakePlayer.script(EngineEvent.TrackChanged(fakePlayer.upNext.value!!.itemId, TransitionReason.AUTO))
             val advanced = awaitPhase { it.current?.key?.songId == "b" }
             assertTrue(advanced.phase is dylan.model.Phase.Playing)
+        }
+
+    /**
+     * `PlayNext` / `AddLast` from a cold start (nothing playing, empty queue) must queue the row.
+     *
+     * It used to throw `QueueInvariantViolation` — `PlayerState.validateShape` requires `index == -1`
+     * exactly when the queue is empty, and the commit kept the inherited `-1` against a queue of
+     * one — and `guard` caught, logged and discarded it, so the button silently did nothing. The
+     * phase must stay `Idle`: queueing a track is not a request to play it, and the engine holds
+     * no window at that point, so claiming a transport here would be a lie with no way to fulfil it.
+     */
+    @Test
+    fun queueingTheFirstTrackFromAColdStartTakes() {
+        runBlocking {
+            val ops =
+                listOf(
+                    "z" to dylan.playback.Intent.PlayNext(song("z")),
+                    "w" to dylan.playback.Intent.AddLast(song("w")),
+                )
+            for ((id, intent) in ops) {
+                seedCached(id)
+                orchestrator.submit(intent)
+                val s = awaitPhase { it.queue.isNotEmpty() }
+                assertEquals(
+                    listOf(id),
+                    s.queue.map { it.key.songId },
+                    "${intent::class.simpleName} must queue the row",
+                )
+                assertEquals(0, s.index, "the first row of an empty queue is the current one")
+                assertNotNull(s.current, "…and it is the state machine's current track")
+                assertTrue(s.phase is dylan.model.Phase.Idle, "queueing a track must not start playback")
+                // The throw used to be swallowed by `guard`, so prove the inbox is still live
+                // afterwards: an unrelated intent must still take effect.
+                orchestrator.submit(dylan.playback.Intent.CycleRepeat)
+                awaitPhase { it.repeat == dylan.model.Repeat.ALL }
+                // Return to a cold queue for the next intent under test.
+                orchestrator.submit(dylan.playback.Intent.RemoveAt(0))
+                awaitPhase { it.queue.isEmpty() }
+            }
+        }
+    }
+
+    /**
+     * `ClearUpNext` must empty the **engine's** up-next slot, not just the state queue.
+     *
+     * `refreshUpNext` returned early when there was nothing to join, so it never issued the
+     * `replaceUpNext(null)` that drops the slot. The state said "one track" while the engine still
+     * held the removed one in slot 1, and rolled onto it when the current track ended — playing
+     * exactly the track the user had just cleared.
+     */
+    @Test
+    fun clearUpNextDropsTheTrackFromTheEngineWindowToo() =
+        runBlocking {
+            seedCached("a")
+            seedCached("b")
+            seedCached("c")
+            orchestrator.submit(PlayNow(listOf(song("a"), song("b"), song("c")), 0))
+            awaitPhase { it.phase is dylan.model.Phase.Playing }
+            assertEquals(2, fakePlayer.preparedWindows.last().size, "precondition: a 2-slot window")
+            orchestrator.submit(dylan.playback.Intent.ClearUpNext)
+            val cleared = awaitPhase { it.queue.size == 1 }
+            assertEquals(listOf("a"), cleared.queue.map { it.key.songId }, "the state queue is truncated")
+            withTimeout(EMPTY_UP_NEXT_MS) { while (fakePlayer.windowSize() > 1) delay(20) }
+            assertEquals(1, fakePlayer.windowSize(), "the engine's up-next slot must be emptied too")
         }
 
     @Test
@@ -762,6 +828,51 @@ class OrchestratorRecoveryTest : OrchestratorEdgeFixture() {
             provider.gate.complete(Unit)
         }
 
+    /**
+     * A restore supersedes whatever was resolving, exactly as a `PlayNow` does.
+     *
+     * `restore()` replaced the whole queue without going through `bumpGeneration()`, so the
+     * abandoned `ensureReady` stayed armed against a generation the restore never invalidated. When
+     * its own download then *failed*, the skip path walked the freshly restored queue and advanced
+     * the user off the track they had just been handed. Here the restored head is deliberately the
+     * long one and the successor short, so a skip is unmistakable.
+     */
+    @Test
+    fun aRestoreDisarmsTheResolveItSupersedes() =
+        runBlocking {
+            seedCached("z")
+            seedCached("y")
+            val snap =
+                dylan.playback.ResumeSnapshot(
+                    items =
+                        listOf(
+                            dylan.playback.ItemRef("saavn", "z"),
+                            dylan.playback.ItemRef("saavn", "y"),
+                        ),
+                    index = 0,
+                    posMs = 0L,
+                    playedAtMs = cfg.clock.nowMs(),
+                )
+            db.dylanQueries.putSetting("resume", dylan.playback.encodeSnapshot(snap))
+            provider.gate = CompletableDeferred()
+            orchestrator.submit(PlayNow(listOf(song("a")), 0))
+            awaitPhase { it.phase is dylan.model.Phase.Downloading || it.phase is dylan.model.Phase.Resolving }
+            orchestrator.restoreFromSnapshot()
+            val restored = awaitPhase { it.current?.key?.songId == "z" }
+            assertEquals(listOf("z", "y"), restored.queue.map { it.key.songId }, "the restore must own the queue")
+            // The abandoned resolve's own download now fails: a body the container sniff rejects.
+            mockBody = ByteArray(1_000).also { it[0] = 0x58 }
+            provider.gate.complete(Unit)
+            delay(RESTORE_DISARM_SETTLE_MS)
+            val after = orchestrator.state.value
+            assertEquals(
+                "z",
+                after.current?.key?.songId,
+                "a superseded resolve must not skip the restored track when its own download fails",
+            )
+            assertEquals(listOf("z", "y"), after.queue.map { it.key.songId }, "…nor edit the restored queue")
+        }
+
     /** Task 4.5: `restore` used to keep `shuffleOn` after `sanitizeSnapshot` dropped a stale order. */
     @Test
     fun aRestoredShuffleWithoutAPermutationIsNavigableAgain() =
@@ -850,6 +961,53 @@ class OrchestratorRecoveryTest : OrchestratorEdgeFixture() {
                     "old=${oldNs / 1_000_000}ms new=${newNs / 1_000_000}ms",
             )
         }
+
+    /**
+     * H6. `guard` used to `runCatching` every handler, so a `QueueInvariantViolation` — documented at
+     * its declaration as "a throw, not a log line: these are programmer errors" — was logged and
+     * discarded. The tree has already hit that once: a cold-start `PlayNext` threw and the button
+     * silently did nothing.
+     *
+     * A queue violation must therefore stop the line. The violation is injected through the toast
+     * sink because that is a *realistic* throw site inside a handler (the "End of queue" path
+     * reaches the platform sink) and because it needs no production seam.
+     *
+     * Asserted as behaviour: after the violation, the state must be *unchanged* by a later intent,
+     * and the log must name the violation. Either half alone would pass against broken code — a
+     * swallowed violation logs nothing, and a lane that died for an unrelated reason would not log
+     * this. `oneFailedMessageDoesNotEndPlayback` is the control: a plain `IllegalStateException` is
+     * recoverable and the lane must survive it.
+     */
+    @Test
+    fun aQueueInvariantViolationStopsTheStateLaneInsteadOfBeingSwallowed() =
+        runBlocking {
+            rebuildGraph(AppConfig(navDebounceMs = 0L, dlBackoffBaseMs = DL_BACKOFF_MS))
+            seedCached("a")
+            seedCached("b")
+            orchestrator.submit(PlayNow(listOf(song("a"), song("b")), 0))
+            awaitPhase { it.phase is dylan.model.Phase.Playing && it.current?.key?.songId == "a" }
+            orchestrator.submit(dylan.playback.Intent.Next)
+            awaitPhase { it.current?.key?.songId == "b" && it.phase is dylan.model.Phase.Playing }
+
+            // End of the queue: the path that reaches the platform sink, which violates.
+            orchestrator.toast = { throw dylan.model.QueueInvariantViolation("injected: sink is inside the handler") }
+            orchestrator.submit(dylan.playback.Intent.Next)
+            delay(FAILED_MESSAGE_SETTLE_MS)
+
+            val stopped = orchestrator.state.value
+            orchestrator.toast = null
+            orchestrator.submit(dylan.playback.Intent.CycleRepeat)
+            delay(FAILED_MESSAGE_SETTLE_MS)
+            assertEquals(
+                stopped,
+                orchestrator.state.value,
+                "a later intent still took effect — the violation was swallowed and the lane kept consuming",
+            )
+            assertTrue(
+                testLog.dump().any { it.msg.contains("INVARIANT VIOLATION") },
+                "the violation must be reported loudly, not logged as an ordinary handler failure",
+            )
+        }
 }
 
 private const val DL_BACKOFF_MS = 5L
@@ -857,6 +1015,12 @@ private const val DL_BACKOFF_MS = 5L
 /** See `DownloadEngineTest`: the breaker cooldown is policy; no test here asserts a duration. */
 private const val DL_COOLDOWN_MS = 5L
 private const val FAILED_MESSAGE_SETTLE_MS = 300L
+
+/** Bound on `ClearUpNext`'s side-channel `refreshUpNext`, not a sleep: a pass returns at once. */
+private const val EMPTY_UP_NEXT_MS = 5_000L
+
+/** The abandoned resolve's failure path: a DB hop, a transfer, and the skip decision. */
+private const val RESTORE_DISARM_SETTLE_MS = 2_000L
 private const val DETACHED_SETTLE_MS = 400L
 private const val RESUME_SETTLE_MS = 400L
 private const val SETTLE_SETTLE_MS = 350L

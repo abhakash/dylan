@@ -543,6 +543,22 @@ struct AlbumScreen: View {
                         }
                     }
                     .padding(DylanTokens.s16)
+                    // There is no NavigationStack anywhere in this app's hierarchy — RootView swaps
+                    // tab content — so `.navigationBarBackButtonHidden` and the `ToolbarItem` at the
+                    // bottom of this view are both no-ops with no container to resolve them, and the
+                    // album cover had NO back affordance at all. Rendered in the content instead;
+                    // the toolbar item is kept for whenever a container is introduced.
+                    .overlay(alignment: .topLeading) {
+                        Button(action: onBack) {
+                            Image(systemName: "chevron.left")
+                                .font(.system(size: 20, weight: .semibold))
+                                .foregroundStyle(DylanTokens.textPrimary)
+                                .frame(width: 44, height: 44)
+                                .contentShape(Rectangle())
+                        }
+                        .accessibilityLabel("Back")
+                        .padding(DylanTokens.s8)
+                    }
                 }
 
                 ForEach(Array(songs.enumerated()), id: \.element.key.token) { i, song in

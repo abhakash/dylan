@@ -4,6 +4,7 @@ import dylan.model.MiniEntity
 import dylan.model.SongKey
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
@@ -69,6 +70,23 @@ internal fun permaArtistToken(permaUrl: String?): String? {
 }
 
 // ── title normalisation ──────────────────────────────────────────────────────────────────────
+
+/**
+ * Artwork from both shapes the origin ships: a URL string, and `{"150x150": url}`.
+ *
+ * Kept separate from the general "read a primitive" rule because the object shape is *meaningful*
+ * here rather than garbage: the card decodes, and the only thing lost by dropping it is the picture.
+ * `str()` returns null for it (it must — a general field has no object shape to interpret), which
+ * would silently blank every artwork on such a payload, and `jsonPrimitive` — which `str()` used to
+ * call — **throws** on it.
+ */
+internal fun artUrlOf(el: JsonElement?): String =
+    when (el) {
+        null, is JsonNull -> ""
+        is JsonPrimitive -> el.contentOrNull.orEmpty()
+        is JsonObject -> el.values.firstNotNullOfOrNull { (it as? JsonPrimitive)?.contentOrNull }.orEmpty()
+        else -> ""
+    }
 
 private val WHITESPACE_RUN = Regex("\\s+")
 

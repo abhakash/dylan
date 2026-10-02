@@ -5,12 +5,18 @@ import dylan.diag.LogBuffer
 import dylan.diag.LogLevel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeoutOrNull
 import okio.FileSystem
+import okio.ForwardingFileSystem
+import okio.Path
 import okio.Path.Companion.toPath
+import okio.Sink
 import okio.buffer
 import okio.use
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
@@ -112,7 +118,79 @@ class FileLogSinkTest {
         }
         return text
     }
+
+    /**
+     * M6: `close()` must be serialised with the writer, not merely concurrent with it.
+     *
+     * `out` and `written` are plain fields and `writeEntryLocked` is the only code allowed to touch
+     * them, so every caller of it takes `writeMutex`. `flush` and `drainLoop` did; `close` did not —
+     * it shut the handle and nulled `out` from whatever thread called it. A close landing between the
+     * writer's read of `out` and its `s.write` closed the handle the writer was about to use; the
+     * write threw, and the `runCatching` in `writeEntryLocked` swallowed it, so the line is simply
+     * absent from the trail.
+     *
+     * The interleaving is a schedule, not a timing hope. [BlockingOpenFileSystem] parks the writer
+     * *inside* `appendingSink` — the first statement of a line's write, and a point where the writer
+     * holds `writeMutex` and no okio-internal monitor, so a lock-taking `close()` genuinely has to
+     * wait and a lock-ignoring one returns at once. The assertion that `close()` has not completed is
+     * the finding; the line still landing afterwards is the control that the fix costs nothing.
+     */
+    @Test
+    fun closeWaitsForALineBeingWrittenRatherThanClosingTheHandleUnderIt() =
+        kotlinx.coroutines.runBlocking {
+            val gate = OpenGate()
+            val sink = FileLogSink(BlockingOpenFileSystem(fs, gate), dir.toPath(), sinkScope)
+            sink.accept(entry("the line that must not be lost"))
+
+            assertTrue(
+                gate.opening.await(AWAIT_CEILING_MS, TimeUnit.MILLISECONDS),
+                "precondition: the writer is inside a line, holding writeMutex",
+            )
+            val closing = sinkScope.async { sink.close() }
+
+            // Ample opportunity to (wrongly) complete while the writer is parked.
+            withTimeoutOrNull(CLOSE_SETTLE_MS) { closing.await() }
+            assertTrue(
+                closing.isActive,
+                "close() returned while a line was being written — it does not take writeMutex",
+            )
+
+            gate.release.countDown()
+            withTimeoutOrNull(AWAIT_CEILING_MS) { closing.await() }
+            assertTrue(closing.isCompleted, "close() must complete once the writer is done")
+            await("the line in dylan.log.0") { read("dylan.log.0")?.contains("the line that must not be lost") == true }
+            assertEquals(
+                1,
+                read("dylan.log.0")!!.lineSequence().count { "the line that must not be lost" in it },
+                "the parked write must complete against the live handle, exactly once",
+            )
+        }
+}
+
+/**
+ * Parks the writer at the first statement of a line's write until the test releases it, so a
+ * concurrent `close()` has a genuinely in-flight line to collide with and the collision is decided by
+ * `writeMutex` rather than by okio's own sink lock.
+ */
+private class BlockingOpenFileSystem(
+    private val backing: FileSystem,
+    private val gate: OpenGate,
+) : ForwardingFileSystem(backing) {
+    override fun appendingSink(
+        path: Path,
+        mustExist: Boolean,
+    ): Sink {
+        gate.opening.countDown()
+        check(gate.release.await(AWAIT_CEILING_MS, TimeUnit.MILLISECONDS)) { "the test never released the writer" }
+        return backing.appendingSink(path, mustExist)
+    }
+}
+
+private class OpenGate {
+    val opening = CountDownLatch(1)
+    val release = CountDownLatch(1)
 }
 
 private const val AWAIT_CEILING_MS = 10_000L
 private const val POLL_MS = 25L
+private const val CLOSE_SETTLE_MS = 300L

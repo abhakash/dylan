@@ -111,17 +111,23 @@ final class SearchStore {
 
     /// One mixed, cross-type ranked list (mirrors Android Hit): songs + albums +
     /// artists share relevance bands so an album never hides below its songs.
+    ///
+    /// The ORDER comes from shared `SearchRank.relevanceOrder` (Android's SearchScreen builds the
+    /// same order from the same comparator). This used to sort here against a private `rankBand`
+    /// mirror, whose normalisation differed from the shared one — see `IosGraph.hitOrder`.
     var mergedHits: [SearchHit] {
-        let q = (submitted ?? "").lowercased()
-        var all: [(band: Int, order: Int, hit: SearchHit)] = []
-        var order = 0
-        for s in results { all.append((rankBand(q, s.title), order, .song(s))); order += 1 }
-        for m in albumResults { all.append((rankBand(q, m.title), order, .album(m))); order += 1 }
-        for m in artistResults { all.append((rankBand(q, m.title), order, .artist(m))); order += 1 }
-        return all.sorted {
-            if $0.band != $1.band { return $0.band < $1.band }
-            return $0.order < $1.order
-        }.map(\.hit)
+        let flat: [SearchHit] = results.map(SearchHit.song) + albumResults.map(SearchHit.album) + artistResults.map(SearchHit.artist)
+        guard let g = graph else { return flat }
+        let order = intOrder(g.hitOrder(
+            query: submitted ?? "",
+            songTitles: results.map(\.title),
+            albumTitles: albumResults.map(\.title),
+            artistTitles: artistResults.map(\.title)
+        ))
+        // A short or malformed permutation degrades to server order, which is what an empty
+        // `submitted` already yields — never a partial list.
+        guard order.count == flat.count else { return flat }
+        return order.map { flat[$0] }
     }
 
     var hasMore: Bool {
@@ -152,19 +158,26 @@ final class SearchStore {
                   answered.count >= 2 else { return }
             // Server repeats entries across buckets/keystrokes [verified: 7.har] — dedupe (D7).
             // Ranked like submit sections: exact/prefix title matches float above fuzzy ones.
+            // The RANK is shared (Android SearchScreen ranks with the same comparator); the dedupe
+            // key stays here because it needs entity identity, not just the title.
             var seen = Set<String>()
-            let q = answered.lowercased()
-            self.suggestions = list.filter { entry -> Bool in
+            let kept = list.filter { entry -> Bool in
                 let id = entry.title + (entry.songKey?.songId ?? entry.albumId ?? "")
                 if seen.contains(id) { return false }
                 seen.insert(id)
                 return true
-            }.enumerated().sorted { lhs, rhs in
-                let bl = rankBand(q, lhs.element.title)
-                let br = rankBand(q, rhs.element.title)
-                if bl != br { return bl < br }
-                return lhs.offset < rhs.offset // stable: server order survives within a band
-            }.map(\.element)
+            }
+            let order = intOrder(g.hitOrder(
+                query: answered,
+                songTitles: kept.map(\.title),
+                albumTitles: [],
+                artistTitles: []
+            ))
+            guard order.count == kept.count else {
+                self.suggestions = kept
+                return
+            }
+            self.suggestions = order.map { kept[$0] }
         }
     }
 
@@ -304,16 +317,15 @@ enum SearchHit {
     case artist(KMiniEntity)
 }
 
-/// Mirrors shared SearchRank.band: exact (0) → prefix (1) → contains (2) → other (3).
-/// Swift stdlib sort is stable in practice for this size; ties keep server order.
-func rankBand(_ query: String, _ title: String) -> Int {
-    let q = query.trimmingCharacters(in: .whitespaces).lowercased()
-    let t = title.trimmingCharacters(in: .whitespaces).lowercased()
-    if q.isEmpty || t.isEmpty { return 3 }
-    if t == q { return 0 }
-    if t.hasPrefix(q) { return 1 }
-    if t.contains(q) { return 2 }
-    return 3
+/// Kotlin `List<Int>` crosses as an untyped NSArray of `KotlinInt` (bridge rule A6), so the
+/// permutation has to be unwrapped element-wise. A wrong shape reads as an empty list, which the
+/// two call sites degrade to server order rather than rendering a partial ranked list.
+private func intOrder(_ raw: Any?) -> [Int] {
+    guard let raw else { return [] }
+    if let typed = raw as? [KotlinInt] { return typed.map(\.intValue) }
+    if let typed = raw as? [Int32] { return typed.map(Int.init) }
+    assertionFailure("bridge contract: hitOrder returned \(type(of: raw)), not a list of Int")
+    return (raw as? [KotlinInt])?.map(\.intValue) ?? []
 }
 
 @MainActor
@@ -354,6 +366,14 @@ final class LibraryStore {
     private(set) var jumpBack: [KSong] = []
     private(set) var totalBytes: Int64 = 0
 
+    /// Identity set of the library, published by [loadDownloads] — the only writer of `downloads`.
+    ///
+    /// It exists because every row asks "is this cached?" on every body evaluation: as a computed
+    /// `Set(downloads.map …)` that is one allocation *per row per render*, and at the 300-file cap
+    /// `DownloadsScreen` renders 300 rows, so one pass was ~90k key comparisons plus 300 throwaway
+    /// sets. Same membership, computed once per refresh instead of once per row.
+    private(set) var cachedTokens: Set<String> = []
+
     func refresh(_ g: KGraph) async {
         async let d: Void = loadDownloads(g)
         async let f: Void = loadFavorites(g)
@@ -364,6 +384,7 @@ final class LibraryStore {
     func loadDownloads(_ g: KGraph) async {
         downloads = await g.downloadsLibrary()
         totalBytes = downloads.reduce(0) { $0 + $1.bytes }
+        cachedTokens = Set(downloads.map { $0.song.key.token })
     }
 
     func loadFavorites(_ g: KGraph) async {

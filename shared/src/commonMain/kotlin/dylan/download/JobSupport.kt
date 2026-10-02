@@ -5,6 +5,7 @@ package dylan.download
 import dylan.config.AppConfig
 import dylan.model.Quality
 import dylan.model.SongKey
+import dylan.util.fsRename
 import kotlin.concurrent.atomics.AtomicReference
 
 /**
@@ -151,9 +152,10 @@ internal fun renamePart(
     from: String,
     to: String,
     log: dylan.diag.LogBuffer,
+    rename: (String, String) -> Unit = ::fsRename,
 ): Boolean =
     runCatching {
-        dylan.util.fsRename(from, to)
+        rename(from, to)
         true
     }.onFailure { log.e("dl", "rename failed: ${it.message}") }
         .getOrDefault(false)

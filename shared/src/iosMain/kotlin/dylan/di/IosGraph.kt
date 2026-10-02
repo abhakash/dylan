@@ -225,6 +225,23 @@ class IosGraph private constructor(
     fun shuffleOrderAsList(state: PlayerState): List<Int>? = state.shuffleOrder?.toList()
 
     /**
+     * Submit-list order: songs ++ albums ++ artists, ranked by the one shared relevance comparator.
+     *
+     * Swift used to sort these itself against a private `rankBand` mirror of `SearchRank.band`. The
+     * mirror normalised with `trim().lowercased()` while the shared one collapses internal
+     * whitespace runs and trims per `normTitle`, so a title like `"Tera Mera Rishta -  New Version"`
+     * (a committed fixture, double space) ranked as OTHER on iOS and CONTAINS on Android — the two
+     * platforms could genuinely disagree about which row was "best match". Positions, not rows, come
+     * back across the bridge so the mixed `SearchHit` list stays a Swift-side concern.
+     */
+    fun hitOrder(
+        query: String,
+        songTitles: List<String>,
+        albumTitles: List<String>,
+        artistTitles: List<String>,
+    ): List<Int> = dylan.search.relevanceOrder(query, songTitles + albumTitles + artistTitles)
+
+    /**
      * Phase/repeat as stable lowercase strings — Swift never spells Kotlin sealed-subclass or
      * enum-case names, so cinterop label mangling can never bite the UI layer.
      */

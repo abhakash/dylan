@@ -78,6 +78,15 @@ actual class DriverFactory(
         }
     }
 
+    /**
+     * Positive evidence of corruption, or nothing.
+     *
+     * A probe that *could not run* is not evidence: a locked file, an unavailable mount or a full
+     * disk says nothing about the bytes. Returning `true` here inverted the policy the class was
+     * rewritten to enforce — with the opt-in set, every transient I/O condition became "delete the
+     * user's favourites, history and cache". Returning `false` propagates the original open
+     * failure with the library intact, which is the safe direction to fail in.
+     */
     private fun isCorrupt(): Boolean {
         val file = ctx.getDatabasePath(DB_NAME)
         if (!file.exists()) return false
@@ -86,7 +95,7 @@ actual class DriverFactory(
                 readVerdict(file.path)
             } catch (e: Exception) {
                 log.e("db", "integrity_check could not run: ${e.message}")
-                return true
+                return false
             }
         if (verdict == "ok") return false
         log.e("db", "integrity_check: $verdict")

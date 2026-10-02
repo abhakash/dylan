@@ -1,3 +1,5 @@
+@file:OptIn(kotlin.concurrent.atomics.ExperimentalAtomicApi::class)
+
 package dylan.playback
 
 import dylan.cache.CacheManager
@@ -14,6 +16,7 @@ import dylan.model.ErrorCode
 import dylan.model.Phase
 import dylan.model.PlayerState
 import dylan.model.Quality
+import dylan.model.QueueInvariantViolation
 import dylan.model.Repeat
 import dylan.model.Song
 import dylan.model.SongKey
@@ -22,10 +25,12 @@ import dylan.repo.SettingsStore
 import dylan.repo.toSong
 import dylan.util.AppDispatchers
 import dylan.util.Lane
+import dylan.util.LaneViolation
 import dylan.util.NetClass
 import dylan.util.NetMonitor
 import dylan.util.logErr
 import kotlinx.collections.immutable.PersistentList
+import kotlinx.collections.immutable.persistentListOf
 import kotlinx.collections.immutable.toPersistentList
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -43,6 +48,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import okio.FileSystem
+import kotlin.concurrent.atomics.AtomicReference
 import kotlin.math.min
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
@@ -51,15 +57,32 @@ import kotlin.time.TimeSource
 /**
  * Routing, phases and engine-window bookkeeping.
  *
- * Every write of [PlayerState] is synchronous with respect to it: a handler reads `_state.value`
- * at the point of use, hoists its multi-suspension work into one `withContext` **before** the new
- * state is built, and publishes the result in a single assignment. No handler captures a snapshot
- * and then suspends, so there is no window in which a second message can interleave between a
- * read and the write derived from it.
+ * ## What actually makes the shared state safe
  *
- * Suspension still happens — inside `withContext(disp.on(Lane.DB))` / `withContext(disp.on(Lane.IO))` blocks that
- * return *values* the reducer then applies. What is forbidden, and absent, is a `suspend` between
- * a state read and the state write that consumes it.
+ * The old KDoc here claimed *"no handler captures a snapshot and then suspends, so there is no
+ * window in which a second message can interleave between a read and the write derived from it"*.
+ * That is not the mechanism, and it was not checkable by anything: there is no portable hook that
+ * can observe "a suspension happened between this read and that write", so a claim in that shape
+ * is a comment asserting what the code does not enforce — which is the one kind of comment that
+ * stops the next reader from looking. The real contract, all of which is structural:
+ *
+ *  * **One consumer.** The inbox is drained by a single `for (m in inbox)` coroutine on the state
+ *    lane. A suspension inside a handler therefore cannot admit a *second message*; the next
+ *    message waits for the handler to finish.
+ *  * **The interleaving that does exist is with the side channels, not with messages.**
+ *    `prepareJob` [playNow], `settleJob` [advanceOptimistic], the 10 Hz ticker, the
+ *    `downloads.states` collector and [resyncFault]'s re-prepare are *different coroutines on the
+ *    same single-permit lane*, and they write `_state`. What protects those writes is the
+ *    generation: `playGeneration` is bumped by every transition that invalidates in-flight work,
+ *    and each of those coroutines re-checks it before it publishes.
+ *  * **Every `_state` write is one assignment from a value read at the point of use.** Multi-hop
+ *    work (`prepareWindow`, `refreshUpNext`, `admitSongs`) is hoisted into one suspension that
+ *    *returns* what the reducer then applies, and the generation re-check sits between the
+ *    suspension and the write.
+ *
+ * A handler failure is handled by [guard], and the two kinds are handled differently on purpose:
+ * a recoverable one is logged and the loop continues, while an **invariant violation stops the
+ * line** — see [guard].
  */
 class Orchestrator(
     private val scope: CoroutineScope,
@@ -82,7 +105,22 @@ class Orchestrator(
     private val engineFlow = MutableStateFlow<PlayerEngine?>(null)
     val positionMs = engineFlow.flatMapLatest { it?.positionFlow ?: emptyFlow<Long>() }.conflate()
 
-    var toast: ((String) -> Unit)? = null
+    /**
+     * Platform toast sink, read from the state lane.
+     *
+     * An `AtomicReference` and not a `var`: `AppContainer.bootComponents` publishes this from the
+     * **io** lane, and every handler here reads it on the state lane. A plain field is an
+     * unsynchronised cross-lane publication of a non-null value, and the failure mode is a toast
+     * that never arrives.
+     */
+    var toast: ((String) -> Unit)?
+        get() = toastRef.load()
+        set(value) {
+            toastRef.store(value)
+        }
+
+    private val toastRef = AtomicReference<((String) -> Unit)?>(null)
+
     private var engine: PlayerEngine? = null
     private var inboxJob: Job? = null
     private var eventsJob: Job? = null
@@ -103,7 +141,6 @@ class Orchestrator(
     private var resyncStrikes = 0
     private var lastResyncItem: String? = null
     private var prefetchedForKey: SongKey? = null
-    private var currentDurationHintMs: Long? = null
     private var resumePendingMs: Long = 0L
     private var resumeAppliedGen: Long = -1L
     private var snapshotFingerprint: Long = Long.MIN_VALUE
@@ -117,6 +154,7 @@ class Orchestrator(
     private val windowPreparer = WindowPreparer(db, fs, paths, disp)
 
     private companion object {
+        const val MS_PER_SECOND = 1_000L
         val PERMANENT_SKIP_CODES =
             setOf(
                 ErrorCode.NO_SOURCE,
@@ -147,7 +185,15 @@ class Orchestrator(
     init {
         inboxJob =
             scope.launch(disp.on(Lane.STATE)) {
-                for (m in inbox) guard("inbox message") { process(m) }
+                try {
+                    for (m in inbox) guard("inbox message") { process(m) }
+                } finally {
+                    // The lane is finished — because it was disposed, or because [guard] let an
+                    // invariant violation through. Either way there is no consumer left, and
+                    // `inbox` is `UNLIMITED`, so closing it is what stops later intents from
+                    // piling up behind a dead loop. [post] reports the drop instead of throwing.
+                    inbox.close()
+                }
             }
         // E1 prompt path: push nextUp into the engine window the moment its download lands,
         // else the natural end of the current item exhausts a one-item playlist and playback dies.
@@ -176,7 +222,21 @@ class Orchestrator(
     }
 
     fun submit(intent: Intent) {
-        scope.launch(disp.on(Lane.STATE)) { inbox.send(Msg.I(intent)) }
+        scope.launch(disp.on(Lane.STATE)) { post(Msg.I(intent)) }
+    }
+
+    /**
+     * The one way onto the state lane's inbox.
+     *
+     * `trySend`, not `send`: after the loop has ended for any reason the channel is closed, and a
+     * `send` there would throw out of an unrelated coroutine — the engine's event collector, the
+     * `attachEngine`/`detachEngine` launches — turning one dead lane into a stream of exceptions
+     * nobody can act on. A closed channel means "the lane is gone", and saying so once per drop is
+     * the whole diagnostic.
+     */
+    private suspend fun post(m: Msg) {
+        val sent = inbox.trySend(m)
+        if (sent.isFailure) log.c("play", "state lane is closed; dropped ${m::class.simpleName}")
     }
 
     fun attachEngine(e: PlayerEngine) {
@@ -187,7 +247,7 @@ class Orchestrator(
             engineFlow.value = e
             eventsJob =
                 scope.launch {
-                    e.events.collect { inbox.send(Msg.E(it)) }
+                    e.events.collect { post(Msg.E(it)) }
                 }
             positionJob =
                 scope.launch {
@@ -196,20 +256,20 @@ class Orchestrator(
                         maybePrefetchAtTail()
                     }
                 }
-            inbox.send(Msg.Attach)
+            post(Msg.Attach)
         }
     }
 
     fun detachEngine() {
-        scope.launch(disp.on(Lane.STATE)) { inbox.send(Msg.Detach) }
+        scope.launch(disp.on(Lane.STATE)) { post(Msg.Detach) }
     }
 
     fun onBackground() {
-        scope.launch(disp.on(Lane.STATE)) { inbox.send(Msg.Background) }
+        scope.launch(disp.on(Lane.STATE)) { post(Msg.Background) }
     }
 
     fun restoreFromSnapshot() {
-        scope.launch(disp.on(Lane.STATE)) { inbox.send(Msg.Restore) }
+        scope.launch(disp.on(Lane.STATE)) { post(Msg.Restore) }
     }
 
     /** Terminal teardown: no inbox, no collectors, no engine. */
@@ -242,25 +302,68 @@ class Orchestrator(
         cancelPrepare()
         cancelSettle()
         windowPreparer.noteEngineCurrent(null)
-        currentDurationHintMs = null
     }
 
     /**
-     * One message, one guard. A throw from any handler used to end the `for` loop permanently, and
-     * `inbox` is `UNLIMITED`, so every later intent accumulated behind a dead consumer.
+     * One message, one guard — and two classes of failure, handled differently on purpose.
+     *
+     * **Recoverable** (an I/O error, a platform callback that throws, anything else unexpected) is
+     * logged and the loop continues. A throw used to end the `for` loop permanently, and `inbox`
+     * is `UNLIMITED`, so every later intent accumulated behind a dead consumer.
+     *
+     * **An invariant violation stops the line.** [QueueInvariantViolation] (the queue algebra,
+     * documented at its declaration as "a throw, not a log line: these are programmer errors") and
+     * [LaneViolation] (a lane assert, documented as "a correctness bug that must stop the line that
+     * caused it") are logged CRITICALLY and **rethrown**. They used to be swallowed here, which is
+     * how a cold-start `PlayNext` against an empty queue threw and *"the button silently did
+     * nothing"* — the violation was real, the class of bug was known, and the log line nobody
+     * reads was the entire response. Rethrowing ends the inbox loop, whose `finally` closes
+     * `inbox`, so there is no unbounded queue left behind a dead consumer; [post] then reports
+     * every later intent as dropped. That is deliberately the worst *user-visible* outcome and the
+     * best *diagnostic* one: a loud dead lane on a shipped build beats a player whose Next button
+     * intermittently does nothing.
      */
     private suspend fun guard(
         what: String,
         block: suspend () -> Unit,
     ) {
-        runCatching { block() }.fold(
-            onSuccess = {},
-            onFailure = { cause ->
-                if (cause is CancellationException) throw cause
-                log.c("play", "$what failed: ${cause.message}")
-                logErr("dylan-orchestrator: $what failed: $cause")
-            },
-        )
+        try {
+            block()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (queue: QueueInvariantViolation) {
+            rethrowFatal(what, queue)
+        } catch (lane: LaneViolation) {
+            rethrowFatal(what, lane)
+        } catch (swallowed: Exception) {
+            // Deliberately `Exception`, not `Throwable`: an `Error` (OOM, `StackOverflow`) is not a
+            // handler bug to be logged and shrugged off, and letting it out ends the lane the same
+            // way an invariant violation does.
+            logRecoverable(what, swallowed)
+        }
+    }
+
+    /**
+     * The one place an invariant violation is reported and rethrown, so "loud, and the lane stops"
+     * has a single definition. Returns [Nothing] because it never returns — which is also what keeps
+     * the `throw` out of [guard]'s own body and its clause count honest.
+     */
+    private fun rethrowFatal(
+        what: String,
+        t: Throwable,
+    ): Nothing {
+        log.c("play", "INVARIANT VIOLATION in $what: ${t.message} — the state lane is stopping")
+        logErr("dylan-orchestrator: INVARIANT VIOLATION in $what: $t")
+        throw t
+    }
+
+    /** The one place a recoverable handler failure is reported. */
+    private fun logRecoverable(
+        what: String,
+        t: Throwable,
+    ) {
+        log.c("play", "$what failed: ${t.message}")
+        logErr("dylan-orchestrator: $what failed: $t")
     }
 
     private suspend fun process(m: Msg) {
@@ -362,12 +465,27 @@ class Orchestrator(
         prepareJob = scope.launch(disp.on(Lane.STATE)) { guard("ensureReady") { ensureReadyAndPlay(idx, gen) } }
     }
 
+    /**
+     * The first row of an empty queue becomes the current one, because
+     * `PlayerState.validateShape` requires `index == -1` **exactly** when the queue is empty. The
+     * old `commitQueue(queue = …)` kept the inherited `index = -1`, so `PlayNext`/`AddLast` from a
+     * cold start threw `QueueInvariantViolation`, and the button silently did nothing. The phase
+     * stays `Idle`: queueing a track is not a request to play it, and claiming a transport here
+     * would `play()` an engine that holds no window.
+     *
+     * The swallowing that hid this is gone — [guard] now stops the lane on an invariant violation —
+     * so the *shape* has to hold for every queueing path, not just the one that was exercised.
+     */
     private suspend fun addToQueue(
         song: Song,
         afterCurrent: Boolean,
     ) {
         admitSongs(listOf(song))
         val s = _state.value
+        if (s.queue.isEmpty()) {
+            commitQueue(queue = persistentListOf(song), index = 0, current = song)
+            return
+        }
         val q = s.queue.toMutableList()
         val at = if (afterCurrent && s.index in -1 until q.size) s.index + 1 else q.size
         q.add(at, song)
@@ -478,15 +596,27 @@ class Orchestrator(
      * Only a transport the engine is actually holding can be clamped: while a track is still being
      * resolved the window describes the *previous* track, so its duration would clamp against the
      * wrong song.
+     *
+     * The fallback is read from `_state.value.current` **at the point of use**, not from a field
+     * cached when a window was built. `onTrackChanged` does not rebuild the window — the engine
+     * already had both items and rolled on its own — so a cached hint still described the track
+     * that had just ended, and every seek on the new track was clamped to the *previous* one's
+     * length (a 10-minute song reached from a 1-minute one could not be seeked past 1:00). Neither
+     * real engine overrides `PlayerEngine.durationMs()`, so this fallback is the only clamp in
+     * production. `durationS == 0` is the catalog's documented "unparseable" fallback, and
+     * `takeIf { it > 0L }` reads it as unknown rather than as a zero-length track.
      */
     private fun upperBoundMs(s: PlayerState): Long? {
         if (!transportable(s.phase)) return null
         // `> 0L`, not `>= 0L`: the seam answers -1 for "unknown" and the catalog's documented
         // fallback for an unparseable duration is 0, so 0 means UNKNOWN here too. Admitting it
         // would make [seek] clamp every seek on such a track to seekTo(0) — the request swallowed
-        // rather than clamped. This matches the `currentDurationHintMs` line below it.
+        // rather than clamped. This matches the `current` line below it.
         engine?.durationMs()?.takeIf { it > 0L }?.let { return it }
-        return currentDurationHintMs?.takeIf { it > 0L }
+        return s.current
+            ?.durationS
+            ?.times(MS_PER_SECOND)
+            ?.takeIf { it > 0L }
     }
 
     // ── navigation ─────────────────────────────────────────────────────────────────────────
@@ -563,6 +693,29 @@ class Orchestrator(
 
     // ── readiness ──────────────────────────────────────────────────────────────────────────
 
+    /**
+     * Cached-and-playable, or downloaded-and-playable; then `Ready`, the window, and the
+     * bookkeeping that says a track actually started.
+     *
+     * The generation is re-checked after every suspension this function owns ([awaitPlayable], and
+     * the `fetchAndVerify` hop inside it). [prepareWindow] is the one suspension it does not
+     * re-check after, and the audit read that as a live defect — but `prepareWindow`'s own
+     * post-suspension generation check means the *only* consequence of being superseded is that this
+     * caller skips the engine post; whether `onTrackStarted` then runs is settled one level up,
+     * where the generation actually moves:
+     *
+     *  * Every generation bump goes through [bumpGeneration], whose first act is `cancelPrepare()`
+     *    and `cancelSettle()` — so the tracked owners of an in-flight resolve (`prepareJob` from
+     *    [playNow], `settleJob` from [advanceOptimistic]) are cancelled by the bump and never reach
+     *    this line at all.
+     *  * The one untracked caller is [advanceToIndex], reached from [exhausted]. It runs **inside
+     *    the inbox handler**, and the state lane is single-permit: while its `prepareWindow` is
+     *    suspended on the db or io lane it has released the permit, but the only other coroutines
+     *    that can bump the generation from off-inbox are the two this paragraph just cancelled.
+     *    So no in-tree interleaving reaches [onTrackStarted] with a stale generation — the finding
+     *    is SUSPECTED, not proven, and is recorded as such rather than "fixed" behind an assertion
+     *    that cannot be made to fail.
+     */
     private suspend fun ensureReadyAndPlay(
         index: Int,
         gen: Long,
@@ -768,6 +921,9 @@ class Orchestrator(
      * the generation is re-checked immediately before the post, and [pushedUpNextId] /
      * [doneJoinedKey] are mutated **after** that check — so a superseded caller can neither post a
      * stale window nor record it as delivered.
+     *
+     * It reports nothing back: a superseded caller is indistinguishable from one that posted. See
+     * [ensureReadyAndPlay] for why that is not, in this tree, reachable with a stale generation.
      */
     private suspend fun prepareWindow(index: Int) {
         val e = engine ?: return
@@ -786,7 +942,6 @@ class Orchestrator(
         val slot1 = window.getOrNull(1)
         pushedUpNextId = slot1?.itemId
         doneJoinedKey = if (slot1 != null) next?.key else null
-        currentDurationHintMs = first.durationHintMs
         val want = s.resumePosMsFor(index)
         val hint = first.durationHintMs
         resumePendingMs = if (hint != null && hint > 0L) want.coerceAtMost(hint) else want
@@ -801,7 +956,22 @@ class Orchestrator(
     private suspend fun refreshUpNext() {
         val e = engine ?: return
         val s = _state.value
-        val next = joinableUpNext(s) ?: return
+        val next = joinableUpNext(s)
+        if (next == null) {
+            // Nothing may occupy the up-next slot any more — `Intent.ClearUpNext` truncated the
+            // queue, or the successor left it. Returning here (the old shape) left the previously
+            // pushed track in the engine's window, so "clear up next" truncated the *state* while
+            // the engine still rolled onto the track the user had just removed.
+            //
+            // Only ever a clear: never a *replace* with something, and never when there is nothing
+            // recorded as pushed. Both guards matter for iOS, whose `replaceUpNext(nil)` removes the
+            // currently-playing item.
+            if (pushedUpNextId == null) return
+            pushedUpNextId = null
+            doneJoinedKey = null
+            e.replaceUpNext(null)
+            return
+        }
         val gen = playGeneration
         val candidate = trackFor(next, gen, windowPreparer.cachedRows(listOf(next.key)))
         // Never ask the engine to replace a slot with the item it is already playing: on iOS
@@ -934,12 +1104,11 @@ class Orchestrator(
     /**
      * `Prepared` is a *buffering* event, not a transport decision: calling `play()` from it made a
      * rebuffer override a user pause and left the notification disagreeing with the app. Autoplay
-     * follows the state machine, the only place that knows the user's intent, and the resume seek
-     * is applied exactly once per generation.
+     * follows the state machine, the only place that knows the user's intent ([autoplayReady] for
+     * the Media3 ordering argument), and the resume seek is applied exactly once per generation.
      */
     private fun onPrepared(ev: EngineEvent.Prepared) {
-        val s = _state.value
-        if (s.phase is Phase.Ready) engine?.play()
+        autoplayReady()
         val pending = resumePendingMs
         resumePendingMs = 0L
         if (pending <= 0L) return
@@ -947,6 +1116,27 @@ class Orchestrator(
         resumeAppliedGen = playGeneration
         log.d("play", "resumed at ${pending}ms gen=$playGeneration item=${ev.itemId}")
         engine?.seekTo(pending)
+    }
+
+    /**
+     * `Ready → Playing` plus the `play()` that makes it audible, as one indivisible step.
+     *
+     * Both engine events that can mean "the window is ready" call this, and it is keyed on the
+     * phase, so whichever arrives first performs the transition and the second is a no-op. That
+     * ordering-independence is the point: Media3 announces the item transition for a freshly
+     * prepared window *before* it reports `STATE_READY` (`onMediaItemTransition` follows the
+     * playlist change; `onPlaybackStateChanged` follows buffering), while
+     * `FakePlayerEngine` emits `Prepared` first. A guard that only `onPrepared` owned was
+     * therefore satisfied by neither order in one of the two cases — and the real one lost:
+     * `onTrackChanged` had already promoted the phase, so `engine.play()` was never called and
+     * the very first `PlayNow` of a session left a `Playing` state over a stopped transport.
+     */
+    private fun autoplayReady() {
+        val s = _state.value
+        if (s.phase !is Phase.Ready) return
+        val k = s.phase.key
+        _state.value = s.copy(phase = Phase.Playing(k))
+        engine?.play()
     }
 
     private suspend fun onTrackChanged(ev: EngineEvent.TrackChanged) {
@@ -960,10 +1150,16 @@ class Orchestrator(
             return
         }
         if (queueKeyOf(ev.itemId) == s.current?.key) {
-            // The user removed this row from under the engine: the audible track has not changed,
-            // so only the phase is refreshed and nothing moves.
-            val k = s.current?.key
-            if (k != null) _state.value = s.copy(phase = Phase.Playing(k))
+            // The engine re-announced the item that is already `current`: the audible track has
+            // not changed, so nothing moves. Two situations land here and they need different
+            // phases — `prepareWindow` re-announces the head it just asked for (phase `Ready`,
+            // which is the autoplay trigger and must be left intact for [autoplayReady], and this
+            // is the *first* event of that pair on Media3), and the user removed this row from
+            // under the engine (phase already past `Ready`, so only the phase is refreshed).
+            autoplayReady()
+            val cur = _state.value
+            val k = cur.current?.key
+            if (k != null && cur.phase !is Phase.Ready) _state.value = cur.copy(phase = Phase.Playing(k))
             return
         }
         val idx = keyToSlot[queueKeyOf(ev.itemId)]
@@ -1216,6 +1412,15 @@ class Orchestrator(
         return h * HASH_PRIME + (resumeCandidateMs(s) / cfg.snapshotPosStepMs)
     }
 
+    /**
+     * A restore replaces the whole queue, so it supersedes whatever was resolving — the same
+     * relationship a [Intent.PlayNow] has to the pending prepare. It has to go through
+     * [bumpGeneration] for that reason, not for tidiness: without it the abandoned `ensureReady`
+     * stayed armed against a generation the restore never invalidated, and when its own download
+     * finished (or failed) it wrote over the queue the user had just been handed — a successful
+     * prepare re-prepared the restored head's window, and a *failed* one skipped the restored
+     * track forward, so a boot-time restore could drop the user onto the wrong song.
+     */
     private suspend fun restore() {
         val raw = settings.get("resume") ?: return
         val snap = decodeSnapshot(raw)
@@ -1231,7 +1436,14 @@ class Orchestrator(
                 return
             }
         log.i("restore", "restored items=${restored.queue.size} idx=${restored.index} posMs=$pos")
+        bumpGeneration()
         commit(restored)
+        // A restore lands `Paused`, and a `Paused` state with an engine attached is exactly what
+        // `onEngineAttached` primes with a window. Doing it here too covers the ordering the
+        // production boot does NOT guarantee: `restoreFromSnapshot` runs off the io lane while the
+        // media service attaches from `onCreate`, so the restore is routinely the *later* of the
+        // two and would otherwise leave a restored queue with no engine window at all.
+        if (engine != null) prepareWindow(restored.index)
     }
 
     /**

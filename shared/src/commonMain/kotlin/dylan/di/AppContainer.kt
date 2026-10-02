@@ -111,9 +111,23 @@ class AppContainer(
     /** Per-process session id for correlating log lines across a single run. */
     val sessionId: String = newSessionId()
 
-    private val database = LazyDatabase(driverFactory, log)
+    private val database = LazyDatabase({ driverFactory.createDriver() }, log)
     private val opened = CompletableDeferred<Unit>()
     private val openLaunched = AtomicBoolean(false)
+
+    /**
+     * The [open] coroutine itself, so teardown can wait for it.
+     *
+     * It used to be launched with the `Job` discarded, which made it the one coroutine in the
+     * container that neither [stop] nor [shutdown] could reach: it descends from the *platform*
+     * scope, not from [containerJob], and it is not in [bgJobs]. So a `stop()` that landed while
+     * [openOnIo] was between `database.open()` and `net` closed the Ktor clients and the shared
+     * engine out from under a `buildNet()` still constructing them — and then `buildNet()`
+     * finished and published a graph full of closed clients into [netRef], where nothing would
+     * ever close them again. Joining first makes "when it returns, nothing this container
+     * started is still running" true of the open as well as the background work.
+     */
+    private val openJob = AtomicReference<kotlinx.coroutines.Job?>(null)
     private val phase = AtomicReference(Lifecycle.IDLE)
     private val bgJobs = AtomicReference<List<Job>>(emptyList())
     private val componentJobs = AtomicReference<List<Job>>(emptyList())
@@ -170,8 +184,19 @@ class AppContainer(
     /**
      * Platform toast sink, read from the state lane. The container owns the orchestrator's toast
      * hook so wiring it does not force the playback graph open on the caller's thread.
+     *
+     * An [AtomicReference] and not a `var`: [start]'s `bootComponents` publishes this from the
+     * **io** lane and every state-lane handler reads it, so a plain field is an unsynchronised
+     * cross-lane publication of a non-null value — the state lane can read `null` forever after a
+     * toast has already been wired, and the platform's only symptom is a missing error message.
      */
-    var onToast: ((String) -> Unit)? = null
+    var onToast: ((String) -> Unit)?
+        get() = toastRef.load()
+        set(value) {
+            toastRef.store(value)
+        }
+
+    private val toastRef = AtomicReference<((String) -> Unit)?>(null)
 
     /** Live background coroutines the container owns: 0 before [start] and after [stop]. */
     val backgroundJobCount: Int get() = bgJobs.load().size
@@ -185,7 +210,14 @@ class AppContainer(
             FileLogSink(
                 fs = fs,
                 dir = baseDir.toPath() / "logs",
-                scope = CoroutineScope(scope.coroutineContext + disp.io),
+                // `componentScope`, not `CoroutineScope(scope.coroutineContext + disp.io)`. The
+                // latter parents the sink's writer loop to the *platform* scope, which is not the
+                // container's to cancel: `shutdown()` cancelled `containerJob` and left the
+                // `drainLoop` — parked forever on `queue.receive()` — alive, holding a closed
+                // `FileSystem` handle and re-opening `dylan.log.0` on the next line written after
+                // `closeLogTrail()`. `componentScope` puts it under `containerJob`, so the writer
+                // is the first thing to go when the container is torn down.
+                scope = componentScope("logsink"),
             )
         fileLogRef.store(sink)
         log.bindSink(FILE_SINK_KEY) { e -> sink.accept(e) }
@@ -262,7 +294,19 @@ class AppContainer(
         return PlaybackGraph(
             orchestrator =
                 Orchestrator(
-                    scope = scope,
+                    // `componentScope("orchestrator", disp.state)`, NOT the platform `scope`. The
+                    // Orchestrator launches its inbox loop and its states collector into whatever
+                    // scope it is handed (Orchestrator.init), so passing the platform scope made
+                    // both children of the *platform* SupervisorJob — which `shutdown()` does not
+                    // cancel, since it owns `containerJob` instead. Measured before this change:
+                    // `shutdown()` cancelled the 4 background jobs and left the state-lane inbox
+                    // running and still turning intents into state, i.e. the terminal teardown's
+                    // "nothing this container started is still running" was false for the one
+                    // component that owns all the lane-confined mutable state.
+                    //
+                    // `disp.state` reproduces the platform scope's dispatcher, so this is a
+                    // lifetime change only — no lane moves.
+                    scope = componentScope("orchestrator", disp.state),
                     disp = disp,
                     db = data.db,
                     fs = files.fs,
@@ -291,6 +335,18 @@ class AppContainer(
      * first frame, on both platforms. Call it from a background task once the UI is up; [start]
      * calls it for you if nobody has, so omitting it degrades to today's behaviour rather than to
      * a broken graph. Idempotent and safe to call concurrently.
+     *
+     * **It never returns without settling.** `opened` is what this function and all four
+     * background jobs await, and there is deliberately no timeout around those awaits: a timeout
+     * would turn a *failed* open into a silent one, carrying on against a graph that was never
+     * built. So [launchOpen] settles `opened` on every path — success, failure, and the
+     * cancel-before-first-dispatch case it used to leave pending forever — and this suspends until
+     * one of them happens. It throws if the open failed, and if the container was shut down before
+     * it could start.
+     *
+     * It is also the only correct gate for a UI that must not force the cold open itself: a
+     * platform that reads `orchestrator` before this returns performs the SQLite open on whatever
+     * thread composed.
      */
     suspend fun open() {
         launchOpen()
@@ -331,8 +387,7 @@ class AppContainer(
         try {
             cancelAndJoin(bgJobs.exchange(emptyList()))
             playbackRef.load()?.let { it.downloads.stop() }
-            netRef.exchange(null)?.close()
-            runCatching { httpEngine.close() }
+            closeNetworkLayer()
             closeLogTrail()
             protectedKeys.value = emptySet()
             log.i("lifecycle", "stop session=$sessionId")
@@ -354,10 +409,38 @@ class AppContainer(
         try {
             cancelAndJoin(componentJobs.exchange(emptyList()))
             containerJob.cancel()
+            // `stop()` returns without closing the network layer unless it actually transitioned
+            // RUNNING→STOPPING. A container that never reached RUNNING (an `open()` that threw, so
+            // `start()` rolled the phase back to IDLE) would therefore have had its three Ktor
+            // clients and the shared OkHttp/Darwin engine leaked with nothing left to close them:
+            // `stop()` cannot be retried (the CAS is the whole mutual exclusion) and the graph is
+            // terminal. Both closes are idempotent, so the RUNNING path pays nothing for this.
+            closeNetworkLayer()
             log.i("lifecycle", "shutdown session=$sessionId")
         } finally {
             phase.store(Lifecycle.IDLE)
         }
+    }
+
+    /**
+     * Joins the [open] coroutine, then closes the three Ktor clients and the shared engine.
+     *
+     * The join is first and load-bearing: `openOnIo` builds `net` (three `HttpClient`s on the
+     * shared engine) and publishes it into [netRef], so closing before the open finishes either
+     * closes clients that are about to be replaced by a fresh set nobody will ever close, or —
+     * if `netRef.exchange` already ran — lets `buildNet()` publish a graph of *closed* clients
+     * into the ref after teardown has finished.
+     *
+     * Split out of [stop] so [shutdown] gets it too: `stop()` returns without closing anything
+     * unless it actually transitioned RUNNING→STOPPING, so a container whose `open()` threw (phase
+     * rolled back to IDLE) and which is then shut down would otherwise leak its clients and its
+     * engine with nothing left to release them — `stop()` cannot be retried, because the CAS *is*
+     * the whole mutual exclusion.
+     */
+    private suspend fun closeNetworkLayer() {
+        openJob.load()?.let { cancelAndJoin(listOf(it)) }
+        netRef.exchange(null)?.close()
+        runCatching { httpEngine.close() }
     }
 
     /**
@@ -381,14 +464,38 @@ class AppContainer(
 
     private fun launchOpen() {
         if (!openLaunched.compareAndSet(false, true)) return
-        scope.launch(disp.on(Lane.IO)) {
-            runCatching { openOnIo() }
-                .onSuccess { opened.complete(Unit) }
-                .onFailure { t ->
-                    opened.completeExceptionally(t)
-                    log.e("boot", "graph open failed: ${t.message}")
-                }
+        // Lost the race to `shutdown()` before there was even a job: this container will never
+        // open, and `opened` is awaited — unbounded — by `open()` and by all four `bgJobs`, so
+        // leaving it pending parks every caller for the rest of the process. Settle it here
+        // instead; `open()` on a container that has been shut down is a usage error and says so.
+        if (shutDown.load()) {
+            opened.completeExceptionally(IllegalStateException("container was shut down before open()"))
+            return
         }
+        val job =
+            scope.launch(disp.on(Lane.IO)) {
+                runCatching { openOnIo() }
+                    .onSuccess { opened.complete(Unit) }
+                    .onFailure { t ->
+                        opened.completeExceptionally(t)
+                        log.e("boot", "graph open failed: ${t.message}")
+                    }
+            }
+        // `opened` is settled by the body's `runCatching` — including the `CancellationException`
+        // that a mid-flight cancel throws — but a job cancelled *before its body first dispatched*
+        // never runs it. That was a real hang: `stop()` can return without having reached RUNNING,
+        // so `shutdown()` would set `shutDown`, `launchOpen` would cancel the freshly stored job,
+        // and nothing would ever complete `opened`. Whichever thread settles it wins; the other's
+        // `completeExceptionally` on an already-completed deferred is a no-op.
+        job.invokeOnCompletion { cause ->
+            if (!opened.isCompleted) {
+                opened.completeExceptionally(cause ?: IllegalStateException("open() was cancelled"))
+            }
+        }
+        openJob.store(job)
+        // Lost the race to shutdown(): that container will never open, so cancel immediately
+        // rather than leaving an open running against a closed engine.
+        if (shutDown.load()) job.cancel()
     }
 
     private suspend fun openOnIo() {
@@ -507,16 +614,28 @@ class AppContainer(
         return enqueued
     }
 
+    /**
+     * Snapshot write + WS teardown + log drain, on the caller's thread — which is the **UI
+     * thread** on Android (`MainActivity.onStop`) and the main queue on iOS (`.inactive`).
+     *
+     * It reads the *refs*, never the lazy properties. `playback`/`net` here would force
+     * `buildPlayback()` → `buildNet()` and `data.db` → `LazyDatabase.value` on the thread that
+     * must not block: a cold SQLite open (schema probe + create + four PRAGMAs), three Ktor
+     * clients and the whole playback graph, inside `onStop`, for a graph that `open()` was
+     * explicitly deferred off the main thread to avoid. Reading the refs means a container that
+     * has not finished opening simply has nothing to snapshot — which is exactly right: there is
+     * no orchestrator state yet to persist and no socket to drop.
+     *
+     * `netRef` is the mirror [net] writes in its initialiser, so once the graph is built this is
+     * behaviourally identical to the previous `net.searchChannel.onBackground()`.
+     */
     fun onBackground() {
-        playback.orchestrator.onBackground()
-        net.searchChannel.onBackground()
-        flushLogAsync()
-    }
-
-    private fun flushLogAsync() {
-        val sink = fileLogRef.load() ?: return
+        playbackRef.load()?.orchestrator?.onBackground()
+        netRef.load()?.searchChannel?.onBackground()
         // Fire-and-forget drain with timeout — at most LOG_FLUSH_TIMEOUT_MS of background budget.
-        scope.launch(disp.on(Lane.IO)) { runCatching { sink.flush(LOG_FLUSH_TIMEOUT_MS) } }
+        fileLogRef.load()?.let { sink ->
+            scope.launch(disp.on(Lane.IO)) { runCatching { sink.flush(LOG_FLUSH_TIMEOUT_MS) } }
+        }
     }
 
     private suspend fun closeLogTrail() {
@@ -525,10 +644,22 @@ class AppContainer(
         runCatching { sink.close() }
     }
 
+    /**
+     * Cancel then join each job, tolerating a caller that IS one of them.
+     *
+     * The self-check is what makes this safe to point at any coroutine in the container: joining a
+     * job from inside that same job waits for a completion that cannot happen without the caller,
+     * so the teardown hangs forever. `openJob` is reachable this way because `openOnIo` runs in a
+     * `runCatching` whose failure path can re-enter the container.
+     */
     private suspend fun cancelAndJoin(jobs: List<Job>) {
+        val me = kotlin.coroutines.coroutineContext[Job]
         for (j in jobs) j.cancel()
         withContext(NonCancellable) {
-            for (j in jobs) j.join()
+            for (j in jobs) {
+                if (j === me) continue
+                j.join()
+            }
         }
     }
 
@@ -554,8 +685,27 @@ class AppContainer(
     }
 }
 
-/** No lock: every graph member is immutable once built, and publication is enough. */
-private inline fun <T> lazyGraph(noinline build: () -> T): Lazy<T> = lazy(LazyThreadSafetyMode.PUBLICATION, build)
+/**
+ * One build per graph member, for the life of the process.
+ *
+ * This was `LazyThreadSafetyMode.PUBLICATION`, with a comment claiming "no lock … publication is
+ * enough". That was backwards: `PUBLICATION` guarantees only that the *value* is safely
+ * published, and it **explicitly permits the initialiser to run more than once concurrently** —
+ * `SYNCHRONIZED` is the mode that runs it once.
+ *
+ * It was not academic. Every builder here has heavy, unrepeatable side effects — three Ktor
+ * clients on the shared engine ([buildNet]), two download worker coroutines plus an
+ * `Orchestrator` inbox and states collector on a fresh `SupervisorJob` ([buildPlayback]) — and a
+ * cold Android start races the main thread (the first composition reads `container.orchestrator`)
+ * against the io lane (`[openOnIo]`) for both. A losing build leaked every one of those, and
+ * could publish a graph of clients [closeNetworkLayer] had already closed.
+ *
+ * `SYNCHRONIZED` holds the *caller* too, so a graph read blocks until whoever is building it
+ * finishes. That is the intended trade: waiting for a build already under way is strictly better
+ * than duplicating it, and the alternative — building on the reader's thread — is what
+ * [LazyDatabase] then has to pay for.
+ */
+internal inline fun <T> lazyGraph(noinline build: () -> T): Lazy<T> = lazy(LazyThreadSafetyMode.SYNCHRONIZED, build)
 
 private fun <T> AtomicReference<List<T>>.append(item: T) {
     while (true) {
