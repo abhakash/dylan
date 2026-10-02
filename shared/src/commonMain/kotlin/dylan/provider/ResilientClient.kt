@@ -151,12 +151,20 @@ class ResilientClient(
             is Decision.Hit -> plan.result
             is Decision.Join -> plan.load.await()
             is Decision.Lead -> {
-                // No catch: a load that throws is a bug and the exception belongs to *every* joiner,
-                // not just the leader. The inflight entry is self-cleaning — [planLocked] sweeps
-                // completed deferreds — so a failed load can never become a permanent cache entry.
-                val out = plan.fresh.await()
-                lock.withLock { storeLocked(key, out) }
-                out
+                // The leader owns this inflight entry and is the only thing that may clear it.
+                // `planLocked` used to sweep completed deferreds instead, which was unsound: an
+                // entry is completed from the moment the load finishes until this coroutine resumes
+                // to store, and a caller in that gap found no entry and led a duplicate load.
+                // Throwable, not Exception: a cancelled leader must release the key too.
+                @Suppress("TooGenericExceptionCaught")
+                try {
+                    val out = plan.fresh.await()
+                    lock.withLock { storeLocked(key, out) }
+                    out
+                } catch (t: Throwable) {
+                    lock.withLock { inflight.remove(key) }
+                    throw t
+                }
             }
         }
     }
@@ -168,10 +176,6 @@ class ResilientClient(
         load: suspend () -> CatalogResult<T>,
     ): Decision<T> {
         val now = cfg.clock.nowMs()
-        // Self-cleaning: a load that threw leaves a *completed* deferred behind. Sweeping here means
-        // a failure can never become a permanent cache entry, without a `finally` that would need a
-        // suspending call in a non-suspending context.
-        inflight.entries.removeAll { it.value.isCompleted }
         val hit = entries[key]
         if (hit != null) {
             val ttl = if (hit.result is CatalogResult.Ok) ttlMs else cfg.catalogNegativeTtlMs
