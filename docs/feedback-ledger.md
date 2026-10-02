@@ -83,6 +83,20 @@ Single `Sheet` enum; `Playing`-only glyphs; `isPlaying` + `showsPause`; song-key
 | 11 ✓ | Unconditional `removeAllItems` | **Done, in Swift and stronger than described** — the window diff lives in `NativeAudioOutputImpl.prepareOnMain` (`:113-135`): a same-head re-prepare keeps the audible item and only calls `replaceTail` (`:156-166`), and the head re-arms its own `Prepared` (`:141-153`) because an `AVPlayerItem` has no second `.readyToPlay` transition. The `replaceTail` helper the ledger named is a **Swift** function, not a Kotlin one |
 | 12-26 | Search/HTTP timeouts, FileLogSink caps, debounce constants, `consecutiveErrors`, AppContainer swallows, part-cap/backoff, probe `!!`, rename `check` | **Pending (deferred tech-debt)** — tuned constants with comments. One has since been fixed for a different reason: the bulk client no longer sets `requestTimeoutMillis` (`Clients.kt:57-71`), because a whole-request cap was capping the streaming GET and making both `stallWallFloorMs` and the 8 KB/s rate-wall policy dead. The remaining ones still need device-measured data, not guesses |
 
+## 5a. Found by CI after the ledger was written (2026-10-01)
+
+A defect no audit had filed, because none of them ran the suite on real threads.
+
+| ID | Finding | Verdict | Evidence |
+|----|---------|---------|----------|
+| SF-1 | Single-flight let duplicate loads through | **Done** | `planLocked` swept completed deferreds out of `inflight`, treating one as abandoned. It is not: an entry is completed from the moment the load finishes until the leader resumes to `storeLocked`, and a caller arriving in that gap found no inflight entry and no cache entry, so it led a **duplicate load for a key already in flight**. Measured with 256 concurrent openers over 8 keys: 8–44 duplicate loads per run. The sweep is gone; the leader clears its own entry in a `catch (Throwable)` (`ResilientClient.kt:153-168`). `SingleFlightStressTest` reproduces it on the production lane profile — the virtual-time lanes close the gap deterministically, which is why `SaavnProviderTest` passed locally every time and failed on CI ~1 run in 3. Narrowing the sweep predicate does **not** fix it: in that window `entries` lacks the key too, so the two states are indistinguishable from the sweeper's side. |
+| SF-2 | `kotlin.assert` for the lane invariant | **Done** | `AppDispatchers.assert`/`assertInContext` used `kotlin.assert`, which (a) is JVM-only and broke the iOS klib metadata compile, and (b) compiles out with assertions disabled — so lane confinement was silently unenforced in every release build, while the test covering it ran with `-ea` and named the property "inert when assertions are off". Now `LaneViolation` (`AppDispatchers.kt:20`), thrown in every build; the test is renamed to match. |
+| SF-3 | `FileSystem.SYSTEM` in `commonMain` | **Done** | `AppContainer.buildFiles()` named a JVM-only okio symbol, so the shared metadata compile failed. Now injected via the constructor; each platform graph passes its own. |
+| CI-1 | `builds.yml` `platform` input never read | **Done** | `platform: android` still ran both iOS jobs. Every build job now guards on the picker, with a `push` escape hatch so the tag-triggered prod lane still runs. |
+| CI-2 | `builds.yml` gate omitted `:androidApp:lintDebug` | **Done** | Matters more than it looks: `version.yml`'s tag commit carries `[skip ci]`, so `ci.yml`'s lint job never runs for a release. |
+| CI-3 | Lane discipline ungated | **Done** | `tools/lane-check.sh` is the lexical gate for PR time; the runtime `Lane` assertion only fires when a wrong-lane call actually executes. Verified to fail on an injected bare launch **and** on a stale allowance. |
+| CI-4 | Swift `@objc` capture + Kotlin default args | **Done** | A Kotlin default argument is absent from the exported ObjC signature, so `IosGraph.create(baseDir:)` did not compile from Swift — `logMinLevel` must be passed. `onMain` takes an `@escaping` closure, so every member reference inside it needs an explicit `self.`. |
+
 ## 6. Two audit claims that were DISPROVED on re-verification
 
 Recorded because both were proposed as corrections to this file, and acting on either would
@@ -164,3 +178,11 @@ Re-verified against the tree on 2026-10-01 after W4. Items 1, 9 and 10 were list
 | P1-1 side-channel launches (27 in `Orchestrator.kt`) | **Open, Partial**: a full reducer/Effect refactor. Every one is gen-checked, so this is a structure/ownership improvement rather than a live bug. |
 | D-2c `Orchestrator`'s private `toSong` (`Orchestrator.kt:1376`) | **Open, Partial**: four copies became one `SongMapper`; the Orchestrator's was kept separate deliberately during parallel work. |
 | §5 #2 120 s-as-control-flow | **Partial by design, not a defect**: the watchdog logs and skips, `readyTimeoutMs` owns failure. W4 made the give-up point and the kill point share one literal so they cannot drift, and the Orchestrator now cancels the attempt when the wait expires. |
+
+### A note on what is *not* in this ledger
+
+The `AppContainer.APP_VERSION` drift and the `check_pbxproj.py` gap were both found by reading this
+file against the code, not by an audit — and the single-flight defect (SF-1) was found only because
+CI runs the suite on real threads while a local run does not. Every "Done" here is a claim about the
+tree as of 2026-10-01, and the §5a rows were appended after that pass, so they are the least
+re-verified part of this document.
