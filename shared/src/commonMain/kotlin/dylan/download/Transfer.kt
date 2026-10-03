@@ -13,7 +13,6 @@ import io.ktor.client.HttpClient
 import io.ktor.client.request.header
 import io.ktor.client.request.prepareGet
 import io.ktor.client.statement.HttpResponse
-import io.ktor.client.statement.bodyAsChannel
 import io.ktor.http.HttpHeaders
 import io.ktor.utils.io.ByteReadChannel
 import io.ktor.utils.io.readAvailable
@@ -465,7 +464,9 @@ internal class Transfer(
         throttle: ProgressThrottle,
     ): CopyOutcome =
         supervisorScope {
-            val ch: ByteReadChannel = r.bodyAsChannel()
+            // The engine's own channel, not ktor's copy of it. See [engineBody] for the measurement
+            // and the mechanism; this is the whole reason that function exists.
+            val ch: ByteReadChannel = r.engineBody()
             val copy = async { drain(ch, segment, live, key, lastMark, throttle) }
             val watchdog = launch { watchStalls(copy, segment, key, startedAt, lastMark) }
             try {
@@ -665,3 +666,64 @@ internal class Transfer(
 
 /** Watchdog-to-copy stall signal: distinct from external cancellation by type. */
 internal class StallSignal : CancellationException("stall")
+
+/**
+ * The response body **as the engine delivered it**, with no intermediate buffer.
+ *
+ * This is deliberately **not** `bodyAsChannel()`, and the two are not interchangeable despite looking
+ * so. `bodyAsChannel()` is literally `body<ByteReadChannel>()`, and that is *not* a view of the
+ * engine's channel: ktor serves it through `defaultTransformers`, which is
+ * `writer { body.copyTo(channel, Long.MAX_VALUE) }` and hands back a **fresh `ByteChannel`** — a whole
+ * second buffer between the socket and the copy loop.
+ *
+ * That buffer drops bytes when a connection resets mid-stream, and it drops them *silently*.
+ * Measured on this exact path with a source that delivers one chunk and then throws:
+ * ```
+ * bodyAsChannel()  142/150 runs delivered 0 bytes and reported NO ERROR AT ALL
+ * rawContent         0/150 lost; the transport error surfaced on 150/150
+ * ```
+ * The consequence was that a download interrupted near its end resumed from offset 0 — the copy was
+ * scored as a clean short body at `written = 0`, so `Breakpoint.resumable` (`partBytes > 0`) was false
+ * and the retry sent no `Range:` header. That is the whole of the "M0 seam-1a" flake.
+ *
+ * Mechanism, in ktor-io 3.5.2's `ByteChannel`:
+ * ```
+ * isClosedForRead = (closedCause != null) || (isClosedForWrite && flushBufferSize == 0 && _readBuffer.exhausted())
+ * ```
+ * The `closedCause` disjunct has **no `_readBuffer` conjunct**, so once the writer's `cancel(cause)`
+ * records the reset, the channel reads as closed while the delivered bytes still sit in
+ * `_readBuffer`. `readAvailable` turns that into `-1` *before* consulting the buffer. `close()` also
+ * flushes before recording the cause (its own comment says so) while `cancel()` does not — which is
+ * why a clean EOF delivers its bytes and a reset does not.
+ *
+ * Draining first is **not** an alternative: once a cause is recorded, `readBuffer`'s getter throws,
+ * so there is no way to ask the buffer whether it holds anything. The bytes are unrecoverable through
+ * that channel. The only fix is to not route the body through it.
+ *
+ * On this path the two things the copy loop needs both hold, by measurement rather than by hope: the
+ * bytes arrive (`awaitTrueThenBytes = 1200` over 150 runs) **and** the reset surfaces as an error
+ * rather than a clean EOF (`errorSurfaced = 150`), so a reset is still classified as a transport
+ * failure and retried — it is just no longer mistaken for a short-but-complete body.
+ *
+ * ## Why the `@OptIn` is acceptable here
+ *
+ * `rawContent` is `@InternalAPI`. The opt-in is narrow and deliberate: this is the shape of Ktor's
+ * own documented streaming examples
+ * (`prepareGet { it.body<ByteReadChannel>().readTo(sink) }`), and it is safe *specifically* because
+ * the only caller is inside `execute {}`, where the response is alive and its body unconsumed — the
+ * exact condition under which `rawContent` is invalid anywhere else. It is not a stand-in for a
+ * missing feature; it is the only accessor that does not insert a lossy buffer.
+ *
+ * ## When bumping ktor
+ *
+ * Re-check whether this is still needed. ktor 3.6.0's changelog lists Android streaming-cancel and
+ * ByteReadChannel work (KTOR-9762, KTOR-9561, KTOR-9640, KTOR-9702) but **nothing** for
+ * `isClosedForRead` reporting closed over a non-empty buffer, nor for `cancel()` skipping the flush
+ * that `close()` performs. KTOR-9500 ("RawSourceChannel returns false positive on awaitContent") is
+ * a different defect and already shipped in 3.5.0. So an upgrade alone is **not known** to fix this,
+ * and if a future ktor does, this function and its `@OptIn` are the first thing to delete.
+ *
+ * @see DownloadBodyChannelIdentityTest for the cheap guard that fails if this is reverted.
+ */
+@OptIn(io.ktor.utils.io.InternalAPI::class)
+private fun HttpResponse.engineBody(): ByteReadChannel = rawContent
