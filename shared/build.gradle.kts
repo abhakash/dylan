@@ -64,6 +64,9 @@ kotlin {
         androidMain.dependencies {
             implementation(libs.ktor.client.okhttp)
             implementation(libs.sqldelight.android)
+            // Transitive `runtime` scope from android-driver; promoted to `implementation` because
+            // DriverFactory names FrameworkSQLiteOpenHelperFactory to turn WAL on before open.
+            implementation(libs.androidx.sqlite)
         }
         iosMain.dependencies {
             implementation(libs.ktor.client.darwin)
