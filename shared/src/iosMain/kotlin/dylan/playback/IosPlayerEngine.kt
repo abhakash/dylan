@@ -23,7 +23,7 @@ class IosPlayerEngine(
     private val out: NativeAudioOutput,
     private val scope: CoroutineScope,
     private val main: CoroutineDispatcher,
-    private val log: dylan.diag.LogBuffer = dylan.diag.LogBuffer.SILENT,
+    private val log: dylan.diag.LogBuffer,
 ) : PlayerEngine,
     EngineEventSink {
     private val mutableEvents = MutableSharedFlow<EngineEvent>(extraBufferCapacity = 256)

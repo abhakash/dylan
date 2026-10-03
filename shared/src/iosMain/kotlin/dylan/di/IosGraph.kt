@@ -1,11 +1,17 @@
+@file:OptIn(kotlin.concurrent.atomics.ExperimentalAtomicApi::class)
+
 package dylan.di
 
+import dylan.bridge.BridgeLanes
 import dylan.bridge.FlowAdapter
 import dylan.bridge.KotlinSubscription
 import dylan.bridge.PlayerStateAdapter
 import dylan.bridge.PositionAdapter
 import dylan.config.AppConfig
 import dylan.db.DriverFactory
+import dylan.diag.LogBuffer
+import dylan.diag.LogLevel
+import dylan.diag.logBufferExceptionHandler
 import dylan.download.DownloadJob
 import dylan.download.Priority
 import dylan.model.DylanFailure
@@ -19,17 +25,19 @@ import dylan.model.SongKey
 import dylan.model.message
 import dylan.playback.IosPlayerEngine
 import dylan.playback.NativeAudioOutput
-import dylan.repo.toSong
 import dylan.search.SaavnSearchChannel
 import dylan.util.AppDispatchers
-import dylan.util.NetMonitor
-import dylan.util.nowMs
+import dylan.util.IosNetMonitor
+import dylan.util.Lane
 import io.ktor.client.engine.darwin.Darwin
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
+import kotlin.concurrent.atomics.AtomicBoolean
 
 /** Settings > Storage figures (mirrors the cachedCountAndBytes row Android reads). */
 data class CacheStats(
@@ -37,22 +45,31 @@ data class CacheStats(
     val totalBytes: Long,
 )
 
-/** Library > Downloads row: admitted song joined with its cached_files row. */
+/**
+ * Library > Downloads row: admitted song joined with its library row.
+ *
+ * [removable] is false while the key is playing, queued, mid-download or the source of an
+ * in-flight quality upgrade, so the row can refuse the gesture *before* the user commits to it
+ * rather than after [IosGraph.removeDownload] has already said no.
+ */
 data class CachedSongInfo(
     val song: Song,
     val bitrate: Int,
     val bytes: Long,
     val pinned: Boolean,
+    val removable: Boolean,
 )
 
 /**
  * Swift-facing surface over [SaavnSearchChannel] (§6.4): fire-and-forget demand + render-on-arrival.
- * The channel's `suggestions` StateFlow carries an unexported Pair type, so this bridge delivers
- * a plain (query, items) closure instead — same conflate/flowOn/Main.immediate pipeline via FlowAdapter.
+ * The channel's `suggestions` StateFlow carries an [Answer], whose [Answer.epoch] is meaningless to
+ * Swift, so this bridge delivers a plain (query, items) closure instead — same conflate, no
+ * `flowOn`, main-lane delivery via [FlowAdapter].
  */
 class IosSearchBridge internal constructor(
     private val channel: SaavnSearchChannel,
     private val scope: CoroutineScope,
+    private val lanes: BridgeLanes,
 ) {
     fun warmUp() {
         channel.warmUp()
@@ -68,7 +85,7 @@ class IosSearchBridge internal constructor(
 
     /** Latest answered query with its suggestions; empty pair until the first answer lands. */
     fun subscribeSuggestions(onEach: (String, List<MiniEntity>) -> Unit): KotlinSubscription =
-        FlowAdapter(channel.suggestions.map { it ?: ("" to emptyList()) }, scope)
+        FlowAdapter(channel.suggestions.map { a -> (a?.query ?: "") to (a?.items ?: emptyList()) }, scope, lanes)
             .subscribe(onEach = { p -> onEach(p.first, p.second) })
 }
 
@@ -86,20 +103,42 @@ class IosSearchBridge internal constructor(
  * concrete-closure subscriptions and helpers below — the §9.11 "concrete adapters" decision applied
  * at graph level. [queueAsList]/[shuffleOrderAsList] exist because PersistentList does not bridge to
  * Swift collections (R4-F14).
+ *
+ * A flat Swift-facing facade by design: the threshold counts the Swift API surface, not logic.
  */
+@Suppress("TooManyFunctions")
 class IosGraph private constructor(
     val cfg: AppConfig,
     private val disp: AppDispatchers,
     private val scope: CoroutineScope,
+    private val graphJob: Job,
     val container: AppContainer,
+    private val net: IosNetMonitor,
 ) {
     private var engine: IosPlayerEngine? = null
+    private val disposed = AtomicBoolean(false)
+
+    /** Bridge lanes come from the graph, never from a hardcoded dispatcher. */
+    private val lanes: BridgeLanes = BridgeLanes(disp, container.log)
 
     /** Search-tab entry point: WS warm-up + render-on-arrival suggestions (§6.4). */
-    val search: IosSearchBridge = IosSearchBridge(container.searchChannel, scope)
+    val search: IosSearchBridge by lazy(LazyThreadSafetyMode.PUBLICATION) {
+        IosSearchBridge(
+            container.searchChannel,
+            scope,
+            BridgeLanes(disp, container.log, "bridge/suggestions"),
+        )
+    }
 
     /** Toast surface for Swift; every toast is also mirrored into the LogBuffer. */
     var onToast: ((String) -> Unit)? = null
+
+    init {
+        // Assigned here, read on the state lane: the container owns the orchestrator's toast sink
+        // so create() never has to touch the playback graph (and therefore never has to force the
+        // SQLite open) on the main thread.
+        container.onToast = { msg -> onToast?.invoke(msg) }
+    }
 
     // ---- engine lifecycle (§4.3 attachable engine, §9.10) -------------------------------
 
@@ -107,7 +146,7 @@ class IosGraph private constructor(
     fun attachAudio(output: NativeAudioOutput) {
         detachEngine()
         val e =
-            IosPlayerEngine(output, scope, disp.main).also { engine = it }
+            IosPlayerEngine(output, scope, disp.main, container.log).also { engine = it }
         container.orchestrator.attachEngine(e)
     }
 
@@ -120,12 +159,12 @@ class IosGraph private constructor(
 
     /** NWPathMonitor pushes here from Swift (D14: isExpensive || isConstrained). */
     fun pushMetered(isMetered: Boolean) {
-        container.netMonitor.pushMetered(isMetered)
+        net.pushMetered(isMetered)
     }
 
     /** NWPathMonitor pushes here from Swift (path.status == .satisfied). */
     fun pushOnline(isOnline: Boolean) {
-        container.netMonitor.pushOnline(isOnline)
+        net.pushOnline(isOnline)
     }
 
     fun onBackground() {
@@ -134,11 +173,37 @@ class IosGraph private constructor(
         container.onBackground()
     }
 
+    /**
+     * Terminal teardown, in the only order that leaves nothing running.
+     *
+     * The engine is released *here* rather than through the orchestrator inbox: inbox messages are
+     * delivered by the state lane this method is about to cancel, so a Detach left in the queue
+     * would tear the `AVQueuePlayer` down never. `release()` is idempotent, so the orchestrator
+     * finding it already released is not a problem.
+     *
+     * [AppContainer.shutdown] closes the Ktor clients, the shared HTTP engine and the file-log
+     * handle. [graphJob] is the `SupervisorJob` `create` built for this graph and nothing else holds
+     * it: it is the parent of the orchestrator inbox, of every collector the stores bound and of
+     * the log sink's scope, so cancelling it is what stops the detached coroutines from outliving
+     * the process.
+     *
+     * Idempotent: the Swift terminate hook and `AppEnvironment.deinit` can both reach it.
+     */
+    suspend fun dispose() {
+        if (!disposed.compareAndSet(false, true)) return
+        val attached = engine
+        engine = null
+        attached?.release()
+        container.shutdown()
+        graphJob.cancel()
+        graphJob.join()
+    }
+
     // ---- Flow→Swift subscriptions (§9.11) -------------------------------------------------
 
-    fun subscribePlayerState(onEach: (PlayerState) -> Unit): KotlinSubscription = PlayerStateAdapter(scope, container.orchestrator.state, {}).subscribe(onEach)
+    fun subscribePlayerState(onEach: (PlayerState) -> Unit): KotlinSubscription = PlayerStateAdapter(scope, container.orchestrator.state, lanes).subscribe(onEach)
 
-    fun subscribePosition(onEach: (Long) -> Unit): KotlinSubscription = PositionAdapter(scope, container.orchestrator.positionMs).subscribe(onEach)
+    fun subscribePosition(onEach: (Long) -> Unit): KotlinSubscription = PositionAdapter(scope, container.orchestrator.positionMs, lanes).subscribe(onEach)
 
     /** Per-key download ring (R7-P1); -1 means "no active job" so the closure stays unboxed Int. */
     fun subscribeProgress(
@@ -150,6 +215,7 @@ class IosGraph private constructor(
                 .map { it[key] ?: -1 }
                 .distinctUntilChanged(),
             scope,
+            lanes,
         ).subscribe(onEach)
 
     // ---- bridging helpers -------------------------------------------------------------------
@@ -157,6 +223,23 @@ class IosGraph private constructor(
     fun queueAsList(state: PlayerState): List<Song> = state.queue.toList()
 
     fun shuffleOrderAsList(state: PlayerState): List<Int>? = state.shuffleOrder?.toList()
+
+    /**
+     * Submit-list order: songs ++ albums ++ artists, ranked by the one shared relevance comparator.
+     *
+     * Swift used to sort these itself against a private `rankBand` mirror of `SearchRank.band`. The
+     * mirror normalised with `trim().lowercased()` while the shared one collapses internal
+     * whitespace runs and trims per `normTitle`, so a title like `"Tera Mera Rishta -  New Version"`
+     * (a committed fixture, double space) ranked as OTHER on iOS and CONTAINS on Android — the two
+     * platforms could genuinely disagree about which row was "best match". Positions, not rows, come
+     * back across the bridge so the mixed `SearchHit` list stays a Swift-side concern.
+     */
+    fun hitOrder(
+        query: String,
+        songTitles: List<String>,
+        albumTitles: List<String>,
+        artistTitles: List<String>,
+    ): List<Int> = dylan.search.relevanceOrder(query, songTitles + albumTitles + artistTitles)
 
     /**
      * Phase/repeat as stable lowercase strings — Swift never spells Kotlin sealed-subclass or
@@ -203,7 +286,7 @@ class IosGraph private constructor(
     }
 
     suspend fun cachedStats(): CacheStats =
-        withContext(disp.dbLane) {
+        withContext(disp.on(Lane.DB)) {
             val r =
                 container.db.dylanQueries
                     .cachedCountAndBytes()
@@ -212,27 +295,24 @@ class IosGraph private constructor(
         }
 
     suspend fun libraryDownloads(): List<CachedSongInfo> =
-        withContext(disp.dbLane) {
-            container.db.dylanQueries.selectAllCached().executeAsList().mapNotNull { row ->
-                val s =
-                    container.db.dylanQueries
-                        .selectSong(row.provider, row.song_id)
-                        .executeAsOneOrNull()
-                        ?: return@mapNotNull null
-                CachedSongInfo(
-                    song = s.toSong(),
-                    bitrate = row.bitrate.toInt(),
-                    bytes = row.bytes,
-                    pinned = row.pinned == 1L,
-                )
-            }
+        // CacheManager.downloads is the one-JOIN read; this used to be selectAllCached() plus a
+        // selectSong() per row, i.e. 301 round trips through the single-threaded dbLane every time
+        // the Downloads sheet opened at the 300-file cap. `first()` collects exactly one emission.
+        container.cacheManager.downloads.first().map { e ->
+            CachedSongInfo(
+                song = e.song,
+                bitrate = e.bitrate,
+                bytes = e.bytes,
+                pinned = e.pinned,
+                removable = e.removable,
+            )
         }
 
     /** Album heart ⇒ favorites-all-tracks bulk download within the pinned budget (D12/§8.5). */
     suspend fun enqueueBulkDownloads(songs: List<Song>) {
         if (songs.isEmpty()) return
         val bits = container.settings.qualityPref().bits
-        val now = nowMs()
+        val now = cfg.clock.nowMs()
         songs.forEach { container.downloads.enqueue(DownloadJob(it.key, Priority.USER_BULK, bits, now)) }
         container.cacheManager.enforceBudget(netNewBytes = 0)
     }
@@ -241,14 +321,14 @@ class IosGraph private constructor(
     suspend fun enqueueDownloadNow(song: Song) {
         val metered = container.netMonitor.current() == dylan.util.NetClass.METERED
         val bits = if (metered) cfg.meteredQuality.bits else container.settings.qualityPref().bits
-        container.downloads.enqueue(DownloadJob(song.key, Priority.USER_NOW, bits, nowMs()))
+        container.downloads.enqueue(DownloadJob(song.key, Priority.USER_NOW, bits, cfg.clock.nowMs()))
     }
 
     suspend fun clearCacheExcludingProtected(): Long = container.cacheManager.clearCacheExcludingProtected()
 
     /** Now-Playing quality chip: real cached bitrate of the current key; 0 when uncached. */
     suspend fun cachedBitrateOf(key: SongKey): Int =
-        withContext(disp.dbLane) {
+        withContext(disp.on(Lane.DB)) {
             container.db.dylanQueries
                 .selectCached(key.provider, key.songId)
                 .executeAsOneOrNull()
@@ -256,20 +336,16 @@ class IosGraph private constructor(
                 ?.toInt() ?: 0
         }
 
-    /** Library > Downloads swipe-remove: drop the cached row + its file; favorites/pins untouched. */
-    suspend fun removeDownload(key: SongKey) {
-        val row =
-            withContext(disp.dbLane) {
-                container.db.dylanQueries
-                    .selectCached(key.provider, key.songId)
-                    .executeAsOneOrNull()
-            }
-        withContext(disp.dbLane) { container.db.dylanQueries.deleteCached(key.provider, key.songId) }
-        if (row != null) {
-            val f = container.paths.final(key, row.bitrate.toInt(), row.ext)
-            runCatching { container.fs.delete(f) }
-        }
-    }
+    /**
+     * Library > Downloads swipe-remove. Returns false when the key is protected — playing, queued,
+     * mid-download, or the source of an in-flight quality upgrade — so the caller can say so.
+     *
+     * This used to be an unconditional `deleteCached` + `fs.delete` with no protection check at
+     * all, which on iOS alone meant swiping the row of the track you were playing deleted the file
+     * you were playing. The protection check has to live inside the statement that claims the row
+     * or it is a TOCTOU race, so this is [CacheManager.evictOne] and nothing else.
+     */
+    suspend fun removeDownload(key: SongKey): Boolean = container.cacheManager.evictOne(key)
 
     companion object {
         /**
@@ -279,46 +355,60 @@ class IosGraph private constructor(
          * SupervisorJob shared between graph and container so a reconciler throw cannot kill one
          * half of the graph while leaving the other alive.
          */
-        fun create(baseDir: String): IosGraph {
+        fun create(
+            baseDir: String,
+            logMinLevel: LogLevel = LogLevel.INFO,
+        ): IosGraph {
             val cfg = AppConfig()
-            // Dispatchers.IO does not exist on Native — the Default worker pool backs io/dbLane/state.
+            // `Dispatchers.IO` is declared in kotlinx-coroutines' concurrent+native source set,
+            // but on Native its Dispatchers member is `internal` (DefaultIoScheduler) and the
+            // member shadows the public extension property, so user code cannot reach it — see
+            // kotlin/native/src/Dispatchers.kt in kotlinx.coroutines. The shared worker pool is
+            // therefore what backs `io` here, as on the JVM test target. The lane views are named
+            // so a thread dump says which lane a thread belongs to.
             val disp =
                 AppDispatchers(
                     main = Dispatchers.Main,
                     io = Dispatchers.Default,
-                    dbLane = Dispatchers.Default.limitedParallelism(1),
-                    state = Dispatchers.Default.limitedParallelism(1),
+                    dbLane = Dispatchers.Default.limitedParallelism(1, "dbLane"),
+                    state = Dispatchers.Default.limitedParallelism(1, "state"),
                 )
+            // Built before the graph so the DB open, the CEH and the console mirror all share
+            // one buffer — the file trail is the record, NSLog is only a mirror.
+            val log = LogBuffer(minLevel = logMinLevel)
+            log.bindSink { e -> platform.Foundation.NSLog("Dylan:%@ %@", e.tag, e.msg) }
             val stateJob = kotlinx.coroutines.SupervisorJob()
-            val ceh =
-                kotlinx.coroutines.CoroutineExceptionHandler { _, t ->
-                    platform.Foundation.NSLog("dylan:scope %@", t.message ?: t.toString())
-                }
+            val ceh = logBufferExceptionHandler(log, "scope") { m, _ -> platform.Foundation.NSLog("dylan:scope %@", m) }
             val sharedScope = CoroutineScope(stateJob + disp.state + ceh)
+            val net = IosNetMonitor()
             val graph =
                 IosGraph(
                     cfg = cfg,
                     disp = disp,
                     scope = sharedScope,
+                    graphJob = stateJob,
+                    net = net,
                     container =
                         AppContainer(
                             cfg = cfg,
                             disp = disp,
                             scope = sharedScope,
                             baseDir = baseDir,
-                            driverFactory = DriverFactory(baseDir),
-                            netMonitor = NetMonitor(),
+                            driverFactory = DriverFactory(log),
+                            fs = okio.FileSystem.SYSTEM,
+                            netMonitor = net,
                             httpEngine = Darwin.create(),
                             engineFactory = {
                                 throw IllegalStateException("iOS engines are built by IosGraph.attachAudio")
                             },
+                            log = log,
                         ),
                 )
-            graph.container.orchestrator.toast =
-                { msg ->
-                    graph.container.log.i("toast", msg)
-                    graph.onToast?.invoke(msg)
-                }
+            // Directories, the SQLite open and the Ktor clients are deferred to the io lane by
+            // start() so none of it runs inside @MainActor AppEnvironment.init, i.e. before the
+            // first frame. A platform that can await it should instead do
+            // `scope.launch { graph.container.open() }` (or call open() from its own loader) and
+            // let start() join the same one-shot open.
             graph.container.start()
             return graph
         }

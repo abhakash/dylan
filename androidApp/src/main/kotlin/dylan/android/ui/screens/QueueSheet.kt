@@ -16,7 +16,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -32,6 +31,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dylan.android.ui.Dyl
 import dylan.android.ui.LocalDylanTokens
 import dylan.di.AppContainer
@@ -43,7 +43,7 @@ fun QueueSheet(
     container: AppContainer,
     onClose: (() -> Unit)? = null,
 ) {
-    val state by container.orchestrator.state.collectAsState()
+    val state by container.orchestrator.state.collectAsStateWithLifecycle()
     val t = LocalDylanTokens.current
 
     // A live drag renders a local snapshot so rows track the finger instantly; every crossing

@@ -15,8 +15,10 @@ import okio.buffer
  * Persistent, size-rotated log file appender — the "diagnose a week later" trail.
  *
  * Design:
- *  - Async: entries land in a DROP_OLDEST channel; a single writer drains + batches.
- *    Logging never blocks or backpressures a hot path.
+ *  - Async: [LogBuffer.Entry]s land in a DROP_OLDEST channel; a single writer drains + batches.
+ *    [accept] is a `trySend` of an already-immutable entry — line formatting, the UTC instant
+ *    and the UTF-8 byte accounting all happen on the writer coroutine, never on whichever lane
+ *    logged. That matters because the busiest producer is the single-threaded `state` lane.
  *  - Rotation: current file [dir/dylan.log.0] rolls to .1, .2 … up to [filesToKeep];
  *    oldest deleted. On disk at most (filesToKeep + 1) files ≈
  *    (filesToKeep + 1) × maxBytesPerFile.
@@ -36,12 +38,17 @@ class FileLogSink(
     private val maxBytesPerFile: Long = FILE_BYTES_DEFAULT,
     private val filesToKeep: Int = 2,
 ) {
-    private val queue = Channel<String>(capacity = 1_024, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+    private val queue = Channel<LogBuffer.Entry>(capacity = 1_024, onBufferOverflow = BufferOverflow.DROP_OLDEST)
     private var out: okio.BufferedSink? = null
     private var written = 0L
 
-    // Serializes drainLoop writes vs explicit flush() so background/stop flushes
-    // can never interleave bytes with the writer coroutine on the shared sink.
+    // Reused staging buffer: exact UTF-8 byte accounting with no per-line ByteArray. okio's
+    // fluent writeUtf8 returns the sink, not the byte count, so this is the allocation-free
+    // replacement for `line.encodeToByteArray().size`.
+    private val staging = okio.Buffer()
+
+    // Serializes drainLoop writes vs explicit flush() vs close() so background/stop/teardown
+    // paths can never interleave bytes with the writer coroutine on the shared sink.
     private val writeMutex = Mutex()
 
     init {
@@ -49,9 +56,12 @@ class FileLogSink(
         scope.launch { drainLoop() }
     }
 
-    /** Called by LogBuffer for every entry that passed minLevel. Never throws. */
+    /**
+     * Called by LogBuffer for every entry that passed minLevel. Never throws, never formats,
+     * never allocates more than the channel slot: this runs on the logging lane.
+     */
     fun accept(e: LogBuffer.Entry) {
-        queue.trySend(format(e))
+        queue.trySend(e)
     }
 
     /**
@@ -65,35 +75,48 @@ class FileLogSink(
             writeMutex.withLock {
                 while (true) {
                     val next = queue.tryReceive().getOrNull() ?: break
-                    writeLineLocked(next)
+                    writeEntryLocked(next)
                 }
                 runCatching { out?.flush() }
             }
         }
     }
 
-    /** Closes the file handle; reopened lazily on the next write. Never throws. */
-    fun close() {
-        runCatching { out?.close() }
-        out = null
+    /**
+     * Closes the file handle; reopened lazily on the next write. Never throws.
+     *
+     * Takes [writeMutex], which is the point: `out` and `written` are plain fields and
+     * `writeEntryLocked` is the only code allowed to touch them, so a close that skips the lock can
+     * shut the handle while the writer is between its read of `out` and its `s.write` on that very
+     * sink. The write then throws, and the `runCatching` in `writeEntryLocked` swallows it — the
+     * line is simply missing from the trail, with nothing in the log to say so.
+     *
+     * `suspend` for that reason: taking the lock is a suspension, and a non-suspending `close()` could
+     * only take it by blocking, which is the same bug wearing a different hat.
+     */
+    suspend fun close() {
+        writeMutex.withLock {
+            runCatching { out?.close() }
+            out = null
+        }
     }
 
     private suspend fun drainLoop() {
         while (true) {
             val first = queue.receive()
             writeMutex.withLock {
-                writeLineLocked(first)
+                writeEntryLocked(first)
                 // Batch drain: swallow whatever piled up within the window, then flush once.
                 while (true) {
                     val next = withTimeoutOrNull(FLUSH_IDLE_MS) { queue.receive() } ?: break
-                    writeLineLocked(next)
+                    writeEntryLocked(next)
                 }
                 runCatching { out?.flush() }
             }
         }
     }
 
-    private fun writeLineLocked(line: String) {
+    private fun writeEntryLocked(e: LogBuffer.Entry) {
         val s =
             out ?: runCatching {
                 fs.appendingSink(currentFile()).buffer().also {
@@ -102,13 +125,24 @@ class FileLogSink(
                 }
             }.getOrNull() ?: return
         runCatching {
-            s.writeUtf8(line)
-            written += line.encodeToByteArray().size
+            val line = format(e)
+            staging.writeUtf8(line)
+            written += staging.size
+            s.write(staging, staging.size)
             if (written >= maxBytesPerFile) rotate()
         }.onFailure {
             runCatching { out?.close() }
             out = null
         }
+        // `finally`, not inline in the happy path above. `staging` is a *reused* buffer, so a
+        // write that throws between `writeUtf8` and `s.write` — a full disk, an unlinked file, a
+        // handle closed underneath us — used to leave the failed line's bytes sitting in it. The
+        // next entry then appended to that residue: `staging.size` counted old+new, so `written`
+        // inflated by the stale line on every subsequent failure (accelerating rotation), and
+        // `s.write(staging, …)` re-emitted the dead line into the trail. One I/O error therefore
+        // permanently corrupted both the byte accounting and the log itself — which is the worst
+        // possible moment for it, since an I/O error is exactly when the trail is being read.
+        staging.clear()
     }
 
     /**

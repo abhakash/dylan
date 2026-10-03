@@ -1,7 +1,6 @@
 package dylan.cache
 
 import dylan.model.SongKey
-import okio.Buffer
 import okio.FileSystem
 import okio.Path
 
@@ -13,23 +12,23 @@ class Paths(
         fs.createDirectories(audioDir)
     }
 
-    fun sanitize(id: String): String = sanitizeId(id)
+    /**
+     * Kept for the download engine's `.part` prefix scans. Delegates to the shared grammar so
+     * the prefix it builds is the same prefix [CachePath] would produce.
+     */
+    fun sanitize(id: String): String = CachePath.segment(id)
 
     fun final(
         key: SongKey,
         bits: Int,
         ext: String,
-    ): Path = audioDir / "${key.provider}_${sanitize(key.songId)}_$bits.$ext"
+    ): Path = audioDir / CachePath.fileName(key.provider, key.songId, bits, ext)
 
     fun part(
         key: SongKey,
         bits: Int,
-    ): Path = audioDir / "${key.provider}_${sanitize(key.songId)}_$bits.part"
+    ): Path = audioDir / CachePath.partName(key.provider, key.songId, bits)
 
-    companion object {
-        private val ID_RE = Regex("[A-Za-z0-9_-]+")
-
-        /** §8.2 adapter-boundary rule: path- and token-safe charset, else SHA-256 hex fallback. */
-        fun sanitizeId(id: String): String = if (id.matches(ID_RE)) id else Buffer().writeUtf8(id).sha256().hex()
-    }
+    /** Null for a file this app did not write; the orphan sweep never deletes those. */
+    fun parseFileName(name: String): CacheFileName? = CachePath.parse(name)
 }

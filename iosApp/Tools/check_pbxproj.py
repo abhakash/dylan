@@ -9,6 +9,7 @@ cannot read this legacy format) and validates the object graph:
   * PBXBuildFile.fileRef exists; each build file belongs to exactly one phase
   * build-phase ordering: Kotlin framework script -> Sources -> Frameworks -> Embed
   * Embed phase embeds shared.framework with CodeSignOnCopy from BUILT_PRODUCTS_DIR
+  * Embed phase's source is NOT a product of any target here (KGP symlinks it instead)
   * shell script no longer passes -Pdevice
 Exit code 0 = clean.
 """
@@ -291,6 +292,17 @@ def main():
                     errors.append("shared.framework fileRef explicitFileType != wrapper.framework")
         if len(fw_bfs) != 1:
             errors.append(f"expected exactly 1 shared.framework embed entry, got {len(fw_bfs)}")
+        # The embed phase's source path only resolves because KGP's
+        # symbolicLinkTo... task symlinks $(BUILT_PRODUCTS_DIR)/shared.framework at its
+        # own staged framework. If some target here ever "produced" it instead, the
+        # KGP symlink contract would be gone and the Gradle phase would no longer be
+        # what makes this phase's input exist.
+        local_products = {o.get("productReference") for o in objects.values()
+                          if o.get("isa") == "PBXNativeTarget"}
+        for f in fw_bfs:
+            if objects[f].get("fileRef") in local_products:
+                errors.append("shared.framework is a target product here; expected it to "
+                              "come from KGP's BUILT_PRODUCTS_DIR symlink")
 
     # 8. Shell script hygiene
     scripts = [o for o in objects.values()
@@ -330,7 +342,8 @@ def main():
                 "PBXFrameworksBuildPhase": "Frameworks", "PBXCopyFilesBuildPhase": "Embed Frameworks"}
     print(f"OK — {len(ids)} objects, graph consistent.")
     print("  phases:", " -> ".join(names.get(p) or FALLBACK[objects[p]["isa"]] for p in target_phases))
-    print("  embed: shared.framework @ BUILT_PRODUCTS_DIR, CodeSignOnCopy ✓")
+    print("  embed: shared.framework @ BUILT_PRODUCTS_DIR (KGP symlink), CodeSignOnCopy ✓")
+    print("  embed: redundant with KGP's embedAndSign — retained pending a device archive")
     print("  shell: -Pdevice removed, embedAndSign task + fail-fast present ✓")
     print(f"  sources: {len(swift_in_phase)} Swift files match disk exactly")
     return 0

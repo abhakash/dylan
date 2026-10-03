@@ -1,0 +1,119 @@
+<?xml version="1.0" ?>
+<SmellBaseline>
+  <ManuallySuppressedIssues/>
+  <CurrentIssues>
+    <ID>CyclomaticComplexMethod:AppRoot.kt$@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class) @Composable fun AppRoot( container: AppContainer, onFirstPlay: () -&gt; Unit, onReportDrawn: () -&gt; Unit, )</ID>
+    <ID>CyclomaticComplexMethod:NowPlayingSheet.kt$@OptIn(ExperimentalMaterial3Api::class) @Composable fun NowPlayingSheet( container: AppContainer, onQueue: () -&gt; Unit, onOpenArtist: (String, String) -&gt; Unit = { _, _ -&gt; }, onEnsureService: () -&gt; Unit = {}, )</ID>
+    <ID>CyclomaticComplexMethod:SearchScreen.kt$@OptIn(FlowPreview::class) @Composable fun SearchScreen( container: AppContainer, onOpenAlbum: (String) -&gt; Unit, onOpenArtist: (MiniEntity) -&gt; Unit, onPlaySongs: (List&lt;Song&gt;, Int) -&gt; Unit, )</ID>
+    <ID>LongMethod:AlbumScreen.kt$@Composable fun AlbumScreen( container: AppContainer, albumId: String, onBack: () -&gt; Unit, onPlaySongs: (List&lt;dylan.model.Song&gt;, Int) -&gt; Unit, )</ID>
+    <ID>LongMethod:AppRoot.kt$@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class) @Composable fun AppRoot( container: AppContainer, onFirstPlay: () -&gt; Unit, onReportDrawn: () -&gt; Unit, )</ID>
+    <ID>LongMethod:ArtistScreen.kt$@Composable fun ArtistScreen( container: AppContainer, artistToken: String, fallbackName: String, onPlaySongs: (List&lt;dylan.model.Song&gt;, Int) -&gt; Unit, )</ID>
+    <ID>LongMethod:DylanMediaService.kt$DylanMediaService$override fun onCreate()</ID>
+    <ID>LongMethod:HomeScreen.kt$@Composable fun HomeScreen( container: AppContainer, onOpenAlbum: (String) -&gt; Unit, onPlaySongs: (List&lt;Song&gt;, Int) -&gt; Unit, onOpenSettings: () -&gt; Unit = {}, onOpenArtist: (MiniEntity) -&gt; Unit = {}, )</ID>
+    <ID>LongMethod:LibraryScreen.kt$@Composable fun DownloadsScreen( container: AppContainer, onPlaySongs: (List&lt;Song&gt;, Int) -&gt; Unit, onBack: () -&gt; Unit, )</ID>
+    <ID>LongMethod:LibraryScreen.kt$@Composable fun LibraryScreen( container: AppContainer, onPlaySongs: (List&lt;Song&gt;, Int) -&gt; Unit, onOpenDownloads: () -&gt; Unit, )</ID>
+    <ID>LongMethod:NowPlayingSheet.kt$@OptIn(ExperimentalMaterial3Api::class) @Composable fun NowPlayingSheet( container: AppContainer, onQueue: () -&gt; Unit, onOpenArtist: (String, String) -&gt; Unit = { _, _ -&gt; }, onEnsureService: () -&gt; Unit = {}, )</ID>
+    <ID>LongMethod:QueueSheet.kt$@Composable fun QueueSheet( container: AppContainer, onClose: (() -&gt; Unit)? = null, )</ID>
+    <ID>LongMethod:SearchScreen.kt$@OptIn(FlowPreview::class) @Composable fun SearchScreen( container: AppContainer, onOpenAlbum: (String) -&gt; Unit, onOpenArtist: (MiniEntity) -&gt; Unit, onPlaySongs: (List&lt;Song&gt;, Int) -&gt; Unit, )</ID>
+    <ID>LongMethod:SettingsScreen.kt$@Composable fun SettingsScreen(container: AppContainer)</ID>
+    <ID>LongMethod:SongRow.kt$@Composable fun SongRow( song: Song, index: Int? = null, isPlaying: Boolean = false, isCached: Boolean = false, isFavorite: Boolean = false, progressPct: Int? = null, enabled: Boolean = true, sizeLabel: String? = null, onTap: () -&gt; Unit, onPlayNext: (() -&gt; Unit)? = null, onAddLast: (() -&gt; Unit)? = null, onFavorite: (() -&gt; Unit)? = null, onDownload: (() -&gt; Unit)? = null, onRemoveDownload: (() -&gt; Unit)? = null, onGoToArtist: (() -&gt; Unit)? = null, )</ID>
+    <ID>LoopWithTooManyJumpStatements:QueueSheet.kt$while</ID>
+    <ID>MagicNumber:AlbumScreen.kt$0.5f</ID>
+    <ID>MagicNumber:AppRoot.kt$0.65f</ID>
+    <ID>MagicNumber:AppRoot.kt$0.94f</ID>
+    <ID>MagicNumber:AppRoot.kt$1000L</ID>
+    <ID>MagicNumber:AppRoot.kt$280</ID>
+    <ID>MagicNumber:ArtistScreen.kt$0.45f</ID>
+    <ID>MagicNumber:ExoPlayerEngine.kt$ExoPlayerEngine$100</ID>
+    <ID>MagicNumber:ExoPlayerEngine.kt$ExoPlayerEngine$512</ID>
+    <ID>MagicNumber:ExoPlayerEngine.kt$ExoPlayerEngine$85</ID>
+    <ID>MagicNumber:ExoPlayerEngine.kt$ExoPlayerEngine.Companion$3</ID>
+    <ID>MagicNumber:HomeScreen.kt$12</ID>
+    <ID>MagicNumber:HomeScreen.kt$20</ID>
+    <ID>MagicNumber:HomeScreen.kt$3</ID>
+    <ID>MagicNumber:HomeScreen.kt$5</ID>
+    <ID>MagicNumber:LibraryScreen.kt$10</ID>
+    <ID>MagicNumber:LibraryScreen.kt$20</ID>
+    <ID>MagicNumber:LibraryScreen.kt$30</ID>
+    <ID>MagicNumber:LibraryScreen.kt$5</ID>
+    <ID>MagicNumber:NowPlayingSheet.kt$1000</ID>
+    <ID>MagicNumber:NowPlayingSheet.kt$1000L</ID>
+    <ID>MagicNumber:NowPlayingSheet.kt$60</ID>
+    <ID>MagicNumber:NowPlayingSheet.kt$60f</ID>
+    <ID>MagicNumber:SearchScreen.kt$10</ID>
+    <ID>MagicNumber:SearchScreen.kt$120</ID>
+    <ID>MagicNumber:SongRow.kt$0.45f</ID>
+    <ID>MagicNumber:SongRow.kt$0.5f</ID>
+    <ID>MagicNumber:SongRow.kt$3</ID>
+    <ID>MagicNumber:SongRow.kt$99</ID>
+    <ID>MagicNumber:Tokens.kt$0xFF000000</ID>
+    <ID>MagicNumber:Tokens.kt$0xFF111111</ID>
+    <ID>MagicNumber:Tokens.kt$0xFF1A1A1A</ID>
+    <ID>MagicNumber:Tokens.kt$0xFF2E2E2E</ID>
+    <ID>MagicNumber:Tokens.kt$0xFF8A8A8A</ID>
+    <ID>MagicNumber:Tokens.kt$0xFFFF3030</ID>
+    <ID>MagicNumber:Tokens.kt$0xFFFFFFFF</ID>
+    <ID>MatchingDeclarationName:Tokens.kt$DylanTokens</ID>
+    <ID>MaxLineLength:AlbumScreen.kt$Row</ID>
+    <ID>MaxLineLength:AlbumScreen.kt$Text("SHUFFLE", style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 1.2.sp))</ID>
+    <ID>MaxLineLength:AlbumScreen.kt$Text(album?.title.orEmpty().uppercase(), style = MaterialTheme.typography.displayMedium, color = t.textPrimary)</ID>
+    <ID>MaxLineLength:AlbumScreen.kt$colors = ButtonDefaults.buttonColors(containerColor = t.primary, contentColor = t.onPrimary)</ID>
+    <ID>MaxLineLength:AlbumScreen.kt$}</ID>
+    <ID>MaxLineLength:AppRoot.kt$MiniPlayer(container, onExpand = { sheet = Sheet.Np }, onLongPressClear = {}, onEnsureService = onFirstPlay)</ID>
+    <ID>MaxLineLength:AppRoot.kt$color = if (selected) LocalDylanTokens.current.primary else LocalDylanTokens.current.textSecondary</ID>
+    <ID>MaxLineLength:AppRoot.kt$else -&gt; LibraryScreen(container, onPlaySongs = playNow, onOpenDownloads = { backStack.add(Screen.Downloads) })</ID>
+    <ID>MaxLineLength:AppRoot.kt$tint = if (selected) LocalDylanTokens.current.primary else LocalDylanTokens.current.textSecondary</ID>
+    <ID>MaxLineLength:AppRoot.kt$val p = if (heightPx &gt; 0f &amp;&amp; npState.offset.isFinite()) (npState.offset / heightPx).coerceIn(0f, 1f) else 1f</ID>
+    <ID>MaxLineLength:ArtistScreen.kt$Row</ID>
+    <ID>MaxLineLength:ArtistScreen.kt$Text((artist?.name ?: fallbackName).uppercase(), style = MaterialTheme.typography.displayMedium, color = t.textPrimary)</ID>
+    <ID>MaxLineLength:ArtistScreen.kt$colors = ButtonDefaults.buttonColors(containerColor = t.primary, contentColor = t.onPrimary)</ID>
+    <ID>MaxLineLength:ArtistScreen.kt$}</ID>
+    <ID>MaxLineLength:Dyl.kt$Dyl$"M10.59 9.17L5.41 4 4 5.41l5.17 5.17 1.42-1.41zM14.5 4l2.04 2.04L4 18.59 5.41 20 17.96 7.46 20 9.5V4h-5.5zm.33 9.41l-1.41 1.41 3.13 3.13L14.5 20H20v-5.5l-2.04 2.04-3.13-3.13z"</ID>
+    <ID>MaxLineLength:Dyl.kt$Dyl$"M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"</ID>
+    <ID>MaxLineLength:Dyl.kt$Dyl$"M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z"</ID>
+    <ID>MaxLineLength:Dyl.kt$Dyl$"M15 6H3v2h12V6zm0 4H3v2h12v-2zM3 16h8v-2H3v2zM17 6v8.18c-.31-.11-.65-.18-1-.18-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3V8h3V6h-5z"</ID>
+    <ID>MaxLineLength:Dyl.kt$Dyl$"M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5z"</ID>
+    <ID>MaxLineLength:Dyl.kt$Dyl$"M16.5 3c-1.74 0-3.41.81-4.5 2.09C10.91 3.81 9.24 3 7.5 3 4.42 3 2 5.42 2 8.5c0 3.78 3.4 6.86 8.55 11.54L12 21.35l1.45-1.32C18.6 15.36 22 12.28 22 8.5 22 5.42 19.58 3 16.5 3zm-4.4 15.55l-.1.1-.1-.1C7.14 14.24 4 11.39 4 8.5 4 6.5 5.5 5 7.5 5c1.54 0 3.04.99 3.57 2.36h1.87C13.46 5.99 14.96 5 16.5 5c2 0 3.5 1.5 3.5 3.5 0 2.89-3.14 5.74-7.9 10.05z"</ID>
+    <ID>MaxLineLength:Dyl.kt$Dyl$"M20 2H8c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-8 12V7h5v3h-3v4h-2zM4 6H2v14c0 1.1.9 2 2 2h14v-2H4V6z"</ID>
+    <ID>MaxLineLength:DylanMediaService.kt$DylanMediaService$MediaSession.MediaItemsWithStartPosition(ImmutableList.copyOf(mediaItems), index.coerceIn(0, mediaItems.size - 1), posMs)</ID>
+    <ID>MaxLineLength:DylanMediaService.kt$DylanMediaService$val root = runCatching { Json.parseToJsonElement(json).jsonObject }.getOrNull() ?: return@withTimeoutOrNull empty</ID>
+    <ID>MaxLineLength:ExoPlayerEngine.kt$ExoPlayerEngine$val idx = (0 until player.mediaItemCount).firstOrNull { player.getMediaItemAt(it).mediaId == itemId }</ID>
+    <ID>MaxLineLength:ExoPlayerEngine.kt$ExoPlayerEngine.&lt;no name provided&gt;$log.e("exo", "playerError item=${player.currentMediaItem?.mediaId} code=${error.errorCode} ${error.message ?: ""}")</ID>
+    <ID>MaxLineLength:ExoPlayerEngine.kt$ExoPlayerEngine.&lt;no name provided&gt;$player.getMediaItemAt(idx - 1).mediaId.let { prev -&gt; emit(EngineEvent.ItemEnded(prev)) }</ID>
+    <ID>MaxLineLength:ExoPlayerEngine.kt$ExoPlayerEngine.&lt;no name provided&gt;$val kind = if (error.errorCode in 2000..2999) dylan.playback.EngineErr.SOURCE else dylan.playback.EngineErr.DECODE</ID>
+    <ID>MaxLineLength:HomeScreen.kt$val topSearchesDeferred = async { runCatching { container.provider.topSearches() }.getOrDefault(emptyList()) }</ID>
+    <ID>MaxLineLength:LibraryScreen.kt$"Cached audio ${formatBytes(totalBytes)} of ${formatBytes(container.cfg.cacheMaxBytes)} · ${songs.size} songs"</ID>
+    <ID>MaxLineLength:LibraryScreen.kt$androidx.compose.material3.TextButton(onClick = { pendingRemove = null }) { Text("Cancel", color = t.textSecondary) }</ID>
+    <ID>MaxLineLength:LibraryScreen.kt$if (downloadCount == 0) "Nothing saved yet" else "$downloadCount songs · ${formatBytes(downloadBytes)}"</ID>
+    <ID>MaxLineLength:LibraryScreen.kt$onTap = { onPlaySongs(songs.map { it.first }, songs.indexOfFirst { it.second.song_id == row.song_id }.coerceAtLeast(0)) }</ID>
+    <ID>MaxLineLength:MainActivity.kt$MainActivity$val granted = ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED</ID>
+    <ID>MaxLineLength:NowPlayingSheet.kt$((sliderState.value - range.start) / (range.endInclusive - range.start)).coerceIn(0f, 1f)</ID>
+    <ID>MaxLineLength:NowPlayingSheet.kt$Icon(dylan.android.ui.Dyl.Repeat, "Repeat", tint = if (state.repeat != Repeat.OFF) t.primary else t.textPrimary)</ID>
+    <ID>MaxLineLength:NowPlayingSheet.kt$Icon(dylan.android.ui.Dyl.Shuffle, "Shuffle", tint = if (state.shuffleOn) t.primary else t.textPrimary)</ID>
+    <ID>MaxLineLength:NowPlayingSheet.kt$Row</ID>
+    <ID>MaxLineLength:NowPlayingSheet.kt$style = MaterialTheme.typography.bodyMedium.copy(fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold)</ID>
+    <ID>MaxLineLength:SearchScreen.kt$items</ID>
+    <ID>MaxLineLength:SearchScreen.kt$val albumsDef = async { if (wantAlbums) runCatching { container.provider.searchAlbums(q, nextAlbum) }.getOrNull() else null }</ID>
+    <ID>MaxLineLength:SearchScreen.kt$val artistsDef = async { if (wantArtists) runCatching { container.provider.searchArtists(q, nextArtist) }.getOrNull() else null }</ID>
+    <ID>MaxLineLength:SearchScreen.kt$val songsDef = async { if (wantSongs) runCatching { container.provider.search(q, nextSong) }.getOrNull() else null }</ID>
+    <ID>MaxLineLength:SettingsScreen.kt$"$songCount of ${container.cfg.cacheMaxFiles} songs · ${formatBytes(container.cfg.cacheMaxBytes)} budget"</ID>
+    <ID>MaxLineLength:SettingsScreen.kt$HorizontalDivider(color = LocalDylanTokens.current.divider.copy(alpha = 0.45f), modifier = Modifier.padding(start = 16.dp))</ID>
+    <ID>MaxLineLength:SettingsScreen.kt$dismissButton = { TextButton(onClick = { confirmClear = false }) { Text("Cancel", color = t.textSecondary) } }</ID>
+    <ID>MaxLineLength:SettingsScreen.kt$val intent = android.content.Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS)</ID>
+    <ID>MaxLineLength:SongRow.kt$Box</ID>
+    <ID>MaxLineLength:SongRow.kt$Text(sizeLabel.uppercase(), style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 0.6.sp), color = t.textSecondary)</ID>
+    <ID>MayBeConst:Copy.kt$Copy$val CORRUPT = "That file didn't download cleanly. Retrying…"</ID>
+    <ID>MayBeConst:Copy.kt$Copy$val EXPIRED = "Couldn't refresh this track. Try again."</ID>
+    <ID>MayBeConst:Copy.kt$Copy$val GEO_BLOCKED = "Not available in your region."</ID>
+    <ID>MayBeConst:Copy.kt$Copy$val NETWORK = "Check your connection and try again."</ID>
+    <ID>MayBeConst:Copy.kt$Copy$val NOT_CACHEABLE = "This track can't be saved for offline play."</ID>
+    <ID>MayBeConst:Copy.kt$Copy$val NOT_FOUND = "This track seems unavailable."</ID>
+    <ID>MayBeConst:Copy.kt$Copy$val OFFLINE = "You're offline — saved music still plays."</ID>
+    <ID>MayBeConst:Copy.kt$Copy$val RATE_LIMITED = "Slow down a moment…"</ID>
+    <ID>MayBeConst:Copy.kt$Copy$val STORAGE = "Not enough space. Free up storage or clear cache."</ID>
+    <ID>MayBeConst:Copy.kt$Copy$val TOO_MANY_FAILURES = "Several tracks failed to load. Check your connection."</ID>
+    <ID>NestedBlockDepth:ExoPlayerEngine.kt$ExoPlayerEngine.&lt;no name provided&gt;$override fun onMediaItemTransition( item: MediaItem?, reason: Int, )</ID>
+    <ID>UnusedParameter:AlbumScreen.kt$onBack: () -&gt; Unit</ID>
+    <ID>UnusedParameter:AppRoot.kt$onLongPressClear: () -&gt; Unit</ID>
+  </CurrentIssues>
+</SmellBaseline>

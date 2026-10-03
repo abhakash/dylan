@@ -12,8 +12,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -25,11 +23,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
-import dylan.android.ui.Dyl
 import dylan.android.ui.LocalDylanTokens
 import dylan.model.MiniEntity
 import dylan.model.Song
@@ -54,13 +53,20 @@ fun SongRow(
 ) {
     var menuOpen by remember { mutableStateOf(false) }
     val t = LocalDylanTokens.current
+    // Long-press is the only way into the actions now, so it has to *feel* like a deliberate
+    // gesture rather than an accidental one — without feedback there is nothing telling the user
+    // the row is pressable in a second way.
+    val haptics = LocalHapticFeedback.current
     Row(
         modifier =
             Modifier
                 .fillMaxWidth()
                 .combinedClickable(
                     onClick = onTap,
-                    onLongClick = { menuOpen = true },
+                    onLongClick = {
+                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                        menuOpen = true
+                    },
                     enabled = enabled,
                 ).alpha(if (enabled) 1f else 0.45f)
                 .padding(horizontal = 16.dp, vertical = 8.dp),
@@ -123,9 +129,6 @@ fun SongRow(
         }
         if (sizeLabel != null) {
             Text(sizeLabel.uppercase(), style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 0.6.sp), color = t.textSecondary)
-        }
-        IconButton(onClick = { menuOpen = true }) {
-            Icon(Dyl.MoreVert, contentDescription = "More options", tint = t.textSecondary)
         }
         DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
             onPlayNext?.let {

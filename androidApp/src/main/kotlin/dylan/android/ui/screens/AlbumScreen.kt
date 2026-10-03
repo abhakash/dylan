@@ -26,7 +26,6 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -42,15 +41,18 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import dylan.android.ui.Copy
 import dylan.android.ui.LocalDylanTokens
 import dylan.android.ui.components.SongRow
 import dylan.android.ui.components.canPlay
 import dylan.android.ui.components.rememberCachedKeys
+import dylan.android.ui.components.rememberDownloadPct
 import dylan.android.ui.components.rememberIsOnline
 import dylan.di.AppContainer
 import dylan.model.Album
+import dylan.model.message
 import dylan.playback.Intent
 import kotlin.random.Random
 
@@ -65,26 +67,31 @@ fun AlbumScreen(
 ) {
     val t = LocalDylanTokens.current
     var album by remember { mutableStateOf<Album?>(null) }
-    var failed by remember { mutableStateOf(false) }
+    var errorCode by remember { mutableStateOf<dylan.model.ErrorCode?>(null) }
 
+    // The provider returns a CatalogResult, so there is nothing left to catch: every failure mode
+    // (offline, geo-blocked, rate limited, bot-walled, timed out, gone) is a named code with its own
+    // message. The old try/catch here was dead code — the provider could only return null — and the
+    // screen showed "Check your connection" for all five.
     LaunchedEffect(albumId) {
-        try {
-            album = container.provider.album(albumId)
-        } catch (e: kotlinx.coroutines.CancellationException) {
-            throw e
-        } catch (_: Exception) {
-            album = null
+        when (val r = container.provider.albumDetail(albumId)) {
+            is dylan.provider.CatalogResult.Ok -> {
+                album = r.value
+                errorCode = null
+            }
+            is dylan.provider.CatalogResult.Err -> {
+                album = null
+                errorCode = r.code
+            }
         }
-        failed = album == null
     }
 
     val songs = album?.songs.orEmpty()
-    val st by container.orchestrator.state.collectAsState()
+    val st by container.orchestrator.state.collectAsStateWithLifecycle()
     val playing = st.phase is dylan.model.Phase.Playing
     val ctx = LocalContext.current
     val isOnline = rememberIsOnline(container)
     val cachedKeys = rememberCachedKeys(container)
-    val progress by container.downloads.progress.collectAsState()
     val listState = rememberLazyListState()
     val density = LocalDensity.current
     val heroPx = remember(density) { with(density) { AlbumHeroHeight.toPx() } }
@@ -151,14 +158,18 @@ fun AlbumScreen(
                     }
                 }
             }
-            itemsIndexed(songs, key = { _, s -> s.key.songId }) { i, song ->
+            // One album can carry the same songId twice (a duplicated track in the catalogue listing), and a
+            // duplicate LazyColumn key is a hard crash, not a glitch. Occurrence-indexed for the
+            // same reason QueueSheet/SearchScreen namespace theirs.
+            itemsIndexed(songs, key = { i, s -> "${s.key.provider}:${s.key.songId}#$i" }) { i, song ->
                 val can = canPlay(isOnline, cachedKeys, song.key)
+                val pct = rememberDownloadPct(container, song.key)
                 SongRow(
                     song = song,
                     index = i + 1,
                     isPlaying = song.key == st.current?.key && playing,
                     isCached = song.key in cachedKeys,
-                    progressPct = progress[song.key],
+                    progressPct = pct.value,
                     enabled = can,
                     onTap = {
                         if (!can) {
@@ -171,10 +182,10 @@ fun AlbumScreen(
                     },
                 )
             }
-            if (failed) {
+            if (errorCode != null) {
                 item {
                     Text(
-                        dylan.android.ui.Copy.NETWORK,
+                        dylan.model.DylanFailure(errorCode!!).message(),
                         style = MaterialTheme.typography.bodyMedium,
                         color = t.error,
                         modifier = Modifier.padding(16.dp),

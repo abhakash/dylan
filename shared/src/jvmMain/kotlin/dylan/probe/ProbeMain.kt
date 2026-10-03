@@ -1,12 +1,16 @@
 package dylan.probe
 
 import dylan.config.AppConfig
+import dylan.diag.LogBuffer
 import dylan.model.MiniEntity
 import dylan.model.Quality
 import dylan.model.Song
 import dylan.net.apiClient
 import dylan.net.bulkClient
 import dylan.provider.saavn.SaavnProvider
+import dylan.util.AppDispatchers
+import dylan.util.NetClass
+import dylan.util.NetMonitor
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.cio.CIO
 import io.ktor.client.plugins.websocket.webSocketSession
@@ -20,7 +24,11 @@ import io.ktor.http.HttpHeaders
 import io.ktor.http.isSuccess
 import io.ktor.utils.io.readAvailable
 import io.ktor.websocket.close
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
@@ -51,6 +59,21 @@ object Probe {
     private lateinit var provider: SaavnProvider
     private var lastMediaHitMs = 0L
     private val rows = mutableListOf<Row>()
+
+    /** Per-check window. Overridable so the TIMEOUT arm of the gate can be demonstrated offline. */
+    private var checkTimeoutMs = DEFAULT_CHECK_TIMEOUT_MS
+
+    private const val DEFAULT_CHECK_TIMEOUT_MS = 45_000L
+
+    /**
+     * A hang is a failure, not an absence of one.
+     *
+     * Gating only on `FAIL` meant a blackholed origin — captive portal, firewall DROP, a dead CDN
+     * edge, the single most common way a live gate breaks — produced three `TIMEOUT` rows and exit
+     * 0. `withTimeoutOrNull` in `check` turns "never answered" into a `TIMEOUT` status precisely so
+     * it can be counted here; counting only `FAIL` threw that distinction away.
+     */
+    private val GATING_STATUSES = setOf("FAIL", "TIMEOUT")
 
     private suspend fun HttpClient.mediaGet(
         url: String,
@@ -104,7 +127,7 @@ object Probe {
         id: String,
         gate: String,
         desc: String,
-        timeoutMs: Long = 45_000,
+        timeoutMs: Long = checkTimeoutMs,
         block: suspend () -> String,
     ) {
         try {
@@ -134,14 +157,39 @@ object Probe {
         mode: String,
         fast: Boolean,
     ): Int {
-        cfg = AppConfig()
+        // DYLAN_PROBE_API_BASE / DYLAN_PROBE_WS_URL let the gate be pointed at a
+        // dead endpoint on purpose — that is the only way to prove probeCi is
+        // capable of returning non-zero. DYLAN_PROBE_TIMEOUT_MS shortens the
+        // per-check window so that proof does not take 45 s per check.
+        val defaults = AppConfig()
+        cfg =
+            defaults.copy(
+                apiBaseUrl = System.getenv("DYLAN_PROBE_API_BASE") ?: defaults.apiBaseUrl,
+                wsSearchUrl = System.getenv("DYLAN_PROBE_WS_URL") ?: defaults.wsSearchUrl,
+            )
+        checkTimeoutMs =
+            System.getenv("DYLAN_PROBE_TIMEOUT_MS")?.toLongOrNull()?.coerceAtLeast(1L)
+                ?: DEFAULT_CHECK_TIMEOUT_MS
         api = apiClient(CIO.create(), cfg)
         bulk = bulkClient(CIO.create(), cfg)
-        provider = SaavnProvider(api, cfg)
-
-        val songs = seedSongs()
+        provider =
+            SaavnProvider(
+                api,
+                cfg,
+                CoroutineScope(Dispatchers.IO),
+                TestProbeLanes.disp,
+                TestProbeLanes.net,
+                LogBuffer(),
+            )
+        // S1-S3 need no catalog seed; skipping it also keeps the nightly off the
+        // three extra search+home round trips the local mode uses.
         if (mode == "ci") return structural()
 
+        val songs =
+            runCatching { seedSongs() }.getOrElse {
+                rows += Row("P0", "M0", "FAIL", "catalog seed failed: ${it::class.simpleName}: ${it.message}")
+                return report(mode, gates = true)
+            }
         val sample = songs.filter { it.resolveRef != null && it.durationS > 0 }
 
         check("P5", "M1", "resolveRef coverage over ${songs.size} sampled songs (warn-only)") {
@@ -264,7 +312,7 @@ object Probe {
         }
 
         check("P12", "M0", "WS handshake + round-trip < 2s") {
-            val wsCfg = cfg.copy(wsRequestTimeoutMs = 3_000)
+            val wsCfg = cfg.copy(wsAnswerTimeoutMs = 3_000)
             val t0 = System.nanoTime()
             val session = api.wsClientForProbe(wsCfg).webSocketSession(cfg.wsSearchUrl)
             session.send(
@@ -376,13 +424,13 @@ object Probe {
     }
 
     private suspend fun structural(): Int {
-        check("S1", "CI", "api.php returns JSON (search.getResults live shape)") {
+        check("S1", "M0", "api.php returns JSON (search.getResults live shape)") {
             val paged = provider.search("arijit", 1)
             require(paged.items.isNotEmpty(), "live search mapped zero songs")
             "mapped ${paged.items.size} songs, first='${paged.items.first().title}'"
         }
 
-        check("S2", "CI", "autocomplete reachable over plain HTTP") {
+        check("S2", "M0", "autocomplete reachable over plain HTTP") {
             val text =
                 api
                     .get(cfg.apiBaseUrl) {
@@ -393,13 +441,13 @@ object Probe {
             require(text.trimStart().startsWith("{"), "not JSON")
             "ok"
         }
-        check("S3", "CI", "WS handshake reachable") {
+        check("S3", "M0", "WS handshake reachable") {
             val s = withTimeoutOrNull(8_000) { api.wsClientForProbe(cfg).webSocketSession(cfg.wsSearchUrl) }
             requireNotNull(s) { "handshake failed" }
             s.close()
             "reachable"
         }
-        return report("ci", gates = false)
+        return report("ci", gates = true)
     }
 
     private fun report(
@@ -407,28 +455,51 @@ object Probe {
         gates: Boolean,
     ): Int {
         val stamp = java.time.Instant.now()
-        val failed = rows.count { it.status == "FAIL" }
+        val bad = rows.count { it.status in GATING_STATUSES }
         println("\n=== DYLAN probe ($mode) @ $stamp ===")
         rows.forEach { r ->
             val mark =
                 when (r.status) {
                     "PASS" -> "+"
-                    "FAIL" -> "!"
+                    in GATING_STATUSES -> "!"
                     else -> "-"
                 }
             println("[$mark] ${r.id} (${r.gate}) ${r.note}")
         }
-        println("---\n${rows.size - failed}/${rows.size} checks passed")
-        val blocking = if (gates) rows.filter { it.status == "FAIL" && it.gate == "M0" } else emptyList()
-        if (blocking.isNotEmpty()) println("GATING FAILURES: ${blocking.joinToString { it.id }}")
-        val file = File("tools/probe-results.md")
-        file.appendText(
-            "\n## $stamp mode=$mode\n" +
+        println("---\n${rows.size - bad}/${rows.size} checks passed")
+        val blocking = if (gates) rows.filter { it.status in GATING_STATUSES && it.gate == "M0" } else emptyList()
+        if (blocking.isNotEmpty()) {
+            println(
+                "GATING FAILURES: ${blocking.joinToString { "${it.id}(${it.status})" }}" +
+                    " — see build/reports/probe/probe-results.md",
+            )
+        }
+        // Notes carry live API response bodies — never write them to a tracked file.
+        val dir = File("build/reports/probe").also { it.mkdirs() }
+        File(dir, "probe-results.md").appendText(
+            "\n## $stamp mode=$mode gates=$gates\n" +
                 rows.joinToString("\n") { "| ${it.id} | ${it.gate} | ${it.status} | ${it.note.replace("|", "/")} |" } +
                 "\n",
         )
         return if (blocking.isEmpty()) 0 else 1
     }
+}
+
+/**
+ * The lanes and connectivity the live probe runs on. The probe is a `main()` with no graph, so it
+ * supplies them itself; `AlwaysOnline` matches the `NetMonitor` contract default of a platform
+ * monitor that actually knows the answer (the probe requires the network to be up by construction).
+ */
+private object TestProbeLanes {
+    val disp = AppDispatchers(Dispatchers.Default, Dispatchers.IO, Dispatchers.Default, Dispatchers.Default)
+    val net =
+        object : NetMonitor {
+            override fun current(): NetClass = NetClass.UNMETERED
+
+            override fun isOnline(): Boolean = true
+
+            override fun changes(): Flow<NetClass> = MutableStateFlow(NetClass.UNMETERED)
+        }
 }
 
 private fun HttpClient.wsClientForProbe(cfg: AppConfig): HttpClient =

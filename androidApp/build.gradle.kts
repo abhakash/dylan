@@ -13,7 +13,21 @@ ktlint {
 }
 
 detekt {
+    buildUponDefaultConfig = true
+    allRules = false
     config.setFrom(rootProject.files("config/detekt.yml"))
+    source.setFrom(
+        "src/main/kotlin",
+        "src/main/java",
+        "src/commonMain/kotlin",
+        "src/jvmMain/kotlin",
+        "src/androidMain/kotlin",
+        "src/test/kotlin",
+        "src/commonTest/kotlin",
+    )
+    // detekt's `detektBaseline` task rewrites (does not merge) the file it is
+    // pointed at, so shared and androidApp cannot share one baseline file.
+    baseline = rootProject.file("config/detekt-baseline-androidApp.xml")
 }
 
 val keystoreProperties = Properties()
@@ -109,8 +123,11 @@ android {
     packaging { resources.excludes += "/META-INF/{AL2.0,LGPL2.1}" }
     lint {
         baseline = file("lint-baseline.xml")
-        abortOnError = false
-        checkDependencies = false
+        abortOnError = true
+        checkDependencies = true
+        // Compose screens legitimately omit @Preview previews; everything else
+        // (NewApi included) keeps its default severity and can fail the build.
+        disable += "MissingPreview"
     }
 }
 

@@ -20,7 +20,6 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -32,15 +31,18 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import dylan.android.ui.Copy
 import dylan.android.ui.LocalDylanTokens
 import dylan.android.ui.components.SongRow
 import dylan.android.ui.components.canPlay
 import dylan.android.ui.components.rememberCachedKeys
+import dylan.android.ui.components.rememberDownloadPct
 import dylan.android.ui.components.rememberIsOnline
 import dylan.di.AppContainer
 import dylan.model.Artist
+import dylan.model.message
 import dylan.playback.Intent
 import kotlin.random.Random
 
@@ -53,20 +55,29 @@ fun ArtistScreen(
 ) {
     val t = LocalDylanTokens.current
     var artist by remember { mutableStateOf<Artist?>(null) }
-    var failed by remember { mutableStateOf(false) }
+    var errorCode by remember { mutableStateOf<dylan.model.ErrorCode?>(null) }
 
+    // Typed: a numeric id has no route on this API and is refused with NOT_FOUND, so a stale
+    // numeric token says "unavailable" instead of the old blanket "Check your connection".
     LaunchedEffect(artistToken) {
-        artist = runCatching { container.provider.artist(artistToken) }.getOrNull()
-        failed = artist == null
+        when (val r = container.provider.artistDetail(artistToken)) {
+            is dylan.provider.CatalogResult.Ok -> {
+                artist = r.value
+                errorCode = null
+            }
+            is dylan.provider.CatalogResult.Err -> {
+                artist = null
+                errorCode = r.code
+            }
+        }
     }
 
     val songs = artist?.songs.orEmpty()
-    val st by container.orchestrator.state.collectAsState()
+    val st by container.orchestrator.state.collectAsStateWithLifecycle()
     val playing = st.phase is dylan.model.Phase.Playing
     val ctx = LocalContext.current
     val isOnline = rememberIsOnline(container)
     val cachedKeys = rememberCachedKeys(container)
-    val progress by container.downloads.progress.collectAsState()
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 24.dp)) {
         item {
             Box(Modifier.fillMaxWidth()) {
@@ -122,12 +133,13 @@ fun ArtistScreen(
         }
         itemsIndexed(songs) { i, song ->
             val can = canPlay(isOnline, cachedKeys, song.key)
+            val pct = rememberDownloadPct(container, song.key)
             SongRow(
                 song = song,
                 index = i + 1,
                 isPlaying = song.key == st.current?.key && playing,
                 isCached = song.key in cachedKeys,
-                progressPct = progress[song.key],
+                progressPct = pct.value,
                 enabled = can,
                 onTap = {
                     if (!can) {
@@ -140,10 +152,10 @@ fun ArtistScreen(
                 },
             )
         }
-        if (failed) {
+        if (errorCode != null) {
             item {
                 Text(
-                    dylan.android.ui.Copy.NETWORK,
+                    dylan.model.DylanFailure(errorCode!!).message(),
                     style = MaterialTheme.typography.bodyMedium,
                     color = t.error,
                     modifier = Modifier.padding(16.dp),

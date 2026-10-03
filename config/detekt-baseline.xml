@@ -1,0 +1,138 @@
+<?xml version="1.0" ?>
+<SmellBaseline>
+  <ManuallySuppressedIssues/>
+  <CurrentIssues>
+    <ID>CyclomaticComplexMethod:DownloadEngine.kt$DownloadEngine$private suspend fun runJob(job: DownloadJob)</ID>
+    <ID>CyclomaticComplexMethod:ProbeMain.kt$Probe$suspend fun run( mode: String, fast: Boolean, ): Int</ID>
+    <ID>LargeClass:Orchestrator.kt$Orchestrator</ID>
+    <ID>LongMethod:DownloadEngine.kt$DownloadEngine$private suspend fun runJob(job: DownloadJob)</ID>
+    <ID>LongMethod:ProbeMain.kt$Probe$suspend fun run( mode: String, fast: Boolean, ): Int</ID>
+    <ID>LongParameterList:DownloadEngine.kt$DownloadEngine$( private val db: Dylan, private val fs: FileSystem, private val paths: Paths, private val cfg: AppConfig, private val disp: AppDispatchers, private val provider: MusicProvider, private val bulk: HttpClient, private val breakers: Breakers, private val cacheManager: CacheManager, private val netClass: () -&gt; NetClass, private val qualityPref: suspend () -&gt; Quality, private val otherEndpointsHealthy: () -&gt; Boolean = { true }, /** * Free bytes on the audio volume. [dylan.util.freeDiskBytes] is a top-level `expect fun`, so * without this parameter the `diskFloorBytes` branch below is unreachable from a test and * `cfg.diskFloorBytes` is untested config. Defaulted, so production behaviour is unchanged. */ private val freeDisk: (String) -&gt; Long = ::freeDiskBytes, /** * The `.part` → final rename. `dylan.util.fsRename` goes through `java.nio` on the JVM, which an * okio `FileSystem` decorator cannot intercept, so the "the rename failed" half of the * `STORAGE` verdict is otherwise untestable. Defaulted; behaviour unchanged without it. */ private val rename: (String, String) -&gt; Unit = ::fsRename, private val log: dylan.diag.LogBuffer, )</ID>
+    <ID>LoopWithTooManyJumpStatements:AppContainer.kt$AppContainer$while</ID>
+    <ID>LoopWithTooManyJumpStatements:ProbeMain.kt$Probe$while</ID>
+    <ID>MagicNumber:AppConfig.kt$AppConfig$1000</ID>
+    <ID>MagicNumber:AppConfig.kt$AppConfig$1024</ID>
+    <ID>MagicNumber:AppConfig.kt$AppConfig$150L</ID>
+    <ID>MagicNumber:AppConfig.kt$AppConfig$24</ID>
+    <ID>MagicNumber:AppConfig.kt$AppConfig$48L</ID>
+    <ID>MagicNumber:AppConfig.kt$AppConfig$500L</ID>
+    <ID>MagicNumber:AppConfig.kt$AppConfig$60</ID>
+    <ID>MagicNumber:AppConfig.kt$AppConfig$6L</ID>
+    <ID>MagicNumber:AppConfig.kt$AppConfig$7L</ID>
+    <ID>MagicNumber:AppContainer.kt$AppContainer$8_000</ID>
+    <ID>MagicNumber:AppContainer.kt$AppContainer.Companion$12</ID>
+    <ID>MagicNumber:AppContainer.kt$AppContainer.Companion$4</ID>
+    <ID>MagicNumber:AppContainer.kt$AppContainer.Companion$8</ID>
+    <ID>MagicNumber:Clients.kt$10_000</ID>
+    <ID>MagicNumber:Clients.kt$15_000</ID>
+    <ID>MagicNumber:Clients.kt$20_000</ID>
+    <ID>MagicNumber:Clients.kt$30_000</ID>
+    <ID>MagicNumber:Clients.kt$503</ID>
+    <ID>MagicNumber:Clients.kt$5_000</ID>
+    <ID>MagicNumber:DownloadEngine.kt$8</ID>
+    <ID>MagicNumber:FileLogSink.kt$FileLogSink.Companion$3</ID>
+    <ID>MagicNumber:IosPlayerEngine.kt$IosPlayerEngine$100</ID>
+    <ID>MagicNumber:Models.kt$Quality.Companion$320</ID>
+    <ID>MagicNumber:Orchestrator.kt$Orchestrator$100</ID>
+    <ID>MagicNumber:Orchestrator.kt$Orchestrator$1000</ID>
+    <ID>MagicNumber:Orchestrator.kt$Orchestrator$3</ID>
+    <ID>MagicNumber:ProbeMain.kt$Probe$100</ID>
+    <ID>MagicNumber:ProbeMain.kt$Probe$100.0</ID>
+    <ID>MagicNumber:ProbeMain.kt$Probe$1000</ID>
+    <ID>MagicNumber:ProbeMain.kt$Probe$1024</ID>
+    <ID>MagicNumber:ProbeMain.kt$Probe$16</ID>
+    <ID>MagicNumber:ProbeMain.kt$Probe$1_000_000</ID>
+    <ID>MagicNumber:ProbeMain.kt$Probe$200</ID>
+    <ID>MagicNumber:ProbeMain.kt$Probe$206</ID>
+    <ID>MagicNumber:ProbeMain.kt$Probe$20_000</ID>
+    <ID>MagicNumber:ProbeMain.kt$Probe$24</ID>
+    <ID>MagicNumber:ProbeMain.kt$Probe$2_000</ID>
+    <ID>MagicNumber:ProbeMain.kt$Probe$3</ID>
+    <ID>MagicNumber:ProbeMain.kt$Probe$30</ID>
+    <ID>MagicNumber:ProbeMain.kt$Probe$300</ID>
+    <ID>MagicNumber:ProbeMain.kt$Probe$350</ID>
+    <ID>MagicNumber:ProbeMain.kt$Probe$3_000</ID>
+    <ID>MagicNumber:ProbeMain.kt$Probe$403</ID>
+    <ID>MagicNumber:ProbeMain.kt$Probe$5_000</ID>
+    <ID>MagicNumber:ProbeMain.kt$Probe$60</ID>
+    <ID>MagicNumber:ProbeMain.kt$Probe$600_000</ID>
+    <ID>MagicNumber:ProbeMain.kt$Probe$60_000</ID>
+    <ID>MagicNumber:ProbeMain.kt$Probe$64</ID>
+    <ID>MagicNumber:ProbeMain.kt$Probe$8_000</ID>
+    <ID>MagicNumber:ProbeMain.kt$Probe$95.0</ID>
+    <ID>MagicNumber:Reconciler.kt$Reconciler$3_600_000L</ID>
+    <ID>MagicNumber:Repos.kt$1000</ID>
+    <ID>MagicNumber:Repos.kt$24L</ID>
+    <ID>MagicNumber:Repos.kt$60</ID>
+    <ID>MagicNumber:Util.ios.kt$1000</ID>
+    <ID>MaxLineLength:AppConfig.kt$AppConfig$val userAgent: String = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"</ID>
+    <ID>MaxLineLength:ContractDrift.kt$ContractDrift$derived != m.albumId -&gt; rows += fail("$label.albumId", "TOKEN_MISMATCH", "derived=$derived mapped=${m.albumId}")</ID>
+    <ID>MaxLineLength:ContractDrift.kt$ContractDrift$derived != m.artistId -&gt; rows += fail("$label.artistId", "TOKEN_MISMATCH", "derived=$derived mapped=${m.artistId}")</ID>
+    <ID>MaxLineLength:ContractDrift.kt$ContractDrift$derived == null -&gt; rows += warn("$label.albumId", "FALLBACK_NUMERIC_ID", "id=${m.albumId} (numeric ids yield empty shells)")</ID>
+    <ID>MaxLineLength:ContractDrift.kt$ContractDrift$derived == null -&gt; rows += warn("$label.artistId", "FALLBACK_NUMERIC_ID", "id=${m.artistId} (numeric ids yield empty shells)")</ID>
+    <ID>MaxLineLength:ContractDrift.kt$ContractDrift$fetch("content.getTrending", "__call" to "content.getTrending", "entity_type" to "album", "entity_language" to "hindi")</ID>
+    <ID>MaxLineLength:ContractDrift.kt$ContractDrift$fetch("search.getAlbumResults", "__call" to "search.getAlbumResults", "q" to "arijit", "p" to "1", "n" to "20")</ID>
+    <ID>MaxLineLength:ContractDrift.kt$ContractDrift$fetch("search.getArtistResults", "__call" to "search.getArtistResults", "q" to "arijit", "p" to "1", "n" to "20")</ID>
+    <ID>MaxLineLength:ContractDrift.kt$ContractDrift$if (bad320 &gt; 0) rows += warn("MoreInfo.has320", "PARSE_FAIL", "$bad320/${raw320.size} not boolean literal (mapper coerces to false)")</ID>
+    <ID>MaxLineLength:ContractDrift.kt$ContractDrift$if (paged.items.isEmpty()) rows += fail(label, "EMPTY_MAPPING", "no '$wantType' cards mapped from ${dto.results.size} results")</ID>
+    <ID>MaxLineLength:ContractDrift.kt$ContractDrift$m.albumId == null -&gt; rows += fail("$label.albumId", "TOKEN_DERIVATION_FAILED", "perma_url=${m.permaToken ?: "?"}")</ID>
+    <ID>MaxLineLength:ContractDrift.kt$ContractDrift$m.artistId == null -&gt; rows += fail("$label.artistId", "TOKEN_DERIVATION_FAILED", "perma_url=${m.permaToken ?: "?"}")</ID>
+    <ID>MaxLineLength:ContractDrift.kt$ContractDrift$partial("Album.songs.resolveRef", album.songs.count { s -&gt; s.resolveRef != null }, album.songs.size, "resolve_ref absent")</ID>
+    <ID>MaxLineLength:ContractDrift.kt$ContractDrift$println(" MAPPING_LOSS/EMPTY_MAPPING -&gt; the DTO no longer covers the live payload (dylan.provider.saavn.dto)")</ID>
+    <ID>MaxLineLength:ContractDrift.kt$ContractDrift$println(" NEW_FIELD/TYPE_DRIFT/MISSING_FIELD -&gt; re-capture the matching file in fixtures/ (tools/extract_fixtures.py)")</ID>
+    <ID>MaxLineLength:ContractDrift.kt$ContractDrift$println("DRIFT GATE FAILED: ${fails.size} fail-severity findings, ${unreachable.size} unreachable endpoints")</ID>
+    <ID>MaxLineLength:ContractDrift.kt$ContractDrift$println("[map] $label raw=${dto.results.size} want=$wantType mapped=${paged.items.size} total=${textOf(dto.total)}")</ID>
+    <ID>MaxLineLength:ContractDrift.kt$ContractDrift$rows += fail("$label.auth_url", "SIGNING_FAILED", "auth_url=${authUrl ?: "null"} status=${textOf(root["status"])}")</ID>
+    <ID>MaxLineLength:ContractDrift.kt$ContractDrift$rows += fail("$label.minis", "MAPPING_LOSS", "${dtos.size - minis.size} of ${dtos.size} cards dropped by mapMini")</ID>
+    <ID>MaxLineLength:ContractDrift.kt$ContractDrift$rows += warn("mapPaged.items", "DEDUPE_DROPPED", "${ids.size} raw ids -&gt; ${distinct.size} distinct (D7 known dupes)")</ID>
+    <ID>MaxLineLength:ContractDrift.kt$ContractDrift$sorted.forEach { appendLine("- ${it.severity} ${it.field} | ${it.kind} | ${it.sample.replace("|", "/")}") }</ID>
+    <ID>MaxLineLength:ContractDrift.kt$ContractDrift$val album = fetch("webapi.get album", "__call" to "webapi.get", "token" to token, "type" to "album", "includeMetaTags" to "0")</ID>
+    <ID>MaxLineLength:ContractDrift.kt$ContractDrift$val artist = fetch("webapi.get artist", "__call" to "webapi.get", "token" to token, "type" to "artist", "includeMetaTags" to "0")</ID>
+    <ID>MaxLineLength:ContractDrift.kt$ContractDrift$val auth = fetch("song.generateAuthToken", "__call" to "song.generateAuthToken", "url" to resolveRef, "bitrate" to "128")</ID>
+    <ID>MaxLineLength:ContractDrift.kt$ContractDrift$val tops = checkMinis("topSearches", fetch("content.getTopSearches", "__call" to "content.getTopSearches"), liveShapes.miniCard)</ID>
+    <ID>MaxLineLength:ContractDrift.kt$rows += fail("${expected.family}.$path", "TYPE_DRIFT", "fixture=$expKinds live=$liveKinds e.g. ${live.samples[path]}")</ID>
+    <ID>MaxLineLength:HealthyStore.kt$HealthyStore$cached("mp3track", bytes = 900, bits = 128, ext = "mp3", playCount = 1, lastUsedMs = now - 2_000, ageMs = 30_000)</ID>
+    <ID>MaxLineLength:HealthyStore.kt$HealthyStore.Companion$fun defaultRoot(): Path</ID>
+    <ID>MaxLineLength:HealthyStore.kt$internal</ID>
+    <ID>MaxLineLength:IosGraph.kt$IosGraph$container.orchestrator.submit(dylan.playback.Intent.SetQuality(if (high) Quality.BITRATE_320 else Quality.BITRATE_128))</ID>
+    <ID>MaxLineLength:IosGraph.kt$IosGraph$fun subscribePlayerState(onEach: (PlayerState) -&gt; Unit): KotlinSubscription</ID>
+    <ID>MaxLineLength:IosGraph.kt$IosGraph$fun subscribePosition(onEach: (Long) -&gt; Unit): KotlinSubscription</ID>
+    <ID>MaxLineLength:LogSinkPerfHarness.kt$LogSinkPerfHarness$"[bench] %-46s %8.2f ms %5d ns/msg %6d B/msg".format(label, ns / 1_000_000.0, ns / n, if (bytes &lt; 0) -1 else bytes / n)</ID>
+    <ID>MaxLineLength:LogSinkPerfHarness.kt$LogSinkPerfHarness$bench(" format(e): Instant parse + string concats", n) { i -&gt; lineSum += FileLogSink.format(entries[i]).length }</ID>
+    <ID>MaxLineLength:LogSinkPerfHarness.kt$LogSinkPerfHarness$bench(" line.encodeToByteArray().size (removed)", n) { i -&gt; byteSum += entries[i].msg.encodeToByteArray().size }</ID>
+    <ID>MaxLineLength:LogSinkPerfHarness.kt$LogSinkPerfHarness$println("[bench] %-46s %8.2f ms (total, incl. format + file write)".format("NEW writer: full drain of the tail", drainNs / 1_000_000.0))</ID>
+    <ID>MaxLineLength:OriginScript.kt$OriginScript$private fun stepAt(i: Int): OriginStep</ID>
+    <ID>MaxLineLength:OriginScript.kt$private</ID>
+    <ID>MaxLineLength:PlaybackLogicTest.kt$SnapshotSanitizeTest$val r = sanitizeSnapshot(ResumeSnapshot(items = refs, index = 0, shuffleOn = true, order = listOf(0, 0, 1))) { true }</ID>
+    <ID>MaxLineLength:PlaybackLogicTest.kt$SnapshotSanitizeTest$val r = sanitizeSnapshot(ResumeSnapshot(items = refs, index = 0, shuffleOn = true, order = listOf(2, 0, 1))) { it.songId != "b" }</ID>
+    <ID>MaxLineLength:PlaybackLogicTest.kt$SnapshotSanitizeTest$val r = sanitizeSnapshot(ResumeSnapshot(items = refs, index = 0, shuffleOn = true, order = listOf(9, 0))) { true }</ID>
+    <ID>MaxLineLength:ProbeMain.kt$Probe$"""{"url":"/api.php?__call=autocomplete.get&amp;query=$q&amp;_format=json&amp;_marker=0&amp;ctx=web6dot0"}"""</ID>
+    <ID>MaxLineLength:ProbeMain.kt$Probe$"GET Range expected 206 got $code100${if (!headOk) " (HEAD also failed; GET-Range fallback used)" else ""}"</ID>
+    <ID>MaxLineLength:ProbeMain.kt$Probe$"correlation=$mode (identity echoed in $echoCount/3 frames) -&gt; set SearchChannel.correlationMode accordingly"</ID>
+    <ID>MaxLineLength:ProbeMain.kt$Probe$.</ID>
+    <ID>MaxLineLength:ProbeMain.kt$Probe$if (ttlMs == Long.MAX_VALUE) "still valid past 10min (dominates [60s,10min] assumption)" else "TTL~${ttlMs / 1000}s"</ID>
+    <ID>MaxLineLength:ProbeMain.kt$Probe$provider.home().sections.flatMap { it.items }.filter { it.albumId != null }.take(2)</ID>
+    <ID>MaxLineLength:ProbeMain.kt$Probe$require(ct.startsWith("audio/") || ct.contains("octet-stream"), "DRIFT: media Content-Type='$ct' - bot-wall/HTML surface")</ID>
+    <ID>MaxLineLength:ProbeMain.kt$Probe$val cl320 = r320?.let { bulk.mediaGet(it.url).second[HttpHeaders.ContentLength]?.toLongOrNull() ?: -1 } ?: -1</ID>
+    <ID>MaxLineLength:Repos.kt$val protect = rawResume?.let { decodeSnapshot(it)?.items?.map { r -&gt; "${r.provider}:${r.songId}" } } ?: emptyList&lt;String&gt;()</ID>
+    <ID>MaxLineLength:SaavnSearchChannel.kt$SaavnSearchChannel$internal fun debugState(): String</ID>
+    <ID>MaxLineLength:SearchRankTest.kt$SearchRankTest$SongDto(id = "1", title = "Animal", type = "album", permaUrl = "https://www.jiosaavn.com/album/animal/abc")</ID>
+    <ID>MaxLineLength:SearchRankTest.kt$SearchRankTest$SongDto(id = "3", title = "Arijit", type = "artist", permaUrl = "https://www.jiosaavn.com/artist/arijit/xyz")</ID>
+    <ID>MaxLineLength:Util.android.kt$AndroidNetMonitor$override fun isOnline(): Boolean</ID>
+    <ID>MaxLineLength:Util.android.kt$AndroidNetMonitor$private fun NetworkCapabilities.classOf(): NetClass</ID>
+    <ID>MaxLineLength:Util.android.kt$AndroidNetMonitor$private val service: ConnectivityManager? by lazy { ctx.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager }</ID>
+    <ID>MaxLineLength:Util.ios.kt$val attrs = NSFileManager.defaultManager.attributesOfFileSystemForPath(path, null) ?: return@runCatching DISK_UNKNOWN</ID>
+    <ID>MaxLineLength:V0StoreBuilder.kt$V0StoreBuilder.Handle$fun</ID>
+    <ID>NestedBlockDepth:DownloadEngine.kt$DownloadEngine$private suspend fun runJob(job: DownloadJob)</ID>
+    <ID>ReturnCount:DownloadEngine.kt$DownloadEngine$private suspend fun runJob(job: DownloadJob)</ID>
+    <ID>SwallowedException:Rename.android.kt$e: java.nio.file.AtomicMoveNotSupportedException</ID>
+    <ID>SwallowedException:Rename.jvm.kt$e: java.nio.file.AtomicMoveNotSupportedException</ID>
+    <ID>TooGenericExceptionCaught:DriverFactory.android.kt$DriverFactory$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:DriverFactory.ios.kt$DriverFactory$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:DriverFactory.jvm.kt$DriverFactory$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:FlowAdapter.kt$FlowAdapter$t: Throwable</ID>
+    <ID>TooGenericExceptionCaught:ProbeMain.kt$Probe$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:SaavnSearchChannel.kt$SaavnSearchChannel$e: Exception</ID>
+    <ID>TooManyFunctions:Orchestrator.kt$Orchestrator</ID>
+  </CurrentIssues>
+</SmellBaseline>
