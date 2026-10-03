@@ -1,25 +1,12 @@
 package dylan.android.ui
 
 import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.AnchoredDraggableDefaults
-import androidx.compose.foundation.gestures.AnchoredDraggableState
-import androidx.compose.foundation.gestures.DraggableAnchors
-import androidx.compose.foundation.gestures.Orientation
-import androidx.compose.foundation.gestures.anchoredDraggable
-import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectVerticalDragGestures
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -38,33 +25,22 @@ import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.runtime.toMutableStateList
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.TransformOrigin
-import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import coil3.compose.AsyncImage
 import dylan.android.ui.screens.AlbumScreen
 import dylan.android.ui.screens.ArtistScreen
 import dylan.android.ui.screens.DownloadsScreen
 import dylan.android.ui.screens.HomeScreen
 import dylan.android.ui.screens.LibraryScreen
-import dylan.android.ui.screens.NowPlayingSheet
-import dylan.android.ui.screens.QueueSheet
 import dylan.android.ui.screens.SearchScreen
+import dylan.android.ui.screens.SettingsScreen
 import dylan.di.AppContainer
-import dylan.model.Phase
 import dylan.playback.Intent
-import kotlinx.coroutines.flow.firstOrNull
-import kotlinx.coroutines.launch
 
 /** Navigation stack entry. Tab roots live IN the stack so back walks Search → Home → exit. */
 internal sealed interface Screen {
@@ -150,6 +126,9 @@ fun AppRoot(
     val state by container.orchestrator.state.collectAsStateWithLifecycle()
     val backStack = rememberSaveable(saver = backStackSaver) { mutableStateListOf<Screen>(Screen.Tab(0)) }
     var sheet by rememberSaveable(stateSaver = sheetSaver) { mutableStateOf(Sheet.Closed) }
+    // Height of the navigation bar, measured once the first frame has laid it out. It is 0 until
+    // then, which is why the player surface is not mounted before it is known — see below.
+    var navBarHeightPx by remember { mutableFloatStateOf(0f) }
 
     // Stable across recompositions: a fresh lambda instance here is a changed parameter for all
     // six screens, so none of them could skip.
@@ -231,10 +210,19 @@ fun AppRoot(
                 }
             }
 
-            // Mini player stays MOUNTED whenever a track exists — the NP overlay slides over
-            // it, so dismissing reveals it continuously instead of popping it in afterwards.
+            // Room for the collapsed player surface. The bar itself is drawn by the surface (see
+            // NpPlayerSurface) so that it and the full-screen player are one object; this spacer is
+            // only here so screen content is not laid out underneath it. It is never visible once
+            // the surface is up — the surface covers exactly this band — but it carries the surface
+            // colour, so the frames before the surface mounts show the bar's own background instead
+            // of a hole.
             if (state.current != null) {
-                MiniPlayer(container, onExpand = { sheet = Sheet.Np }, onLongPressClear = {}, onEnsureService = onFirstPlay)
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(MINI_BAR_HEIGHT)
+                        .background(LocalDylanTokens.current.surface),
+                )
             }
             Box(
                 Modifier
@@ -243,6 +231,10 @@ fun AppRoot(
                     .background(LocalDylanTokens.current.divider),
             )
             NavigationBar(
+                // The player surface rests its collapsed bar directly on top of this, so it needs
+                // to know exactly how tall the navigation bar is — including the navigation-bar
+                // inset the component applies itself, which is not the inset on its own.
+                modifier = Modifier.onSizeChanged { navBarHeightPx = it.height.toFloat() },
                 containerColor = LocalDylanTokens.current.background,
                 contentColor = LocalDylanTokens.current.textPrimary,
             ) {
@@ -282,12 +274,22 @@ fun AppRoot(
             }
         }
 
-        // One NP overlay; the queue rides INSIDE it as a panel (no stacked sheets).
-        if ((sheet == Sheet.Np || sheet == Sheet.Queue) && state.current != null) {
-            NpOverlay(
+        // One player surface for the whole session: it is the collapsed bar when `sheet` is Closed
+        // and the full-screen player (or the queue, which rides inside it) when it is not. It is
+        // mounted whenever a track exists, so opening the player is a change of anchor rather than
+        // a composable appearing — that is what removes the entrance animation and the flash. It
+        // waits for the navigation bar to be measured because that measurement is what puts its
+        // collapsed bar on top of the navigation bar rather than a bar's height off it; the space
+        // it reserves above the navigation bar is already laid out and already the right colour, so
+        // the wait costs the artwork one frame and nothing else.
+        if (state.current != null && navBarHeightPx > 0f) {
+            NpPlayerSurface(
                 container = container,
+                navBarHeightPx = navBarHeightPx,
+                expanded = sheet == Sheet.Np || sheet == Sheet.Queue,
                 showQueue = sheet == Sheet.Queue,
-                onClosed = { sheet = Sheet.Closed },
+                onExpand = { sheet = Sheet.Np },
+                onCollapse = { sheet = Sheet.Closed },
                 onOpenQueue = { sheet = Sheet.Queue },
                 onCloseQueue = { sheet = Sheet.Np },
                 onOpenArtist = { name, token -> if (token.isNotBlank()) backStack.add(Screen.Artist(name, token)) },
@@ -300,235 +302,10 @@ fun AppRoot(
                 containerColor = MaterialTheme.colorScheme.surface,
                 sheetState = androidx.compose.material3.rememberModalBottomSheetState(skipPartiallyExpanded = true),
             ) {
-                dylan.android.ui.screens
-                    .SettingsScreen(container)
+                SettingsScreen(container)
             }
         }
     }
-}
-
-private enum class NpAnchor { Open, Closed }
-
-/**
- * Now Playing overlay — ground-up rebuild replacing ModalBottomSheet (whose dismissal lagged
- * and never tracked the finger). Foundation AnchoredDraggable: offset follows the finger 1:1
- * on the way down, settle() picks the anchor from velocity/position on release, and the mini
- * player underneath is revealed continuously during the slide.
- */
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-private fun NpOverlay(
-    container: AppContainer,
-    showQueue: Boolean,
-    onClosed: () -> Unit,
-    onOpenQueue: () -> Unit,
-    onCloseQueue: () -> Unit,
-    onOpenArtist: (String, String) -> Unit,
-    onEnsureService: () -> Unit,
-) {
-    val t = LocalDylanTokens.current
-    var heightPx by remember { mutableFloatStateOf(0f) }
-    // Guard for the entrance flicker: the settle collector must ignore the initial
-    // Closed emission and only close after the entrance animation has landed on Open.
-    var entered by remember { mutableStateOf(false) }
-    val npState =
-        remember {
-            AnchoredDraggableState(
-                initialValue = NpAnchor.Closed,
-                anchors =
-                    DraggableAnchors {
-                        NpAnchor.Open at 0f
-                        NpAnchor.Closed at 1f
-                    },
-            )
-        }
-    val fling = AnchoredDraggableDefaults.flingBehavior(npState)
-    val backScope = androidx.compose.runtime.rememberCoroutineScope()
-    // Queue panel consumes back first (AppRoot routes Queue→Np); this handler only
-    // settles the sheet when the NP face is showing.
-    BackHandler(enabled = !showQueue) { backScope.launch { npState.animateAnchor(NpAnchor.Closed) } }
-
-    LaunchedEffect(heightPx) {
-        if (heightPx > 0f) {
-            npState.updateAnchors(
-                DraggableAnchors {
-                    NpAnchor.Open at 0f
-                    NpAnchor.Closed at heightPx
-                },
-            )
-        }
-    }
-    // Entrance: slide up once anchors are measurable (tap + pull-up handoff share this path).
-    LaunchedEffect(Unit) {
-        snapshotFlow { heightPx }.firstOrNull { it > 0f }
-        npState.animateAnchor(NpAnchor.Open)
-        entered = true
-    }
-    // Fully settled at the bottom anchor ⇒ unmount (mini player is already visible beneath).
-    LaunchedEffect(Unit) {
-        snapshotFlow { npState.currentValue }.collect { if (it == NpAnchor.Closed && entered) onClosed() }
-    }
-
-    Box(Modifier.fillMaxSize()) {
-        // Scrim — progress computed inside graphicsLayer (draw phase) so drag re-draws without recomposing.
-        Box(
-            Modifier
-                .fillMaxSize()
-                .graphicsLayer {
-                    val p = if (heightPx > 0f && npState.offset.isFinite()) (npState.offset / heightPx).coerceIn(0f, 1f) else 1f
-                    alpha = 0.65f * (1f - p)
-                }.background(androidx.compose.ui.graphics.Color.Black)
-                .pointerInput(Unit) {
-                    detectTapGestures { }
-                },
-        )
-        Box(
-            Modifier
-                .align(Alignment.BottomCenter)
-                .fillMaxWidth()
-                .fillMaxHeight(0.94f)
-                .background(t.surface)
-                .onSizeChanged { heightPx = it.height.toFloat() }
-                .graphicsLayer { translationY = if (npState.offset.isFinite()) npState.offset else heightPx }
-                .anchoredDraggable(npState, flingBehavior = fling, orientation = Orientation.Vertical),
-        ) {
-            if (showQueue) {
-                QueueSheet(container, onClose = onCloseQueue)
-            } else {
-                NowPlayingSheet(
-                    container,
-                    onQueue = onOpenQueue,
-                    onOpenArtist = onOpenArtist,
-                    onEnsureService = onEnsureService,
-                )
-            }
-        }
-    }
-}
-
-/**
- * Programmatic settle to an anchor (animateTo was removed from the 1.8+ state API).
- * Drives [AnchoredDraggableState.anchoredDrag] with an [androidx.compose.animation.core.animate]
- * tween so the sheet rides the same offset pipeline as finger drags.
- */
-private suspend fun <T> AnchoredDraggableState<T>.animateAnchor(
-    target: T,
-    spec: androidx.compose.animation.core.AnimationSpec<Float> =
-        androidx.compose.animation.core
-            .tween(280),
-) {
-    if (!anchors.hasPositionFor(target)) return
-    val targetOffset = anchors.positionOf(target)
-    val start = if (offset.isFinite()) offset else targetOffset
-    anchoredDrag {
-        androidx.compose.animation.core.animate(
-            initialValue = start,
-            targetValue = targetOffset,
-            animationSpec = spec,
-        ) { v, _ ->
-            dragTo(v)
-        }
-    }
-}
-
-@Composable
-fun MiniPlayer(
-    container: AppContainer,
-    onExpand: () -> Unit,
-    onLongPressClear: () -> Unit,
-    onEnsureService: () -> Unit = {},
-) {
-    val state by container.orchestrator.state.collectAsStateWithLifecycle()
-    val t = LocalDylanTokens.current
-    Row(
-        modifier =
-            Modifier
-                .fillMaxWidth()
-                .background(t.divider)
-                .padding(top = 1.dp)
-                .background(t.surface)
-                // Pull up anywhere on the bar expands the Now Playing sheet — tap still works
-                // (drag detector only claims events once a vertical drag is detected).
-                .pointerInput(Unit) {
-                    var accum = 0f
-                    detectVerticalDragGestures(
-                        onDragStart = { accum = 0f },
-                        onVerticalDrag = { change, dragAmount ->
-                            change.consume()
-                            accum += dragAmount
-                            if (accum < -64.dp.toPx()) {
-                                accum = 0f
-                                onExpand()
-                            }
-                        },
-                    )
-                }.clickable(onClick = onExpand)
-                .padding(horizontal = 12.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        Box(
-            Modifier
-                .height(44.dp)
-                .background(t.divider)
-                .padding(1.dp)
-                .background(t.background),
-        ) {
-            AsyncImage(
-                model = state.current?.artUrl150,
-                contentDescription = null,
-                modifier = Modifier.height(42.dp),
-            )
-        }
-        Column(Modifier.weight(1f)) {
-            Text(
-                (state.current?.title.orEmpty()).uppercase(),
-                style = MaterialTheme.typography.bodyLarge.copy(letterSpacing = 0.3.sp),
-                color = t.textPrimary,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Text(
-                (state.current?.subtitle.orEmpty()).uppercase(),
-                style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 0.8.sp),
-                color = t.textSecondary,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            MiniProgress(container, (state.current?.durationS ?: 0L) * 1000L, t.textPrimary)
-        }
-        PlayPauseIcon(container, size = 32, playing = state.phase is Phase.Playing, onEnsureService = onEnsureService)
-    }
-}
-
-/** Vertical centre of the 1 dp track: the scale is horizontal, so it must grow from the left. */
-private const val BAR_CENTRE = 0.5f
-
-private val LeftOrigin = TransformOrigin(0f, BAR_CENTRE)
-
-/**
- * The 10 Hz position never recomposes anything above it: the read is deferred into the layer block
- * (a draw-phase read) and the track is a full-width bar scaled horizontally, so no measure or
- * layout pass runs per tick.
- */
-@Composable
-private fun MiniProgress(
-    container: AppContainer,
-    durationMs: Long,
-    color: androidx.compose.ui.graphics.Color,
-) {
-    val pos = container.orchestrator.positionMs.collectAsStateWithLifecycle(0L)
-    val dur = durationMs.coerceAtLeast(1L)
-    Box(
-        Modifier
-            .padding(top = 4.dp)
-            .height(1.dp)
-            .fillMaxWidth()
-            .graphicsLayer {
-                transformOrigin = LeftOrigin
-                scaleX = (pos.value.toFloat() / dur).coerceIn(0f, 1f)
-            }.background(color),
-    )
 }
 
 @Composable
