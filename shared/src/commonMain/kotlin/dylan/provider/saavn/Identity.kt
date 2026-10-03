@@ -91,6 +91,101 @@ internal fun artUrlOf(el: JsonElement?): String =
 private val WHITESPACE_RUN = Regex("\\s+")
 
 /**
+ * The handful of HTML entities this origin ships inside titles and subtitles.
+ *
+ * Seen on device: Bob Dylan's "Rainy Day Women #12 & 35" reached the Home screen as
+ * `RAINY DAY WOMEN #12 &AMP; 35` — the entity decoded to nothing and the row showed the raw markup.
+ * The UI uppercases titles for display, so a lowercase `&amp;` arrives on screen as `&AMP;`; the
+ * match is therefore case-insensitive, which is also what HTML itself specifies for entity names.
+ *
+ * Deliberately a fixed set rather than a general entity decoder. A full table would accept
+ * `&nbsp;` and friends and quietly change string identity for titles that legitimately contain an
+ * ampersand-shaped run of text, and no such case has been observed. Numeric references are included
+ * because they are unambiguous and cannot collide with real prose.
+ */
+private val ENTITIES: Map<String, String> =
+    mapOf(
+        "amp" to "&",
+        "lt" to "<",
+        "gt" to ">",
+        "quot" to "\"",
+        "apos" to "'",
+        "nbsp" to " ",
+    )
+
+private val ENTITY_RE = Regex("&(#x[0-9a-fA-F]+|#[0-9]+|[a-zA-Z]+);")
+
+/**
+ * Decode the entities in [raw], leaving anything unrecognised exactly as it was.
+ *
+ * An unknown or malformed entity is **not** rewritten: a title containing the literal text
+ * `&foo;` must stay `&foo;`, so this cannot lose information that was never markup.
+ */
+internal fun decodeEntities(raw: String): String {
+    if (!raw.contains('&')) return raw
+    return ENTITY_RE.replace(raw) { m ->
+        val body = m.groupValues[1]
+        when {
+            body.startsWith("#x", ignoreCase = true) ->
+                body.drop(2).toIntOrNull(16)?.let(::codePointToString) ?: m.value
+
+            body.startsWith("#") -> body.drop(1).toIntOrNull()?.let(::codePointToString) ?: m.value
+
+            else -> ENTITIES[body.lowercase()] ?: m.value
+        }
+    }
+}
+
+/**
+ * Codepoint to string, rejecting the surrogate range rather than emitting a lone surrogate that no
+ * font can render and no comparison can reason about.
+ *
+ * Written out rather than delegating to `Char.toCodePoint`/`Character.toChars`, neither of which is
+ * available in common code. Note `cp.toString()` is the *decimal digits* and not a character — which
+ * is what this originally did, so `&#38;` decoded to `38`.
+ */
+private fun codePointToString(cp: Int): String? =
+    when (cp) {
+        in 1..SURROGATE_LAST -> cp.toChar().toString()
+        in FIRST_BMP_AFTER_SURROGATES..BMP_LAST -> cp.toChar().toString()
+        in SUPPLEMENTARY_FIRST..CODEPOINT_MAX -> {
+            val v = cp - SUPPLEMENTARY_FIRST
+            charArrayOf(
+                ((v shr SURROGATE_BITS) + HIGH_SURROGATE).toChar(),
+                ((v and LOW_MASK) + LOW_SURROGATE).toChar(),
+            ).concatToString()
+        }
+
+        else -> null
+    }
+
+// Unicode boundaries, named. Written as decimals elsewhere in Kotlin stdlib for exactly this
+// reason; a bare `0xD800` in the middle of a decode is unreadable in review.
+private const val HIGH_SURROGATE = 0xD800
+private const val LOW_SURROGATE = 0xDC00
+private const val SURROGATE_LAST = 0xD7FF
+
+/** First code point after the surrogate block — the top of the directly-representable BMP. */
+private const val FIRST_BMP_AFTER_SURROGATES = 0xE000
+private const val BMP_LAST = 0xFFFF
+private const val SUPPLEMENTARY_FIRST = 0x10000
+private const val CODEPOINT_MAX = 0x10FFFF
+private const val SURROGATE_BITS = 10
+private const val LOW_MASK = 0x3FF
+
+/**
+ * What a card's title reads as in the UI and in row identity: entities decoded, then trimmed.
+ *
+ * Decoding happens *here*, at the boundary, rather than in a composable — the same string is
+ * written to the database, used for dedupe and shown on Home, Search, Library and Now Playing, and a
+ * decode in one of those would leave the rest showing raw markup.
+ */
+internal fun displayTitle(raw: String): String = decodeEntities(raw).trim()
+
+/** [displayTitle] for the secondary line, which comes from the same payload and has the same defect. */
+internal fun displaySubtitle(raw: String?): String = decodeEntities(raw.orEmpty()).trim()
+
+/**
  * Display/sort normalisation for a catalog title. The live payload ships titles with **trailing
  * spaces** (`fixtures/top_searches.json` → `"Toh Phir Aao Tera Mera Rishta "`), which survived into
  * row identity and made a cross-bucket duplicate look like two entities.

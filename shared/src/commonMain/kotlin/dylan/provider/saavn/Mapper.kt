@@ -102,8 +102,8 @@ fun mapSong(
     val primary = primaryArtist(mi.artistMap)
     return Song(
         key = SongKey("saavn", CachePath.segment(d.id)),
-        title = d.title.trim(),
-        subtitle = d.subtitle.orEmpty(),
+        title = displayTitle(d.title),
+        subtitle = displaySubtitle(d.subtitle),
         albumId = mi.albumId,
         albumName = mi.album,
         artUrl150 = img150,
@@ -154,8 +154,8 @@ private fun mapMiniOf(
         songKey = if (type == TYPE_SONG) SongKey("saavn", identity) else null,
         albumId = if (type == TYPE_ALBUM) identity else null,
         artistId = if (type == TYPE_ARTIST) identity else null,
-        title = d.title.trim(),
-        subtitle = d.subtitle.orEmpty(),
+        title = displayTitle(d.title),
+        subtitle = displaySubtitle(d.subtitle),
         type = type,
         image = artUrlOf(d.image),
         permaToken = d.permaUrl,
@@ -300,7 +300,7 @@ fun mapAlbum(
     val songs = a.list.mapNotNull { mapCard(it, ENDPOINT_ALBUM, drift) }
     return Album(
         id = a.id,
-        title = a.title.trim(),
+        title = displayTitle(a.title),
         subtitle = a.subtitle,
         artUrl150 = artUrlOf(a.image),
         artUrl500 = art500(artUrlOf(a.image)).orEmpty(),
