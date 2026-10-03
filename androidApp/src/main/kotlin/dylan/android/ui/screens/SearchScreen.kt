@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -29,6 +30,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -89,6 +91,21 @@ fun SearchScreen(
     var artistTotal by remember { mutableLongStateOf(0L) }
     var artistPage by remember { mutableStateOf(1) }
     var loadingMore by remember { mutableStateOf(false) }
+    // Per-section exhaustion, replacing a single `hasMore` derived from the origin's totals.
+    //
+    // The totals could not answer this. `deliveredTotal` decides "there may be more" by comparing
+    // the *kept* rows against the requested page size, which is only valid when the page contained
+    // nothing but the wanted type. The album and artist endpoints return a **mixed** envelope, so a
+    // 20-row page might hold 3 albums and 17 songs; `kept (3) >= pageSize (20)` is false, the
+    // section declared itself exhausted after one page, and paging silently stopped. Meanwhile songs
+    // kept paging and kept growing, because cross-rendition duplicates (`Mockingbird` from three
+    // albums) are distinct `songId`s and so count as distinct rows against the budget.
+    //
+    // Exhaustion is therefore observed rather than predicted: a section is done when a page brings
+    // back no rows it did not already have. That needs no assumption about the origin's `total`.
+    var songsExhausted by remember { mutableStateOf(false) }
+    var albumsExhausted by remember { mutableStateOf(false) }
+    var artistsExhausted by remember { mutableStateOf(false) }
     // One mixed, cross-type ranked list: songs + albums + artists share relevance
     // bands (exact → prefix → contains), so an album never hides below its songs.
     val mergedHits =
@@ -101,7 +118,11 @@ fun SearchScreen(
             artists.forEach { all += Triple(dylan.search.relevanceBand(q, it.title), order++, Hit.ArtistHit(it)) }
             all.sortedWith(compareBy({ it.first }, { it.second })).map { it.third }
         }
-    val hasMore = results.size < total || albums.size < albumTotal || artists.size < artistTotal
+    val canLoadMore = !loadingMore && (!songsExhausted || !albumsExhausted || !artistsExhausted)
+    val hitsListState =
+        androidx.compose.foundation.lazy
+            .rememberLazyListState()
+
     val ctx = LocalContext.current
     val isOnline = rememberIsOnline(container)
     val cachedKeys = rememberCachedKeys(container)
@@ -141,6 +162,10 @@ fun SearchScreen(
         albumPage = 1
         artistPage = 1
         loadingMore = false
+        // A new query is a new set of budgets: nothing is known exhausted until a page says so.
+        songsExhausted = false
+        albumsExhausted = false
+        artistsExhausted = false
         // Clear first so every submit path (keyboard, chips, suggestions) drops stale hits.
         results = emptyList()
         albums = emptyList()
@@ -164,42 +189,62 @@ fun SearchScreen(
         artistTotal = rp?.total ?: 0L
     }
 
-    // Show more extends EVERY section with a remainder (not just songs), then
-    // the merged list re-ranks so newcomers slot into their relevance band.
+    // Extends EVERY section that still has something to give, then the merged list re-ranks so
+    // newcomers slot into their relevance band. Driven by scrolling rather than a button, so this is
+    // called from a scroll listener and must be cheap and idempotent when re-entered.
     fun loadMore() {
         val q = submitted ?: return
-        if (loadingMore || !hasMore) return
+        if (loadingMore || !canLoadMore) return
         loadingMore = true
         scope.launch {
             val nextSong = songPage + 1
             val nextAlbum = albumPage + 1
             val nextArtist = artistPage + 1
-            val wantSongs = results.size < total
-            val wantAlbums = albums.size < albumTotal
-            val wantArtists = artists.size < artistTotal
-            val songsDef = async { if (wantSongs) runCatching { container.provider.search(q, nextSong) }.getOrNull() else null }
-            val albumsDef = async { if (wantAlbums) runCatching { container.provider.searchAlbums(q, nextAlbum) }.getOrNull() else null }
-            val artistsDef = async { if (wantArtists) runCatching { container.provider.searchArtists(q, nextArtist) }.getOrNull() else null }
+            val songsDef = async { if (!songsExhausted) runCatching { container.provider.search(q, nextSong) }.getOrNull() else null }
+            val albumsDef = async { if (!albumsExhausted) runCatching { container.provider.searchAlbums(q, nextAlbum) }.getOrNull() else null }
+            val artistsDef = async { if (!artistsExhausted) runCatching { container.provider.searchArtists(q, nextArtist) }.getOrNull() else null }
             songsDef.await()?.let { paged ->
                 val seen = results.map { it.key }.toHashSet()
-                results = results + paged.items.filter { seen.add(it.key) }
+                val fresh = paged.items.filter { seen.add(it.key) }
+                results = results + fresh
                 total = paged.total
                 songPage = nextSong
+                // A page that adds nothing new is the origin's way of saying it has no more of this
+                // type, whatever its `total` claimed.
+                if (fresh.isEmpty()) songsExhausted = true
             }
             albumsDef.await()?.let { paged ->
                 val seen = albums.map { it.rowKey }.toHashSet()
-                albums = albums + paged.items.filter { seen.add(it.rowKey) }
+                val fresh = paged.items.filter { seen.add(it.rowKey) }
+                albums = albums + fresh
                 albumTotal = paged.total
                 albumPage = nextAlbum
+                if (fresh.isEmpty()) albumsExhausted = true
             }
             artistsDef.await()?.let { paged ->
                 val seen = artists.map { it.rowKey }.toHashSet()
-                artists = artists + paged.items.filter { seen.add(it.rowKey) }
+                val fresh = paged.items.filter { seen.add(it.rowKey) }
+                artists = artists + fresh
                 artistTotal = paged.total
                 artistPage = nextArtist
+                if (fresh.isEmpty()) artistsExhausted = true
             }
             loadingMore = false
         }
+    }
+
+    // Infinite scroll. Reads the *live* layout, not `mergedHits`, so it cannot latch onto a stale
+    // item count captured when the effect started; and it keys on `submitted` so a new query
+    // re-arms it instead of continuing the previous one's paging.
+    LaunchedEffect(hitsListState, submitted) {
+        androidx.compose.runtime
+            .snapshotFlow {
+                val info = hitsListState.layoutInfo
+                val last = info.visibleItemsInfo.lastOrNull()?.index ?: 0
+                last to info.totalItemsCount
+            }.collect { (last, count) ->
+                if (count > 0 && last >= count - PREFETCH_ROWS) loadMore()
+            }
     }
 
     Column(Modifier.fillMaxSize()) {
@@ -241,7 +286,7 @@ fun SearchScreen(
 
         when {
             submitted != null ->
-                LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 24.dp)) {
+                LazyColumn(state = hitsListState, modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 24.dp)) {
                     items(mergedHits, key = { hitKey(it) }) { hit ->
                         when (hit) {
                             is Hit.SongHit -> {
@@ -293,14 +338,17 @@ fun SearchScreen(
                             modifier = Modifier.padding(16.dp),
                         )
                     }
-                    if (hasMore) {
+                    if (loadingMore || canLoadMore) {
                         item {
-                            androidx.compose.material3.TextButton(
-                                onClick = { loadMore() },
-                                enabled = !loadingMore,
-                                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                            Box(
+                                Modifier.fillMaxWidth().padding(vertical = 20.dp),
+                                contentAlignment = Alignment.Center,
                             ) {
-                                Text(if (loadingMore) "Loading…" else "Show more")
+                                androidx.compose.material3.CircularProgressIndicator(
+                                    modifier = Modifier.size(22.dp),
+                                    strokeWidth = 2.dp,
+                                    color = t.primary,
+                                )
                             }
                         }
                     }
@@ -398,3 +446,11 @@ private fun hitKey(hit: Hit): String =
 
 /** Below this the origin has nothing useful to suggest and every keystroke is a wasted request. */
 private const val MIN_SUGGEST_QUERY = 2
+
+/**
+ * How close to the end of the results the user must scroll before the next page is requested.
+ *
+ * A screenful of runway, roughly: enough that the next page is usually already in flight by the
+ * time the user reaches the bottom, without spending a request on a flick that never got there.
+ */
+private const val PREFETCH_ROWS = 12
