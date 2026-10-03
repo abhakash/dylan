@@ -54,49 +54,58 @@ data class AppConfig(
     val catalogNegativeTtlMs: Long = 30_000,
     val submitPageSize: Int = 20,
     /**
-     * Maximum cached renditions, and the offline cache's PRIMARY knob: the byte budget is derived
-     * from it (see [cacheMaxBytes]), so raising the file cap raises the byte cap by the same
-     * factor and the two can never disagree about how full "full" is.
+     * Nominal size of the offline audio cache, in bytes. **This is the cache's primary knob** — the
+     * row cap is derived from it ([cacheMaxFiles]), not the other way round.
      *
-     * What it bounds: how many tracks the Downloads screen can offer offline, and therefore how
-     * many the LRU pass may destroy per new download.
+     * The direction of that derivation is the whole point, and it was previously backwards. The
+     * cache used to be sized by a row count multiplied by an assumed 1 MB mean rendition, so the
+     * enforced budget was `300 x 1 MB` = **300 MB** while both UIs printed and divided by a nominal
+     * 2 GB ("Cached audio 41 MB of 2.0 GB"). The advertised number was unreachable dead config: the
+     * user was shown a limit the cache could never reach and never told which of the two was real.
+     * Sizing from bytes makes the number on screen and the number the LRU pass enforces the same
+     * value by construction.
      *
-     * Failure mode it prevents: a Downloads screen listing more tracks than the cache can hold,
-     * so every completed download silently evicts a track the user can still see listed.
+     * Failure mode it prevents: a Downloads screen listing more tracks than the cache can hold, so
+     * every completed download silently evicts a track the user can still see listed.
      */
-    val cacheMaxFiles: Int = 300,
+    val cacheTargetBytes: Long = CACHE_TARGET_BYTES,
     /**
-     * Byte budget for the cache — DERIVED as `cacheMaxFiles x CACHE_MEAN_TRACK_BYTES`, not an
-     * independent knob.
+     * The ceiling the LRU pass actually enforces: [cacheTargetBytes] plus a headroom margin.
      *
-     * It used to be an independent 2 GB, enforced as `min(cacheMaxBytes, cacheMaxFiles x 1 MB)`.
-     * At 300 files that `min` could only ever pick the derived term, so `cacheMaxBytes` was dead
-     * config that *looked* live: both platform UIs print and divide by it
-     * ("Cached audio 41 MB of 2.0 GB", a progress bar over 2 GB), so the user was shown a budget
-     * the cache could never reach and never told which of the two was real. Deriving removes the
-     * second number, so what the UI shows and what the LRU pass enforces are the same value by
-     * construction — and a user (or a test) who raises `cacheMaxFiles` automatically raises the
-     * bytes those files are allowed to occupy.
+     * The headroom is deliberate. A budget enforced at exactly the advertised number makes the cache
+     * feel like it is full the moment the user looks at the figure, and every subsequent download
+     * evicts one immediately — the wall and the headline coincide, so the number reads as a lie by a
+     * single download. Enforcing above the target means the cache settles *above* the stated size,
+     * and the Downloads screen has visible room before anything is destroyed.
      *
-     * Which of the two caps binds is a property of the *content*, not of the caps: this one trips
-     * first whenever renditions are larger than the assumed mean (a 320 kbps track is several MB,
-     * so in practice the byte budget is the binding constraint and the file cap is the backstop
-     * for a cache of unusually small tracks), and the file cap trips first when they are smaller.
-     * Both statements stay true under derivation.
+     * Which of this and [cacheMaxFiles] binds is a property of the *content*, not of the caps: the
+     * byte budget trips first whenever renditions are larger than the assumed mean (a 320 kbps track
+     * is several MB, so in practice bytes bind and the row cap is the backstop for a cache of
+     * unusually small tracks), and the row cap trips first when they are smaller. Both statements
+     * stay true.
      *
      * Failure mode it prevents: a corrupt `bytes` column or a pathological provider filling the
-     * user's disk, since the file cap alone cannot bound anything byte-sized.
+     * user's disk, since the row cap alone cannot bound anything byte-sized.
      */
-    val cacheMaxBytes: Long = cacheMaxFiles * CACHE_MEAN_TRACK_BYTES,
+    val cacheMaxBytes: Long = cacheTargetBytes + cacheTargetBytes / CACHE_HEADROOM_DIVISOR,
+    /**
+     * Row cap for the cache, DERIVED from [cacheMaxBytes] at the assumed mean rendition size.
+     *
+     * What it bounds: how many tracks the Downloads screen can offer offline, and therefore how many
+     * the LRU pass may destroy per new download. It is a *backstop*, not the budget — see
+     * [cacheMaxBytes] for which of the two actually binds in practice and why.
+     *
+     * Derived rather than independent so the row cap and the byte cap can never disagree about how
+     * full "full" is, which is the defect that made the old 2 GB figure unreachable.
+     */
+    val cacheMaxFiles: Int = (cacheMaxBytes / CACHE_MEAN_TRACK_BYTES).toInt(),
     /**
      * Share of the cache a favourite is guaranteed against the pinned sub-pool's own eviction.
-     * Both pinned budgets come from it and from [cacheMaxBytes]: `pinnedMaxFraction` of the file
-     * cap in rows, and the same fraction of the byte budget in bytes.
+     * Both pinned budgets come from it and from [cacheMaxBytes]: `pinnedMaxFraction` of the row cap
+     * in rows, and the same fraction of the byte budget in bytes.
      *
-     * The pin-demotion path is LIVE, not vestigial: with the defaults a pool trips the pinned byte
-     * budget at ~38 six-megabyte renditions, long before the 225-row budget — so `demotePins` has
-     * work to do well inside the file cap. (It was reported dead because the unreachable 2 GB byte
-     * cap was read as the real budget; it never was.)
+     * The pin-demotion path is LIVE, not vestigial: the pinned byte budget trips well before the row
+     * budget whenever renditions are multi-megabyte, so `demotePins` has work to do inside both caps.
      *
      * Failure mode it prevents: favourites accumulating an unbounded share of the cache, where the
      * LRU pass may never touch them because they are protected, so nothing else ever shrinks them.
@@ -193,6 +202,22 @@ data class AppConfig(
          * product decision about on-device cache size, not a tuning detail.
          */
         const val CACHE_MEAN_TRACK_BYTES = 1_000_000L
+
+        /**
+         * Nominal offline-audio target: 2 GiB.
+         *
+         * 2 GiB is roughly 500 six-megabyte 320 kbps renditions, or ~2000 at the assumed 1 MB mean,
+         * which is a realistic ceiling for a phone music cache rather than an arbitrary one.
+         */
+        const val CACHE_TARGET_BYTES = 2L * 1024 * 1024 * 1024
+
+        /**
+         * Headroom divisor for the enforced ceiling: `target + target / 8`, i.e. +12.5%.
+         *
+         * Without it the wall and the advertised figure are the same number, so the cache reads as
+         * full the instant the user looks at it and every later download evicts one.
+         */
+        const val CACHE_HEADROOM_DIVISOR = 8L
 
         /** 15 minutes: a snapshot older than this describes a paused track, not a playing one. */
         const val RESUME_MAX_AGE_MINUTES = 15

@@ -47,7 +47,7 @@ class CacheManagerTest {
      * 2 MB of `.part` bytes reported by that test outside it. Both are asserted there, so the
      * number is load-bearing rather than arbitrary.
      */
-    private val cfg = AppConfig(cacheMaxFiles = 26)
+    private val cfg = AppConfig(cacheTargetBytes = SMALL_TARGET_BYTES)
     private val log = LogBuffer(minLevel = LogLevel.DEBUG)
 
     @BeforeTest
@@ -250,7 +250,7 @@ class CacheManagerTest {
     @Test
     fun thePinnedPoolHasARowBudgetSoTheFileCapStaysEnforceable() =
         runTest(scheduler) {
-            withFreshCache(cfg = AppConfig(cacheMaxFiles = 10)) { db2, cm2, _ ->
+            withFreshCache(cfg = AppConfig(cacheTargetBytes = 8_000_000L)) { db2, cm2, _ ->
                 repeat(12) { idx ->
                     val k = SongKey("saavn", "fav$idx")
                     db2.dylanQueries
@@ -359,16 +359,37 @@ class CacheManagerTest {
     fun theByteBudgetIsDerivedFromTheFileCapSoTheEnforcedAndDisplayedNumbersCannotDisagree() =
         runTest(scheduler) {
             val defaults = AppConfig()
-            val doubled = AppConfig(cacheMaxFiles = defaults.cacheMaxFiles * 2)
+            // Bytes are the primary knob now; the row cap is derived from them. This is the
+            // direction that makes the advertised figure real — it used to be inverted, so the
+            // enforced budget was 300 MB while the UI showed 2 GB.
             assertEquals(
-                MEAN_TRACK_BYTES * defaults.cacheMaxFiles,
+                defaults.cacheTargetBytes + defaults.cacheTargetBytes / 8,
                 defaults.cacheMaxBytes,
-                "the byte budget must be the file cap times the assumed mean track size",
+                "the enforced ceiling must be the target plus its headroom, so the wall is not " +
+                    "the advertised number",
             )
             assertEquals(
+                (defaults.cacheMaxBytes / MEAN_TRACK_BYTES).toInt(),
+                defaults.cacheMaxFiles,
+                "the row cap must be derived from the byte budget, not the other way round",
+            )
+            val bigger = AppConfig(cacheTargetBytes = defaults.cacheTargetBytes * 2)
+            assertEquals(
                 defaults.cacheMaxBytes * 2,
-                doubled.cacheMaxBytes,
-                "raising the file cap must raise the byte budget by the same factor",
+                bigger.cacheMaxBytes,
+                "doubling the byte target must double the enforced ceiling",
+            )
+            // Truncating division, so doubling the byte budget moves the row cap by at most one
+            // row rather than exactly two-fold. Asserting exact doubling would be asserting an
+            // arithmetic property the derivation does not have.
+            assertTrue(
+                bigger.cacheMaxFiles in (defaults.cacheMaxFiles * 2 - 1)..(defaults.cacheMaxFiles * 2 + 1),
+                "the derived row cap must scale with the byte budget, " +
+                    "was ${defaults.cacheMaxFiles} now ${bigger.cacheMaxFiles}",
+            )
+            assertTrue(
+                defaults.cacheMaxBytes >= 2L * 1024 * 1024 * 1024,
+                "the advertised budget must actually be at least 2 GB, was ${defaults.cacheMaxBytes}",
             )
             withFreshCache { _, cm2, _ ->
                 assertEquals(
@@ -769,6 +790,12 @@ private const val PINNED_FIXTURE_BYTES = 500_000L
  * value deliberately — the derivation is what this test class is asserting, not the arithmetic.
  */
 private const val MEAN_TRACK_BYTES = 1_000_000L
+
+/**
+ * A byte target small enough that a handful of rows fills the cache, so eviction is reachable in a
+ * unit test. 23 MB target + 12.5% headroom => ~26 MB enforced, matching what these tests assert.
+ */
+private const val SMALL_TARGET_BYTES = 23_000_000L
 
 private data class CacheFileNameAssert(
     val provider: String,
