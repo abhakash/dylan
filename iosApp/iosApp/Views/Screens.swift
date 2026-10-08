@@ -430,6 +430,11 @@ struct DownloadsScreen: View {
                             Button(role: .destructive) {
                                 pending = info
                             } label: { Label("Remove", systemImage: "trash") }
+                            // Nothing depends on a protected key, so the gesture is refused
+                            // rather than offered and then rejected. `CacheManager` still has the
+                            // last word at eviction time — the protection set can change between
+                            // this render and the tap.
+                            .disabled(!info.removable)
                         }
                     }
                     Text("Cached audio \(formatBytes(env.library.totalBytes)) of \(formatBytes(env.graph.cfg.cacheMaxBytes)) \u{00B7} \(env.library.downloads.count) songs")
@@ -451,10 +456,14 @@ struct DownloadsScreen: View {
             set: { if !$0 { pending = nil } }
         )) {
             Button("Remove", role: .destructive) {
-                if let p = pending {
-                    Task { await env.library.removeDownload(p, env.graph) }
-                }
+                guard let p = pending else { return }
                 pending = nil
+                Task {
+                    // A refusal is not an error: the key was protected, so the file is still there
+                    // and the row still is. Say so instead of leaving a silent no-op.
+                    if await env.library.removeDownload(p, env.graph) { return }
+                    env.toasts.show("Still playing or still downloading — can’t remove this one.")
+                }
             }
             Button("Cancel", role: .cancel) { pending = nil }
         } message: {
@@ -534,6 +543,22 @@ struct AlbumScreen: View {
                         }
                     }
                     .padding(DylanTokens.s16)
+                    // There is no NavigationStack anywhere in this app's hierarchy — RootView swaps
+                    // tab content — so `.navigationBarBackButtonHidden` and the `ToolbarItem` at the
+                    // bottom of this view are both no-ops with no container to resolve them, and the
+                    // album cover had NO back affordance at all. Rendered in the content instead;
+                    // the toolbar item is kept for whenever a container is introduced.
+                    .overlay(alignment: .topLeading) {
+                        Button(action: onBack) {
+                            Image(systemName: "chevron.left")
+                                .font(.system(size: 20, weight: .semibold))
+                                .foregroundStyle(DylanTokens.textPrimary)
+                                .frame(width: 44, height: 44)
+                                .contentShape(Rectangle())
+                        }
+                        .accessibilityLabel("Back")
+                        .padding(DylanTokens.s8)
+                    }
                 }
 
                 ForEach(Array(songs.enumerated()), id: \.element.key.token) { i, song in
@@ -611,16 +636,22 @@ struct SettingsPanel: View {
                         Task { await env.prefs.setHighQuality(true) }
                     }
                     thinDivider
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Prefetch next track").font(.system(size: 15, weight: .medium))
-                            Text("One track ahead · ~3 MB on metered").font(.dylLabelSmall)
+                    // Not a setting: `prefetchEnabled` is a compile-time `true` in AppConfig with no setter
+                        // anywhere, and Android has no prefetch row at all. Rendering it as a
+                        // checkmark row implied a user control that does not exist, so it is stated
+                        // as the fixed behaviour it is. Making it a real toggle is the follow-up
+                        // (plumb a setter through Prefs, then add the Android row to match).
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Prefetch next track").font(.system(size: 15, weight: .medium))
+                                Text("Always on · one track ahead, ~3 MB on metered")
+                                    .font(.dylLabelSmall)
+                            }
+                            .foregroundStyle(DylanTokens.textPrimary)
+                            Spacer()
+                            Image(systemName: env.prefetchEnabled ? "checkmark" : "minus")
+                                .foregroundStyle(DylanTokens.textSecondary)
                         }
-                        .foregroundStyle(DylanTokens.textPrimary)
-                        Spacer()
-                        Image(systemName: env.prefetchEnabled ? "checkmark" : "minus")
-                            .foregroundStyle(DylanTokens.primary)
-                    }
                     .padding(.horizontal, DylanTokens.s16)
                     .padding(.vertical, DylanTokens.s6 + 2)
                 }

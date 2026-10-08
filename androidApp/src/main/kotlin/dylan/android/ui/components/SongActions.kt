@@ -2,12 +2,12 @@ package dylan.android.ui.components
 
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dylan.di.AppContainer
 import dylan.model.MiniEntity
 import dylan.model.Song
@@ -59,7 +59,7 @@ fun rememberSongActions(container: AppContainer): SongActions {
 
 @Composable
 fun rememberFavoriteKeys(container: AppContainer): PersistentSet<SongKey> {
-    val version by container.favorites.version.collectAsState()
+    val version by container.favorites.version.collectAsStateWithLifecycle()
     var keys by remember { mutableStateOf(persistentSetOf<SongKey>()) }
     LaunchedEffect(version) {
         keys =

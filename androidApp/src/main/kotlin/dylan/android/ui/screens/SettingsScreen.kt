@@ -1,6 +1,7 @@
 package dylan.android.ui.screens
 
 import android.Manifest
+import android.content.Context
 import android.content.pm.PackageManager
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -54,10 +55,7 @@ fun SettingsScreen(container: AppContainer) {
     var notifGranted by remember { mutableStateOf(true) }
 
     val ctx = LocalContext.current
-    val version =
-        remember {
-            runCatching { ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName }.getOrNull() ?: "1.0"
-        }
+    val version = remember { appVersion(ctx) }
 
     // Re-check on every resume — returning from the system notification settings page must
     // refresh the row without reopening this sheet.
@@ -70,15 +68,9 @@ fun SettingsScreen(container: AppContainer) {
     }
     LaunchedEffect(Unit) {
         quality = runCatching { container.settings.qualityPref() }.getOrDefault(Quality.BITRATE_320)
-        runCatching {
-            val row =
-                kotlinx.coroutines.withContext(container.disp.dbLane) {
-                    container.db.dylanQueries
-                        .cachedCountAndBytes()
-                        .executeAsOne()
-                }
-            songCount = row.song_count
-            usedBytes = row.total_bytes
+        runCatching { readCacheUsage(container) }.getOrNull()?.let {
+            songCount = it.songCount
+            usedBytes = it.usedBytes
         }
     }
 
@@ -93,130 +85,199 @@ fun SettingsScreen(container: AppContainer) {
         Spacer(Modifier.height(18.dp))
 
         SectionHeader("AUDIO")
-        GroupCard {
-            QualityRow("128 kbps", "Data saver", quality == Quality.BITRATE_128) {
-                quality = Quality.BITRATE_128
-                scope.launch { runCatching { container.settings.setQualityPref(Quality.BITRATE_128) } }
-            }
-            ThinDivider()
-            QualityRow("320 kbps", "High quality", quality == Quality.BITRATE_320) {
-                quality = Quality.BITRATE_320
-                scope.launch { runCatching { container.settings.setQualityPref(Quality.BITRATE_320) } }
-            }
-        }
-        Text(
-            "Metered networks always stream at 128 kbps.",
-            fontSize = 11.sp,
-            color = t.textSecondary,
-            modifier = Modifier.padding(start = 6.dp, top = 8.dp),
+        AudioQualityGroup(
+            selected = quality,
+            onSelect = { q ->
+                quality = q
+                scope.launch { runCatching { container.settings.setQualityPref(q) } }
+            },
         )
         Spacer(Modifier.height(22.dp))
 
         SectionHeader("STORAGE")
-        GroupCard {
-            Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("Offline audio", style = rowTitle(), color = t.textPrimary, modifier = Modifier.weight(1f))
-                    Text(formatBytes(usedBytes), style = rowSub(), color = t.textSecondary)
-                }
-                Spacer(Modifier.height(10.dp))
-                LinearProgressIndicator(
-                    progress = { (usedBytes.toFloat() / container.cfg.cacheMaxBytes).coerceIn(0f, 1f) },
-                    modifier = Modifier.fillMaxWidth().height(5.dp).clip(RoundedCornerShape(3.dp)),
-                    color = t.primary,
-                    trackColor = t.divider,
-                )
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    "$songCount of ${container.cfg.cacheMaxFiles} songs · ${formatBytes(container.cfg.cacheMaxBytes)} budget",
-                    style = rowSub(),
-                    color = t.textSecondary,
-                )
-            }
-            ThinDivider()
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .clickable { confirmClear = true }
-                    .padding(horizontal = 16.dp, vertical = 14.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text("Clear cache", style = rowTitle(), color = t.primary)
-            }
-        }
+        StorageGroup(container, songCount, usedBytes) { confirmClear = true }
         Spacer(Modifier.height(22.dp))
 
         if (!notifGranted) {
             SectionHeader("NOTIFICATIONS")
-            GroupCard {
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .clickable {
-                            val intent = android.content.Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS)
-                            intent.putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, ctx.packageName)
-                            runCatching { ctx.startActivity(intent) }
-                        }.padding(horizontal = 16.dp, vertical = 14.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text("Lock-screen controls unavailable", style = rowTitle(), color = t.textPrimary)
-                        Text(
-                            "Allow notifications to see playback controls on the lock screen.",
-                            style = rowSub(),
-                            color = t.textSecondary,
-                        )
-                    }
-                    Text("Turn on", style = rowTitle(), color = t.primary)
-                }
-            }
+            NotificationGroup(ctx)
             Spacer(Modifier.height(22.dp))
         }
 
         SectionHeader("ABOUT")
-        GroupCard {
-            Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp)) {
-                Text("Dylan", style = rowTitle(), color = t.textPrimary)
-                Text("Version $version", style = rowSub(), color = t.textSecondary)
-            }
-        }
+        AboutGroup(version)
 
         Spacer(Modifier.height(28.dp))
     }
 
     if (confirmClear) {
-        AlertDialog(
-            onDismissRequest = { confirmClear = false },
-            title = { Text("Clear cache?", style = MaterialTheme.typography.titleMedium, color = t.textPrimary) },
-            text = {
-                Text(
-                    "Downloaded tracks will be removed from storage.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = t.textSecondary,
-                )
+        ClearCacheDialog(
+            onDismiss = { confirmClear = false },
+            onClear = {
+                scope.launch {
+                    runCatching { container.cacheManager.clearCacheExcludingProtected() }
+                    val usage = runCatching { readCacheUsage(container) }.getOrNull()
+                    songCount = usage?.songCount ?: 0L
+                    usedBytes = usage?.usedBytes ?: 0L
+                }
             },
-            confirmButton = {
-                TextButton(onClick = {
-                    confirmClear = false
-                    scope.launch {
-                        runCatching { container.cacheManager.clearCacheExcludingProtected() }
-                        val row =
-                            runCatching {
-                                kotlinx.coroutines.withContext(container.disp.dbLane) {
-                                    container.db.dylanQueries
-                                        .cachedCountAndBytes()
-                                        .executeAsOne()
-                                }
-                            }.getOrNull()
-                        songCount = row?.song_count ?: 0L
-                        usedBytes = row?.total_bytes ?: 0L
-                    }
-                }) { Text("Clear", color = t.primary) }
-            },
-            dismissButton = { TextButton(onClick = { confirmClear = false }) { Text("Cancel", color = t.textSecondary) } },
-            containerColor = t.surface,
         )
     }
+}
+
+/** Cached-audio counters, read in one dbLane pass so the row and the bar cannot disagree. */
+private data class CacheUsage(
+    val songCount: Long,
+    val usedBytes: Long,
+)
+
+private suspend fun readCacheUsage(container: AppContainer): CacheUsage =
+    kotlinx.coroutines.withContext(container.disp.dbLane) {
+        val row =
+            container.db.dylanQueries
+                .cachedCountAndBytes()
+                .executeAsOne()
+        CacheUsage(songCount = row.song_count, usedBytes = row.total_bytes)
+    }
+
+private fun appVersion(ctx: Context): String {
+    val info = runCatching { ctx.packageManager.getPackageInfo(ctx.packageName, 0) }
+    return info.getOrNull()?.versionName ?: "1.0"
+}
+
+@Composable
+private fun AudioQualityGroup(
+    selected: Quality,
+    onSelect: (Quality) -> Unit,
+) {
+    val t = LocalDylanTokens.current
+    GroupCard {
+        QualityRow("128 kbps", "Data saver", selected == Quality.BITRATE_128) {
+            onSelect(Quality.BITRATE_128)
+        }
+        ThinDivider()
+        QualityRow("320 kbps", "High quality", selected == Quality.BITRATE_320) {
+            onSelect(Quality.BITRATE_320)
+        }
+    }
+    Text(
+        "Metered networks always stream at 128 kbps.",
+        fontSize = 11.sp,
+        color = t.textSecondary,
+        modifier = Modifier.padding(start = 6.dp, top = 8.dp),
+    )
+}
+
+@Composable
+private fun StorageGroup(
+    container: AppContainer,
+    songCount: Long,
+    usedBytes: Long,
+    onClearCache: () -> Unit,
+) {
+    val t = LocalDylanTokens.current
+    val budget = formatBytes(container.cfg.cacheMaxBytes)
+    GroupCard {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Offline audio", style = rowTitle(), color = t.textPrimary, modifier = Modifier.weight(1f))
+                Text(formatBytes(usedBytes), style = rowSub(), color = t.textSecondary)
+            }
+            Spacer(Modifier.height(10.dp))
+            LinearProgressIndicator(
+                progress = { (usedBytes.toFloat() / container.cfg.cacheMaxBytes).coerceIn(0f, 1f) },
+                modifier = Modifier.fillMaxWidth().height(5.dp).clip(RoundedCornerShape(3.dp)),
+                color = t.primary,
+                trackColor = t.divider,
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "$songCount of ${container.cfg.cacheMaxFiles} songs · $budget budget",
+                style = rowSub(),
+                color = t.textSecondary,
+            )
+        }
+        ThinDivider()
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onClearCache)
+                .padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("Clear cache", style = rowTitle(), color = t.primary)
+        }
+    }
+}
+
+@Composable
+private fun NotificationGroup(ctx: Context) {
+    val t = LocalDylanTokens.current
+    GroupCard {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .clickable { openNotificationSettings(ctx) }
+                .padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("Lock-screen controls unavailable", style = rowTitle(), color = t.textPrimary)
+                Text(
+                    "Allow notifications to see playback controls on the lock screen.",
+                    style = rowSub(),
+                    color = t.textSecondary,
+                )
+            }
+            Text("Turn on", style = rowTitle(), color = t.primary)
+        }
+    }
+}
+
+@Composable
+private fun AboutGroup(version: String) {
+    val t = LocalDylanTokens.current
+    GroupCard {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp)) {
+            Text("Dylan", style = rowTitle(), color = t.textPrimary)
+            Text("Version $version", style = rowSub(), color = t.textSecondary)
+        }
+    }
+}
+
+@Composable
+private fun ClearCacheDialog(
+    onDismiss: () -> Unit,
+    onClear: () -> Unit,
+) {
+    val t = LocalDylanTokens.current
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Clear cache?", style = MaterialTheme.typography.titleMedium, color = t.textPrimary) },
+        text = {
+            Text(
+                "Downloaded tracks will be removed from storage.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = t.textSecondary,
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                onDismiss()
+                onClear()
+            }) { Text("Clear", color = t.primary) }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel", color = t.textSecondary) }
+        },
+        containerColor = t.surface,
+    )
+}
+
+private fun openNotificationSettings(ctx: Context) {
+    val intent = android.content.Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+    intent.putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, ctx.packageName)
+    runCatching { ctx.startActivity(intent) }
 }
 
 @Composable
@@ -244,7 +305,10 @@ private fun GroupCard(content: @Composable () -> Unit) {
 
 @Composable
 private fun ThinDivider() {
-    HorizontalDivider(color = LocalDylanTokens.current.divider.copy(alpha = 0.45f), modifier = Modifier.padding(start = 16.dp))
+    HorizontalDivider(
+        color = LocalDylanTokens.current.divider.copy(alpha = 0.45f),
+        modifier = Modifier.padding(start = 16.dp),
+    )
 }
 
 private fun rowTitle(): TextStyle = TextStyle(fontSize = 15.sp, fontWeight = FontWeight.Medium)

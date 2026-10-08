@@ -38,7 +38,16 @@ final class Thumbnailer {
             return img
         }
         withLock { inflight[key] = task }
-        return await task.value
+        // The task's own removal is a RACE with the insertion above: `Task.init` may hand the
+        // closure to another thread immediately, so a URLSession-cache hit can finish — and remove
+        // its own entry — before `inflight[key] = task` runs. The removal then finds nothing to
+        // remove and the completed task is installed permanently, so `inflight` grows by one
+        // dead entry per raced key for the life of the process. Clearing it here too is
+        // idempotent and identity-checked, so whoever runs last wins and a live task is never
+        // dropped out from under a caller that is still awaiting it.
+        let img = await task.value
+        withLock { if inflight[key] == task { inflight.removeValue(forKey: key) } }
+        return img
     }
 
     func flushMemory() {
