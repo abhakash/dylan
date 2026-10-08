@@ -68,7 +68,7 @@ jobs:
         run: python3 Tools/check_pbxproj.py
       - name: Upload lint reports
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: lint-reports
           path: |
@@ -103,7 +103,7 @@ jobs:
         run: ./gradlew :shared:jvmTest --rerun
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: jvmTest-results
           path: |
@@ -142,7 +142,7 @@ jobs:
           if [ "${#apks[@]}" -eq 0 ]; then echo "MISSING ARTIFACT: no debug APK produced"; exit 1; fi
           ls -lh "${apks[@]}"
           sha256sum "${apks[@]}"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: apks-debug
           path: |
@@ -226,7 +226,7 @@ jobs:
           if [ $EXIT -ne 0 ]; then cat /tmp/xcode-sim.log; exit $EXIT; fi
       - name: Upload Xcode logs
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: xcode-logs
           path: |
@@ -301,7 +301,7 @@ jobs:
               --exclude='*/build/' --exclude='*/.gradle/' || true
             ls -lh fuzz-mutation-gate-tree.tgz
           fi
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: failure()
         with:
           name: fuzz-mutation-gate-scratch
