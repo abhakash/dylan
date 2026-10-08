@@ -51,7 +51,21 @@ jobs:
           cache-encryption-key: ${{ secrets.GRADLE_ENCRYPTION_KEY }}
           gradle-home-cache-cleanup: true
       - name: ktlint + detekt + Android lint
-        run: ./gradlew ktlintCheck detekt :androidApp:lintDebug --continue
+        run: ./gradlew ktlintCheck detekt :androidApp:lintDebug
+      - name: lane discipline check (tools/lane-check.sh)
+        # Hermetic: a grep over shared/src/commonMain plus the ALLOWED table in the script.
+        # The runtime Lane assertion only fires when a wrong-lane call actually executes, so a
+        # rarely-taken branch would never trip it — this is the lexical gate that fails at PR time.
+        # The script also fails on a STALE ALLOWED entry, so an exception cannot outlive the line
+        # it was granted for.
+        run: ./tools/lane-check.sh
+      - name: pbxproj structure check (iosApp/Tools/check_pbxproj.py)
+        # Hermetic: pure static parse of iosApp/iosApp.xcodeproj/project.pbxproj —
+        # no secrets, no network, no Xcode, so it is presubmit/fork-safe.
+        # The script resolves both the pbxproj and the `iosApp/` Swift walk
+        # relative to CWD, so it MUST run from inside iosApp/.
+        working-directory: iosApp
+        run: python3 Tools/check_pbxproj.py
       - name: Upload lint reports
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -80,9 +94,13 @@ jobs:
       - uses: gradle/actions/setup-gradle@0b6dd653ba04f4f93bf581ec31e66cbd7dcb644d # v4
         with:
           cache-read-only: ${{ github.ref != 'refs/heads/main' }}
-      - name: JVM tests + probeCi (hermetic, rerun)
-        # contractDrift is nightly-only (live catalog) — see nightly/contract-drift.
-        run: ./gradlew :shared:jvmTest --rerun-tasks :shared:probeCi
+      - name: JVM tests (hermetic)
+        # --rerun re-executes ONLY the test task, so results are never stale while
+        # the Kotlin compilation stays cached. --rerun-tasks would force a full
+        # main+test recompile on every run for no correctness gain.
+        # contractDrift + probeCi are nightly-only (live catalog) — see
+        # nightly/contract-drift and nightly/probe.
+        run: ./gradlew :shared:jvmTest --rerun
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -117,9 +135,13 @@ jobs:
         run: ./gradlew :androidApp:assembleDebug
       - name: Version + checksums
         run: |
+          set -euo pipefail
           echo "VERSION=$(cat VERSION)"
-          ls -lh androidApp/build/outputs/apk/debug/*.apk || true
-          sha256sum androidApp/build/outputs/apk/debug/*.apk 2>/dev/null || shasum -a 256 androidApp/build/outputs/apk/debug/*.apk 2>/dev/null || true
+          shopt -s nullglob
+          apks=(androidApp/build/outputs/apk/debug/*.apk)
+          if [ "${#apks[@]}" -eq 0 ]; then echo "MISSING ARTIFACT: no debug APK produced"; exit 1; fi
+          ls -lh "${apks[@]}"
+          sha256sum "${apks[@]}"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: apks-debug
@@ -185,6 +207,10 @@ jobs:
           restore-keys: ios-${{ runner.os }}-
       - name: Build shared frameworks
         run: ./gradlew :shared:assemble
+      - name: Kotlin/Native simulator unit tests
+        # iosSimulatorArm64Test executes shared's commonTest on the simulator —
+        # without it the whole commonTest source set is compile-only on iOS.
+        run: ./gradlew :shared:iosSimulatorArm64Test
       - name: xcodebuild simulator (CODE_SIGNING_ALLOWED=NO)
         run: |
           set -o pipefail
@@ -231,6 +257,58 @@ jobs:
           go vet ./...
           go test ./...
 
+  # ── Falsifiability gate (schedule / manual only; intentionally RED) ─────
+  # Each of the 12 mutations below is a single line, and each is pinned to the
+  # test that MUST go red because of it. A mutation that does not redden its
+  # test is a hard failure of this job, not a warning: it means the test named
+  # in tools/fuzz-mutation-gate.sh is vacuous, which is precisely the failure
+  # mode this repo keeps hitting (feedback-ledger.md:92-94).
+  #
+  # It cannot share a job with anything else — it *deliberately* breaks the
+  # build while it runs — and it must never be a presubmit gate.
+  #
+  # The script mutates a private rsync'd copy of the tree, never the checkout,
+  # so nothing another job reads is ever in a broken state.
+  nightly-mutation-gate:
+    name: nightly/fuzz-mutation
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@0b6dd653ba04f4f93bf581ec31e66cbd7dcb644d # v4
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+      - name: Fuzzy mutation gate (12 mutations; a vacuous test fails the job)
+        run: ./tools/fuzz-mutation-gate.sh
+      - name: Upload the scratch tree on failure
+        # FUZZ_MUT_KEEP makes the script leave its scratch copy behind, which is the
+        # only way to read a red mutation's actual failure message without
+        # re-running it. Uploaded on failure only: on a green gate there is nothing
+        # there, and on a red one it is the diagnosis.
+        if: failure()
+        env:
+          FUZZ_MUT_KEEP: "1"
+        run: |
+          scratch=$(ls -dt "${RUNNER_TEMP}"/dylan-mutgate.* 2>/dev/null | head -1 || true)
+          echo "scratch=${scratch:-none}"
+          if [ -n "$scratch" ]; then
+            tar -czf fuzz-mutation-gate-tree.tgz -C "$(dirname "$scratch")" "$(basename "$scratch")" \
+              --exclude='*/build/' --exclude='*/.gradle/' || true
+            ls -lh fuzz-mutation-gate-tree.tgz
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: failure()
+        with:
+          name: fuzz-mutation-gate-scratch
+          path: fuzz-mutation-gate-tree.tgz
+          if-no-files-found: ignore
+          retention-days: 7
+
   # ── Nightly live probe (schedule / manual only) ─────────────────────────
   nightly-probe-local:
     name: nightly/probe
@@ -248,6 +326,11 @@ jobs:
           cache-read-only: ${{ github.ref != 'refs/heads/main' }}
       - name: Fast live probe (catalog sanity)
         run: ./gradlew :shared:probeLocal -PprobeFast
+      - name: Live structural probe (S1-S3, M0-gated)
+        # S1-S3 hit api.php, the plain-HTTP autocomplete fallback and the WS
+        # handshake, so this is nightly/manual only — never a presubmit gate.
+        # probeCi exits non-zero when any M0 check fails.
+        run: ./gradlew :shared:probeCi
 
   # ── Nightly contract drift (live vs fixtures; NOT presubmit) ────────────
   nightly-contract-drift:
@@ -264,5 +347,7 @@ jobs:
       - uses: gradle/actions/setup-gradle@0b6dd653ba04f4f93bf581ec31e66cbd7dcb644d # v4
         with:
           cache-read-only: ${{ github.ref != 'refs/heads/main' }}
-      - name: Live contract drift (nightly-only)
+      - name: Live contract drift (nightly-only, gating)
+        # Non-zero on NEW_FIELD / TYPE_DRIFT / MISSING_FIELD / MAPPING_LOSS or on
+        # any unreachable endpoint. Not presubmit: it hits the live JioSaavn API.
         run: ./gradlew :shared:contractDrift

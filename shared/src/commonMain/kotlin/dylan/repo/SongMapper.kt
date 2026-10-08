@@ -12,8 +12,7 @@ import dylan.model.SongKey
  * drift between surfaces again. Public (not internal) so the androidApp module can call
  * it — internal would be invisible across the module boundary.
  *
- * Orchestrator keeps its own private toSong (playback-agent owned); do not consolidate
- * without that agent.
+ * Orchestrator also uses this now; it is the only toSong in the tree.
  */
 fun Songs.toSong(): Song =
     Song(

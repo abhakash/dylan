@@ -2,9 +2,9 @@ package dylan
 
 import dylan.db.DriverFactory
 import dylan.db.Dylan
+import dylan.diag.LogBuffer
 import dylan.repo.History
-import dylan.util.AppDispatchers
-import kotlinx.coroutines.Dispatchers
+import dylan.support.TestLanes
 import kotlinx.coroutines.runBlocking
 import okio.FileSystem
 import okio.Path.Companion.toPath
@@ -24,8 +24,8 @@ class HistoryRepoTest {
     fun setup() {
         tmp = FileSystem.SYSTEM_TEMPORARY_DIRECTORY.toString() + "/dylan-hist-${System.nanoTime()}"
         FileSystem.SYSTEM.createDirectories(tmp.toPath())
-        db = Dylan(DriverFactory("$tmp/dylan.db").createDriver())
-        history = History(db, AppDispatchers(Dispatchers.Main, Dispatchers.Default, Dispatchers.Default, Dispatchers.Default))
+        db = Dylan(DriverFactory("$tmp/dylan.db", LogBuffer()).createDriver())
+        history = History(db, TestLanes().disp)
     }
 
     @AfterTest

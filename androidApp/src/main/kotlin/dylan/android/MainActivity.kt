@@ -3,8 +3,10 @@ package dylan.android
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Color
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
@@ -35,13 +37,34 @@ class MainActivity : ComponentActivity() {
     private fun ensureNotificationPermission() {
         if (notifAsked) return
         notifAsked = true
-        val granted = ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+        val granted =
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) ==
+                PackageManager.PERMISSION_GRANTED
         if (!granted) notifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+        // Both bars pinned to `dark`, explicitly. The app background is hard-coded
+        // #FF000000 in every token set (see `DylanTokens`), so the clock, battery and signal must
+        // always be light. Bare `enableEdgeToEdge()` took `SystemBarStyle.auto`, whose icon
+        // brightness follows the *system* night flag rather than the app's, so on a light-mode
+        // device it asked for dark icons on a black bar. (That is the whole of issues.md #7.)
+        //
+        // `TRANSPARENT` for both scrims is what the defaults already resolved to on every API this
+        // app can run on: the nav bar's `DefaultLightScrim`/`DefaultDarkScrim` pair is only read
+        // below API 29, and minSdk is 34. Pinning `dark` also leaves the navigation bar's platform
+        // contrast scrim off — `isNavigationBarContrastEnforced` stays on only for `MODE_NIGHT_AUTO`
+        // — which is right here: the app paints its own black under the bar, edge to edge.
+        //
+        // `enableEdgeToEdge` and `SystemBarStyle` are deprecated in androidx *after* the pinned
+        // 1.12.4, where `WindowCompat.enableEdgeToEdge` plus the insets controller replace them.
+        // Left alone deliberately: 1.12.4 does not warn, and that migration would rewrite the scrim
+        // behaviour described above rather than keep it.
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
+        )
         setContent {
             DylanTheme {
                 AppRoot(

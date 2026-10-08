@@ -4,6 +4,14 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonElement
 
+/**
+ * A catalog card.
+ *
+ * [image], [year], [playCount] and [moreInfo] are deliberately *untyped* on the DTO so a card
+ * decodes at all. Every field the live API has ever changed shape on (image: string → object →
+ * null; year: number → string; 320kbps: bool → number → string) is coerced at the mapper instead
+ * of at decode time, and [moreInfo] is decoded element-wise from the result list.
+ */
 @Serializable
 data class SongDto(
     val id: String = "",
@@ -15,7 +23,7 @@ data class SongDto(
     val language: String? = null,
     val year: JsonElement? = null,
     @SerialName("play_count") val playCount: JsonElement? = null,
-    @SerialName("more_info") val moreInfo: MoreInfoDto? = null,
+    @SerialName("more_info") val moreInfo: JsonElement? = null,
 )
 
 @Serializable
@@ -28,10 +36,23 @@ data class MoreInfoDto(
     val duration: JsonElement? = null,
     val rights: JsonElement? = null,
     @SerialName("artistMap") val artistMap: JsonElement? = null,
-    @SerialName("song_count") val songCount: JsonElement? = null,
+    @SerialName("song_count") val songCount: String? = null,
     @SerialName("release_date") val releaseDate: String? = null,
 )
 
+/**
+ * The `{total,start,results}` envelope, **typed**.
+ *
+ * Deliberately *not* the shape the network path uses. A `List<SongDto>` decode is all-or-nothing:
+ * one card with a field the decoder dislikes discards the whole 20-card page, which is the
+ * "Songs 0 of 0" defect. So the provider never decodes this — it reads the envelope as a
+ * `JsonObject` and decodes each card separately (`decodeSongPage` / `decodeMiniPage` in `Mapper.kt`).
+ *
+ * This type is kept for the fixture and contract-drift layer, which wants typed cards
+ * (`jvmTest/tools/ContractDrift.kt` reads `dto.results.map { it.id }`). It is also the control in
+ * `SaavnProviderTest`: the same payload that costs one card on the network path is fatal here, and
+ * that difference is the whole point.
+ */
 @Serializable
 data class ResultsDto(
     val total: JsonElement? = null,
@@ -39,6 +60,7 @@ data class ResultsDto(
     val results: List<SongDto> = emptyList(),
 )
 
+/** [list] is element-wise for the same reason as [ResultsDto.results]. */
 @Serializable
 data class AlbumDto(
     val id: String = "",
@@ -46,7 +68,7 @@ data class AlbumDto(
     val subtitle: String? = null,
     val image: JsonElement? = null,
     val year: JsonElement? = null,
-    val list: List<SongDto> = emptyList(),
+    val list: List<JsonElement> = emptyList(),
 )
 
 @Serializable
@@ -56,7 +78,7 @@ data class ArtistDto(
     val subtitle: String? = null,
     val image: JsonElement? = null,
     val type: String? = null,
-    @SerialName("topSongs") val topSongs: List<SongDto> = emptyList(),
+    @SerialName("topSongs") val topSongs: List<JsonElement> = emptyList(),
 )
 
 @Serializable
@@ -66,8 +88,18 @@ data class AuthDto(
     val status: String? = null,
 )
 
+/**
+ * A WebSocket frame.
+ *
+ * [resp] is [JsonElement], not `String`, because the server has shipped the payload both ways
+ * (verified: `fixtures/autocomplete_ws_frame.json` carries it as a nested JSON *string*). Typed as
+ * `String` the object shape throws on the whole frame, so every keystroke yields "no suggestions"
+ * — with no log line distinguishing it from a genuinely empty result.
+ *
+ * [action] is read: a keepalive / non-`search` frame is not a result set and must not be rendered.
+ */
 @Serializable
 data class WsFrameDto(
     val action: String? = null,
-    val resp: String? = null,
+    val resp: JsonElement? = null,
 )

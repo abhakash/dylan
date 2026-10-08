@@ -16,7 +16,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -32,6 +31,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dylan.android.ui.Dyl
 import dylan.android.ui.LocalDylanTokens
 import dylan.di.AppContainer
@@ -43,8 +43,7 @@ fun QueueSheet(
     container: AppContainer,
     onClose: (() -> Unit)? = null,
 ) {
-    val state by container.orchestrator.state.collectAsState()
-    val t = LocalDylanTokens.current
+    val state by container.orchestrator.state.collectAsStateWithLifecycle()
 
     // A live drag renders a local snapshot so rows track the finger instantly; every crossing
     // also submits MoveWithinQueue, so the shared queue converges by drag end.
@@ -59,7 +58,43 @@ fun QueueSheet(
     val keys = remember(queue) { uniqueKeys(queue) }
     val currentIdx = queue.indexOfFirst { it.key == state.current?.key }
     val resistPx = with(LocalDensity.current) { 48.dp.toPx() }
-    val endDrag: () -> Unit = {
+
+    // Plain functions rather than lambdas baked into the row: `pointerInput(key)` never restarts
+    // for a new callback, so each of these has to read the live drag state every time it runs.
+    fun startDrag(key: String) {
+        if (draggedKey != null) return
+        val q = state.queue
+        val idx = uniqueKeys(q).indexOf(key)
+        if (idx <= q.indexOfFirst { it.key == state.current?.key }) return
+        dragging = true
+        dragQueue = q
+        draggedKey = key
+        dragFrom = idx
+        dragOffset = 0f
+    }
+
+    fun dragBy(
+        key: String,
+        deltaY: Float,
+    ) {
+        if (draggedKey != key) return
+        val moved =
+            stepOverNeighbours(
+                container = container,
+                from = dragFrom,
+                offsetIn = dragOffset + deltaY,
+                queue = dragQueue,
+                rowHeights = rowHeights,
+                currentKey = state.current?.key,
+                resistPx = resistPx,
+            )
+        dragQueue = moved.list
+        dragFrom = moved.index
+        dragOffset = moved.offset
+    }
+
+    fun finishDrag(key: String) {
+        if (draggedKey != key) return
         dragging = false
         draggedKey = null
         dragFrom = -1
@@ -67,114 +102,126 @@ fun QueueSheet(
     }
 
     Column(Modifier.fillMaxSize().padding(top = 12.dp)) {
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text("Up Next", style = MaterialTheme.typography.titleLarge, color = t.textPrimary)
-            if (state.index + 1 < state.queue.size) {
-                Text(
-                    "Clear",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = t.primary,
-                    modifier = Modifier.clickable { container.orchestrator.submit(Intent.ClearUpNext) },
-                )
-            }
-            if (onClose != null) {
-                IconButton(onClick = onClose) {
-                    Icon(Dyl.Close, "Close queue", tint = t.textSecondary)
-                }
-            }
-        }
+        QueueHeader(
+            canClearUpNext = state.index + 1 < state.queue.size,
+            onClearUpNext = { container.orchestrator.submit(Intent.ClearUpNext) },
+            onClose = onClose,
+        )
         LazyColumn(
             Modifier.fillMaxWidth().weight(1f),
             contentPadding = PaddingValues(top = 8.dp, bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             itemsIndexed(queue, key = { i, _ -> keys[i] }) { i, song ->
-                val key = keys[i]
-                val isCurrent = i == currentIdx
-                val isDragged = key == draggedKey
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 6.dp)
-                        .then(if (isDragged) Modifier.zIndex(1f) else Modifier)
-                        .graphicsLayer { if (isDragged) translationY = dragOffset }
-                        .onSizeChanged { rowHeights[key] = it.height },
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        song.title,
-                        style = MaterialTheme.typography.bodyLarge,
-                        color = if (isCurrent || isDragged) t.primary else t.textPrimary,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f),
-                    )
-                    if (!isCurrent) {
-                        Icon(
-                            Dyl.MoreVert,
-                            contentDescription = "Reorder",
-                            tint = t.textSecondary,
-                            modifier =
-                                Modifier
-                                    .padding(4.dp)
-                                    .pointerInput(key) {
-                                        detectDragGesturesAfterLongPress(
-                                            onDragStart = {
-                                                if (draggedKey != null) return@detectDragGesturesAfterLongPress
-                                                val q = state.queue
-                                                val idx = uniqueKeys(q).indexOf(key)
-                                                if (idx <= q.indexOfFirst { it.key == state.current?.key }) {
-                                                    return@detectDragGesturesAfterLongPress
-                                                }
-                                                dragging = true
-                                                dragQueue = q
-                                                draggedKey = key
-                                                dragFrom = idx
-                                                dragOffset = 0f
-                                            },
-                                            onDrag = { change, amount ->
-                                                change.consume()
-                                                if (draggedKey != key) return@detectDragGesturesAfterLongPress
-                                                val moved =
-                                                    stepOverNeighbours(
-                                                        container = container,
-                                                        from = dragFrom,
-                                                        offsetIn = dragOffset + amount.y,
-                                                        queue = dragQueue,
-                                                        rowHeights = rowHeights,
-                                                        currentKey = state.current?.key,
-                                                        resistPx = resistPx,
-                                                    )
-                                                dragQueue = moved.list
-                                                dragFrom = moved.index
-                                                dragOffset = moved.offset
-                                            },
-                                            onDragEnd = {
-                                                if (draggedKey == key) endDrag()
-                                            },
-                                            onDragCancel = {
-                                                if (draggedKey == key) endDrag()
-                                            },
-                                        )
-                                    },
-                        )
-                        IconButton(onClick = { container.orchestrator.submit(Intent.RemoveAt(i)) }) {
-                            Icon(Dyl.Close, "Remove", tint = t.textSecondary)
-                        }
-                    } else {
-                        Text(
-                            "Now playing",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = t.primary,
-                            modifier = Modifier.padding(horizontal = 12.dp),
-                        )
-                    }
-                }
+                QueueRow(
+                    song = song,
+                    key = keys[i],
+                    isCurrent = i == currentIdx,
+                    isDragged = keys[i] == draggedKey,
+                    // Read inside the row's graphicsLayer block, not here: a per-pixel read during
+                    // composition would recompose the dragged row on every drag event.
+                    dragOffset = { dragOffset },
+                    onHeightChanged = { rowHeights[keys[i]] = it },
+                    onRemove = { container.orchestrator.submit(Intent.RemoveAt(i)) },
+                    onDragStart = { startDrag(it) },
+                    onDragBy = { key, deltaY -> dragBy(key, deltaY) },
+                    onDragFinish = { finishDrag(it) },
+                )
             }
+        }
+    }
+}
+
+@Composable
+private fun QueueHeader(
+    canClearUpNext: Boolean,
+    onClearUpNext: () -> Unit,
+    onClose: (() -> Unit)?,
+) {
+    val t = LocalDylanTokens.current
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text("Up Next", style = MaterialTheme.typography.titleLarge, color = t.textPrimary)
+        if (canClearUpNext) {
+            Text(
+                "Clear",
+                style = MaterialTheme.typography.bodyMedium,
+                color = t.primary,
+                modifier = Modifier.clickable(onClick = onClearUpNext),
+            )
+        }
+        if (onClose != null) {
+            IconButton(onClick = onClose) {
+                Icon(Dyl.Close, "Close queue", tint = t.textSecondary)
+            }
+        }
+    }
+}
+
+@Composable
+private fun QueueRow(
+    song: Song,
+    key: String,
+    isCurrent: Boolean,
+    isDragged: Boolean,
+    dragOffset: () -> Float,
+    onHeightChanged: (Int) -> Unit,
+    onRemove: () -> Unit,
+    onDragStart: (String) -> Unit,
+    onDragBy: (String, Float) -> Unit,
+    onDragFinish: (String) -> Unit,
+) {
+    val t = LocalDylanTokens.current
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 6.dp)
+            .then(if (isDragged) Modifier.zIndex(1f) else Modifier)
+            .graphicsLayer { if (isDragged) translationY = dragOffset() }
+            .onSizeChanged { onHeightChanged(it.height) },
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            song.title,
+            style = MaterialTheme.typography.bodyLarge,
+            color = if (isCurrent || isDragged) t.primary else t.textPrimary,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        if (!isCurrent) {
+            Icon(
+                Dyl.MoreVert,
+                contentDescription = "Reorder",
+                tint = t.textSecondary,
+                modifier =
+                    Modifier
+                        .padding(4.dp)
+                        .pointerInput(key) {
+                            detectDragGesturesAfterLongPress(
+                                onDragStart = { onDragStart(key) },
+                                onDrag = { change, amount ->
+                                    change.consume()
+                                    onDragBy(key, amount.y)
+                                },
+                                onDragEnd = { onDragFinish(key) },
+                                onDragCancel = { onDragFinish(key) },
+                            )
+                        },
+            )
+            IconButton(onClick = onRemove) {
+                Icon(Dyl.Close, "Remove", tint = t.textSecondary)
+            }
+        } else {
+            Text(
+                "Now playing",
+                style = MaterialTheme.typography.labelSmall,
+                color = t.primary,
+                modifier = Modifier.padding(horizontal = 12.dp),
+            )
         }
     }
 }
@@ -199,8 +246,8 @@ private fun stepOverNeighbours(
     var cur = from
     var offset = offsetIn
     while (cur + 1 < q.size) {
-        val h = rowHeights[uniqueKeys(q)[cur + 1]] ?: break
-        if (offset <= h / 2f) break
+        val h = rowHeights[uniqueKeys(q)[cur + 1]]
+        if (h == null || offset <= h / 2f) break
         container.orchestrator.submit(Intent.MoveWithinQueue(cur, cur + 1))
         q = q.toMutableList().also { it.add(cur + 1, it.removeAt(cur)) }
         cur++
@@ -209,8 +256,8 @@ private fun stepOverNeighbours(
     // The playing row is anchored — nothing may rise above next-of-current.
     val floor = (q.indexOfFirst { it.key == currentKey } + 1).coerceAtLeast(0)
     while (cur - 1 >= floor) {
-        val h = rowHeights[uniqueKeys(q)[cur - 1]] ?: break
-        if (-offset <= h / 2f) break
+        val h = rowHeights[uniqueKeys(q)[cur - 1]]
+        if (h == null || -offset <= h / 2f) break
         container.orchestrator.submit(Intent.MoveWithinQueue(cur, cur - 1))
         q = q.toMutableList().also { it.add(cur - 1, it.removeAt(cur)) }
         cur--

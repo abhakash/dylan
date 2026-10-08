@@ -1,5 +1,6 @@
 package dylan.android.ui.screens
 
+import android.content.Context
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -13,6 +14,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -20,10 +22,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -32,21 +31,25 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dylan.android.ui.Copy
 import dylan.android.ui.Dyl
 import dylan.android.ui.LocalDylanTokens
 import dylan.android.ui.components.SectionTitle
+import dylan.android.ui.components.SongActions
 import dylan.android.ui.components.SongRow
 import dylan.android.ui.components.canPlay
 import dylan.android.ui.components.quietLoad
+import dylan.android.ui.components.rememberAnyDownloading
 import dylan.android.ui.components.rememberCachedKeys
 import dylan.android.ui.components.rememberFavoriteKeys
 import dylan.android.ui.components.rememberIsOnline
 import dylan.android.ui.components.rememberSongActions
+import dylan.cache.DownloadEntry
 import dylan.di.AppContainer
 import dylan.model.Song
 import dylan.model.SongKey
-import dylan.repo.toSong
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 
 @Composable
@@ -55,31 +58,19 @@ fun LibraryScreen(
     onPlaySongs: (List<Song>, Int) -> Unit,
     onOpenDownloads: () -> Unit,
 ) {
-    val t = LocalDylanTokens.current
     var favorites by remember { mutableStateOf(emptyList<Song>()) }
     var jumpBack by remember { mutableStateOf(emptyList<Song>()) }
-    var downloadCount by remember { mutableIntStateOf(0) }
-    var downloadBytes by remember { mutableLongStateOf(0L) }
     val actions = rememberSongActions(container)
     val favKeys = rememberFavoriteKeys(container)
-    val favVersion by container.favorites.version.collectAsState()
     val ctx = LocalContext.current
     val isOnline = rememberIsOnline(container)
     val cachedKeys = rememberCachedKeys(container)
+    // Same single-JOIN model the Downloads screen renders, so the summary cannot disagree with it.
+    val downloads by container.cacheManager.downloads.collectAsStateWithLifecycle(initialValue = emptyList())
 
-    LaunchedEffect(favVersion) {
+    LaunchedEffect(favKeys) {
         favorites = quietLoad(emptyList()) { container.favorites.all() }
-        jumpBack = quietLoad(emptyList()) { container.history.recent(5) }
-        val rows =
-            kotlinx.coroutines.withContext(container.disp.dbLane) {
-                quietLoad(emptyList<dylan.db.Cached_files>()) {
-                    container.db.dylanQueries
-                        .selectAllCached()
-                        .executeAsList()
-                }
-            }
-        downloadCount = rows.size
-        downloadBytes = rows.sumOf { it.bytes }
+        jumpBack = quietLoad(emptyList()) { container.history.recent(HISTORY_RECENT_LIMIT) }
     }
 
     Column(
@@ -89,88 +80,118 @@ fun LibraryScreen(
     ) {
         SectionTitle("Library")
         LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 24.dp)) {
-            item(key = "downloads-summary") {
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp)
-                        .clip(MaterialTheme.shapes.medium)
-                        .background(t.surfaceVariant)
-                        .clickable(onClick = onOpenDownloads)
-                        .padding(16.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    Icon(Dyl.Library, contentDescription = null, tint = t.primary)
-                    Column(Modifier.weight(1f)) {
-                        Text("Downloads", style = MaterialTheme.typography.titleMedium, color = t.textPrimary)
-                        Text(
-                            if (downloadCount == 0) "Nothing saved yet" else "$downloadCount songs · ${formatBytes(downloadBytes)}",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = t.textSecondary,
-                        )
-                    }
-                    Icon(Dyl.ChevronRight, contentDescription = null, tint = t.textSecondary)
-                }
-            }
-            if (favorites.isEmpty()) {
-                item(key = "favorites-empty") {
-                    Column(Modifier.padding(horizontal = 16.dp)) {
-                        SectionTitle("Your favorites")
-                        Text(
-                            "Songs you favorite appear here.",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = t.textSecondary,
-                        )
-                    }
-                }
-            } else {
-                item(key = "favorites-title") { SectionTitle("Your favorites") }
-                items(favorites, key = { "fv" + it.key.songId }) { song ->
-                    val can = canPlay(isOnline, cachedKeys, song.key)
-                    SongRow(
-                        song = song,
-                        isFavorite = true,
-                        enabled = can,
-                        onTap = {
-                            if (!can) {
-                                android.widget.Toast
-                                    .makeText(ctx, Copy.OFFLINE, android.widget.Toast.LENGTH_SHORT)
-                                    .show()
-                            } else {
-                                onPlaySongs(favorites, favorites.indexOfFirst { it.key == song.key }.coerceAtLeast(0))
-                            }
-                        },
-                        onPlayNext = { actions.playNext(song) },
-                        onAddLast = { actions.addToQueue(song) },
-                        onFavorite = { actions.toggleFavorite(song) },
-                    )
-                }
-            }
-            if (jumpBack.isNotEmpty()) {
-                item(key = "history-title") { SectionTitle("Jump back in") }
-                items(jumpBack, key = { "jb" + it.key.songId }) { song ->
-                    val can = canPlay(isOnline, cachedKeys, song.key)
-                    SongRow(
-                        song = song,
-                        isFavorite = song.key in favKeys,
-                        enabled = can,
-                        onTap = {
-                            if (!can) {
-                                android.widget.Toast
-                                    .makeText(ctx, Copy.OFFLINE, android.widget.Toast.LENGTH_SHORT)
-                                    .show()
-                            } else {
-                                onPlaySongs(listOf(song), 0)
-                            }
-                        },
-                        onPlayNext = { actions.playNext(song) },
-                        onAddLast = { actions.addToQueue(song) },
-                        onFavorite = { actions.toggleFavorite(song) },
-                    )
-                }
+            item(key = "downloads-summary") { DownloadsSummaryRow(downloads, onOpenDownloads) }
+            favoritesSection(favorites, ctx, actions, onPlaySongs, isOnline, cachedKeys)
+            jumpBackSection(jumpBack, ctx, actions, onPlaySongs, isOnline, cachedKeys, favKeys)
+        }
+    }
+}
+
+@Composable
+private fun DownloadsSummaryRow(
+    downloads: List<DownloadEntry>,
+    onOpenDownloads: () -> Unit,
+) {
+    val t = LocalDylanTokens.current
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp)
+            .clip(MaterialTheme.shapes.medium)
+            .background(t.surfaceVariant)
+            .clickable(onClick = onOpenDownloads)
+            .padding(16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Icon(Dyl.Library, contentDescription = null, tint = t.primary)
+        Column(Modifier.weight(1f)) {
+            Text("Downloads", style = MaterialTheme.typography.titleMedium, color = t.textPrimary)
+            Text(
+                downloadsSummary(downloads),
+                style = MaterialTheme.typography.bodyMedium,
+                color = t.textSecondary,
+            )
+        }
+        Icon(Dyl.ChevronRight, contentDescription = null, tint = t.textSecondary)
+    }
+}
+
+private fun LazyListScope.favoritesSection(
+    favorites: List<Song>,
+    ctx: Context,
+    actions: SongActions,
+    onPlaySongs: (List<Song>, Int) -> Unit,
+    isOnline: Boolean,
+    cachedKeys: Set<SongKey>,
+) {
+    if (favorites.isEmpty()) {
+        item(key = "favorites-empty") {
+            val t = LocalDylanTokens.current
+            Column(Modifier.padding(horizontal = 16.dp)) {
+                SectionTitle("Your favorites")
+                Text(
+                    "Songs you favorite appear here.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = t.textSecondary,
+                )
             }
         }
+        return
+    }
+    item(key = "favorites-title") { SectionTitle("Your favorites") }
+    items(favorites, key = { "fv" + it.key.songId }) { song ->
+        val can = canPlay(isOnline, cachedKeys, song.key)
+        SongRow(
+            song = song,
+            isFavorite = true,
+            enabled = can,
+            onTap = {
+                if (!can) {
+                    android.widget.Toast
+                        .makeText(ctx, Copy.OFFLINE, android.widget.Toast.LENGTH_SHORT)
+                        .show()
+                } else {
+                    onPlaySongs(favorites, favorites.indexOfFirst { it.key == song.key }.coerceAtLeast(0))
+                }
+            },
+            onPlayNext = { actions.playNext(song) },
+            onAddLast = { actions.addToQueue(song) },
+            onFavorite = { actions.toggleFavorite(song) },
+        )
+    }
+}
+
+private fun LazyListScope.jumpBackSection(
+    jumpBack: List<Song>,
+    ctx: Context,
+    actions: SongActions,
+    onPlaySongs: (List<Song>, Int) -> Unit,
+    isOnline: Boolean,
+    cachedKeys: Set<SongKey>,
+    favKeys: Set<SongKey>,
+) {
+    if (jumpBack.isEmpty()) return
+    item(key = "history-title") { SectionTitle("Jump back in") }
+    items(jumpBack, key = { "jb" + it.key.songId }) { song ->
+        val can = canPlay(isOnline, cachedKeys, song.key)
+        SongRow(
+            song = song,
+            isFavorite = song.key in favKeys,
+            enabled = can,
+            onTap = {
+                if (!can) {
+                    android.widget.Toast
+                        .makeText(ctx, Copy.OFFLINE, android.widget.Toast.LENGTH_SHORT)
+                        .show()
+                } else {
+                    onPlaySongs(listOf(song), 0)
+                }
+            },
+            onPlayNext = { actions.playNext(song) },
+            onAddLast = { actions.addToQueue(song) },
+            onFavorite = { actions.toggleFavorite(song) },
+        )
     }
 }
 
@@ -182,26 +203,15 @@ fun DownloadsScreen(
 ) {
     val t = LocalDylanTokens.current
     val scope = androidx.compose.runtime.rememberCoroutineScope()
-    var songs by remember { mutableStateOf(listOf<Pair<Song, dylan.db.Cached_files>>()) }
-    var pendingRemove by remember { mutableStateOf<Pair<Song, dylan.db.Cached_files>?>(null) }
-    var reload by remember { mutableIntStateOf(0) }
-    val progress by container.downloads.progress.collectAsState()
+    var pendingRemove by remember { mutableStateOf<DownloadEntry?>(null) }
+    // One subscription, one JOIN. `removableKeys` is a second subscription to the same cold
+    // flow, so reading it alongside `downloads` would double the query on every emission.
+    val rows by container.cacheManager.downloads.collectAsStateWithLifecycle(initialValue = emptyList())
+    val anyDownloading = rememberAnyDownloading(container)
     val actions = rememberSongActions(container)
     val favKeys = rememberFavoriteKeys(container)
-
-    LaunchedEffect(reload) {
-        songs =
-            kotlinx.coroutines.withContext(container.disp.dbLane) {
-                quietLoad(emptyList<Pair<Song, dylan.db.Cached_files>>()) {
-                    container.db.dylanQueries.selectAllCached().executeAsList().mapNotNull { r ->
-                        container.db.dylanQueries
-                            .selectSong(r.provider, r.song_id)
-                            .executeAsOneOrNull()
-                            ?.let { s -> s.toSong() to r }
-                    }
-                }
-            }
-    }
+    val songs = remember(rows) { rows.map { it.song } }
+    val totalBytes = remember(rows) { rows.sumOf { it.bytes } }
 
     Column(
         Modifier
@@ -217,92 +227,136 @@ fun DownloadsScreen(
             }
             Text("Downloads", style = MaterialTheme.typography.titleLarge, color = t.textPrimary)
         }
-        if (songs.isEmpty()) {
+        if (rows.isEmpty()) {
             Text(
-                if (progress.isEmpty()) "Nothing saved yet. Play something and it lands here." else "Downloading…",
+                if (anyDownloading.value) "Downloading…" else "Nothing saved yet. Play something and it lands here.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = t.textSecondary,
                 modifier = Modifier.padding(16.dp),
             )
         } else {
             LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 24.dp)) {
-                items(songs, key = { it.second.provider + ":" + it.second.song_id }) { (song, row) ->
-                    SongRow(
-                        song = song,
-                        isCached = true,
-                        isFavorite = SongKey(row.provider, row.song_id) in favKeys,
-                        sizeLabel = formatBytes(row.bytes),
-                        onTap = { onPlaySongs(songs.map { it.first }, songs.indexOfFirst { it.second.song_id == row.song_id }.coerceAtLeast(0)) },
-                        onDownload = null,
-                        onRemoveDownload =
-                            if (isRemovable(container, SongKey(row.provider, row.song_id))) {
-                                { pendingRemove = song to row }
-                            } else {
-                                null
-                            },
-                        onPlayNext = { actions.playNext(song) },
-                        onAddLast = { actions.addToQueue(song) },
-                        onFavorite = { actions.toggleFavorite(song) },
-                    )
-                }
-                item {
-                    val totalBytes = songs.sumOf { it.second.bytes }
-                    Text(
-                        "Cached audio ${formatBytes(totalBytes)} of ${formatBytes(container.cfg.cacheMaxBytes)} · ${songs.size} songs",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = t.textSecondary,
-                        modifier = Modifier.padding(16.dp),
-                    )
+                downloadRows(rows, songs, totalBytes, container, actions, favKeys, onPlaySongs) { row ->
+                    pendingRemove = row
                 }
             }
         }
     }
 
-    pendingRemove?.let { (song, row) ->
-        androidx.compose.material3.AlertDialog(
-            onDismissRequest = { pendingRemove = null },
-            title = { Text("Remove download?", style = MaterialTheme.typography.titleMedium, color = t.textPrimary) },
-            text = {
-                Text(
-                    "\"${song.title}\" (${formatBytes(row.bytes)}) will be deleted from storage.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = t.textSecondary,
-                )
-            },
-            confirmButton = {
-                androidx.compose.material3.TextButton(onClick = {
-                    pendingRemove = null
-                    scope.launch {
-                        runCatching { container.cacheManager.evictOne(SongKey(row.provider, row.song_id)) }
-                        reload++
-                    }
-                }) { Text("Remove", color = t.error) }
-            },
-            dismissButton = {
-                androidx.compose.material3.TextButton(onClick = { pendingRemove = null }) { Text("Cancel", color = t.textSecondary) }
-            },
-            containerColor = t.surface,
+    pendingRemove?.let { entry ->
+        RemoveDownloadDialog(
+            entry = entry,
+            container = container,
+            scope = scope,
+            onDismiss = { pendingRemove = null },
         )
     }
 }
 
-// A cached song is only removable when nothing depends on it: not playing/queued (protected),
-// not mid-download, not an in-progress quality-upgrade source. Composed from existing shared
-// CacheManager flows + queries because CacheManager has no per-key evict API yet.
-private fun isRemovable(
+private fun LazyListScope.downloadRows(
+    rows: List<DownloadEntry>,
+    songs: List<Song>,
+    totalBytes: Long,
     container: AppContainer,
-    key: SongKey,
-): Boolean {
-    val cm = container.cacheManager
-    return key !in cm.protectedKeys.value &&
-        key !in cm.inFlightJobKeys.value &&
-        key !in cm.upgradeSourceKeys.value
+    actions: SongActions,
+    favKeys: Set<SongKey>,
+    onPlaySongs: (List<Song>, Int) -> Unit,
+    onRequestRemove: (DownloadEntry) -> Unit,
+) {
+    items(rows, key = { it.key.provider + ":" + it.key.songId }) { row ->
+        val at = songs.indexOfFirst { it.key == row.key }.coerceAtLeast(0)
+        val offerRemove = remember(row) { { onRequestRemove(row) } }
+        SongRow(
+            song = row.song,
+            isCached = true,
+            isFavorite = row.key in favKeys,
+            sizeLabel = formatBytes(row.bytes),
+            onTap = { onPlaySongs(songs, at) },
+            onDownload = null,
+            // From the same row the protection set was evaluated against, so the menu
+            // disappears the moment a download or an upgrade takes the key.
+            onRemoveDownload = if (row.removable) offerRemove else null,
+            onPlayNext = { actions.playNext(row.song) },
+            onAddLast = { actions.addToQueue(row.song) },
+            onFavorite = { actions.toggleFavorite(row.song) },
+        )
+    }
+    item(key = "downloads-footer") {
+        val t = LocalDylanTokens.current
+        Text(
+            downloadsFooter(totalBytes, rows.size, container),
+            style = MaterialTheme.typography.labelSmall,
+            color = t.textSecondary,
+            modifier = Modifier.padding(16.dp),
+        )
+    }
 }
+
+@Composable
+private fun RemoveDownloadDialog(
+    entry: DownloadEntry,
+    container: AppContainer,
+    scope: CoroutineScope,
+    onDismiss: () -> Unit,
+) {
+    val t = LocalDylanTokens.current
+    val ctx = LocalContext.current
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Remove download?", style = MaterialTheme.typography.titleMedium, color = t.textPrimary) },
+        text = {
+            Text(
+                "\"${entry.song.title}\" (${formatBytes(entry.bytes)}) will be deleted from storage.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = t.textSecondary,
+            )
+        },
+        confirmButton = {
+            androidx.compose.material3.TextButton(onClick = {
+                onDismiss()
+                scope.launch {
+                    // evictOne re-checks protection inside the claim, so a key that became
+                    // protected between the tap and here is refused, not deleted.
+                    val removed = container.cacheManager.evictOne(entry.key)
+                    if (!removed) {
+                        android.widget.Toast
+                            .makeText(ctx, Copy.BUSY, android.widget.Toast.LENGTH_SHORT)
+                            .show()
+                    }
+                }
+            }) { Text("Remove", color = t.error) }
+        },
+        dismissButton = {
+            androidx.compose.material3.TextButton(onClick = onDismiss) { Text("Cancel", color = t.textSecondary) }
+        },
+        containerColor = t.surface,
+    )
+}
+
+private fun downloadsSummary(rows: List<DownloadEntry>): String {
+    if (rows.isEmpty()) return "Nothing saved yet"
+    return "${rows.size} songs · ${formatBytes(rows.sumOf { it.bytes })}"
+}
+
+private fun downloadsFooter(
+    bytes: Long,
+    count: Int,
+    container: AppContainer,
+): String = "Cached audio ${formatBytes(bytes)} of ${formatBytes(container.cfg.cacheMaxBytes)} · $count songs"
 
 internal fun formatBytes(b: Long): String =
     when {
-        b >= 1L shl 30 -> "%.1f GB".format(b.toDouble() / (1L shl 30))
-        b >= 1L shl 20 -> "%.1f MB".format(b.toDouble() / (1L shl 20))
-        b >= 1L shl 10 -> "%.1f KB".format(b.toDouble() / (1L shl 10))
+        b >= BYTES_PER_GB -> "%.1f GB".format(b.toDouble() / BYTES_PER_GB)
+        b >= BYTES_PER_MB -> "%.1f MB".format(b.toDouble() / BYTES_PER_MB)
+        b >= BYTES_PER_KB -> "%.1f KB".format(b.toDouble() / BYTES_PER_KB)
         else -> "$b B"
     }
+
+/** Recent plays loaded for the library's "Jump back in" section. */
+private const val HISTORY_RECENT_LIMIT = 5
+
+// Size thresholds for formatBytes. Binary multiples (as before), labelled with the familiar
+// SI-looking suffixes the UI has always shown.
+private const val BYTES_PER_KB = 1024L
+private const val BYTES_PER_MB = 1024L * 1024L
+private const val BYTES_PER_GB = 1024L * 1024L * 1024L

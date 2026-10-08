@@ -73,13 +73,24 @@ jobs:
       - name: Commit, tag, push (retry on races)
         if: steps.bump.outputs.skip != 'true'
         run: |
+          set -uo pipefail
           VER=$(cat VERSION)
           git add VERSION iosApp/iosApp.xcodeproj/project.pbxproj
           git commit -m "chore(version): v$VER [skip ci]"
           git tag -a "v$VER" -m "v$VER"
+          ok=0
           for i in 1 2 3; do
-            git pull --rebase origin main && git push origin HEAD:main && git push origin "v$VER" && break
+            if git pull --rebase origin main \
+              && git push origin HEAD:main \
+              && git push origin "v$VER"; then
+              ok=1
+              break
+            fi
             echo "Push race (attempt $i) — rebasing and retrying…"
             sleep 5
           done
+          if [ "$ok" -ne 1 ]; then
+            echo "ERROR: could not push v$VER after 3 attempts — VERSION is bumped locally but unpublished."
+            exit 1
+          fi
           git status -sb

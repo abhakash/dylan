@@ -23,7 +23,7 @@ class IosPlayerEngine(
     private val out: NativeAudioOutput,
     private val scope: CoroutineScope,
     private val main: CoroutineDispatcher,
-    private val log: dylan.diag.LogBuffer = dylan.diag.LogBuffer.SILENT,
+    private val log: dylan.diag.LogBuffer,
 ) : PlayerEngine,
     EngineEventSink {
     private val mutableEvents = MutableSharedFlow<EngineEvent>(extraBufferCapacity = 256)
@@ -95,7 +95,7 @@ class IosPlayerEngine(
             scope.launch(main) {
                 while (isActive && !released) {
                     mutablePosition.value = out.currentTimeMs().coerceAtLeast(0L)
-                    delay(100)
+                    delay(POSITION_POLL_INTERVAL_MS)
                 }
             }
     }
@@ -103,5 +103,13 @@ class IosPlayerEngine(
     private fun stopPolling() {
         pollJob?.cancel()
         pollJob = null
+    }
+
+    private companion object {
+        /**
+         * 10 Hz, matching the Android engine. It is the only clock this class owns: the position seam
+         * carries no push, so [startPolling] samples it, and everything else arrives as an event.
+         */
+        const val POSITION_POLL_INTERVAL_MS = 100L
     }
 }

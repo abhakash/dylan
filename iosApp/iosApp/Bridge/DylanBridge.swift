@@ -74,12 +74,38 @@ typealias KIntentSeek = IntentSeek        // Intent.Seek
 //   AUTO -> auto_ and EXPLICIT -> explicit_ because `auto`/`explicit` are Swift keywords
 //   (header: @property auto_ swift_name("auto_"), explicit_ swift_name("explicit_"))
 typealias KTransitionReason = TransitionReason
+// check: enum LogLevel (uppercase cases -> lowerCamelCase on the Swift side, as with
+// TransitionReason.AUTO_ -> KTransitionReason.auto_).
+typealias KLogLevel = LogLevel
 //   check: enum EngineErr { DECODE, SOURCE, SESSION_ACTIVATION } →
 //   .decode/.source/.sessionActivation (lowerCamelCase, A5)
 typealias KEngineErr = EngineErr
 //   check: @protocol EngineEvent ("EngineEvent" sealed interface, A2 rule).
 //   NOTE: was spelled `shared.EngineEvent` — unprefixed spelling is wrong.
 typealias KEngineEvent = EngineEvent
+
+// ---- bridge contract guards ----------------------------------------------------
+// A Kotlin `List<T>` crosses as NSArray. `as? [KSong] ?? []` therefore has two very different
+// failure modes that look identical at the call site: an EMPTY list (legitimately nothing to
+// show) and a TYPE MISMATCH (the contract broke and we silently showed nothing). The latter is
+// the one that costs hours, because the symptom is "the screen is just empty" with no error.
+//
+// So every collection crossing the bridge is checked element-wise before the cast. `assertionFailure`
+// is debug-only by construction: in a release build it compiles out and release behaviour is
+// unchanged, which is the right trade — we do not want to crash a user's phone over a bad cast.
+@inline(__always)
+private func checkedCast<T>(
+    _ raw: Any?,
+    _ label: @autoclosure () -> String
+) -> [T] {
+    guard let raw else { return [] }
+    if let typed = raw as? [T] { return typed }
+    // Reached only when the array holds something other than T. Report the real shape so the
+    // failure names the actual type rather than just "mismatch".
+    let actual = (raw as? [Any])?.first.map { String(describing: type(of: $0)) } ?? "empty"
+    assertionFailure("bridge contract: \(label()) expected [\(T.self)] but got [\(actual)]")
+    return (raw as? [T]) ?? []
+}
 
 /// Engine event constructors (flattened classes per A3; singletons per A4).
 enum Events {
@@ -142,10 +168,16 @@ enum Intents {
 
 /// Graph bootstrap — keeps the `companion` spelling assumption inside this file.
 enum DylanGraph {
-    /// check: IosGraph.companion.create(baseDir:) — Kotlin companion object
+    /// check: IosGraph.companion.create(baseDir:logMinLevel:) — Kotlin companion object
     /// surfaces as a static `.companion` property on the class.
+    ///
+    /// `logMinLevel` MUST be passed explicitly even though Kotlin declares it with a default:
+    /// a Kotlin default argument is not part of the exported ObjC signature (there are no ObjC
+    /// default-argument overloads), so `create(baseDir:)` alone does not compile from Swift and
+    /// the generated header demands the second parameter. `KLogLevel.info` mirrors
+    /// `LogLevel.INFO`, the Kotlin-side default.
     static func create(baseDir: String) -> KGraph {
-        IosGraph.companion.create(baseDir: baseDir)
+        IosGraph.companion.create(baseDir: baseDir, logMinLevel: KLogLevel.info)
     }
 }
 
@@ -176,7 +208,7 @@ extension KGraph {
     ) async -> ([KSong], Int64) {
         do {
             let paged = try await container.provider.search(query: q, page: Int32(page))
-            return ((paged.items.compactMap { $0 as? KSong }), paged.total)
+            return (checkedCast(paged.items, "searchSongsPaged items"), paged.total)
         } catch {
             bridgeLog.error("search failed: \(error.localizedDescription)")
             onToast?("Check your connection and try again.")
@@ -245,7 +277,7 @@ extension KGraph {
 
     func favoritesAll() async -> [KSong] {
         do {
-            return try await container.favorites.all().compactMap { $0 as? KSong }
+            return checkedCast(try await container.favorites.all(), "favorites.all()")
         } catch {
             bridgeLog.error("favorites.all failed: \(error.localizedDescription)")
             return []
@@ -282,7 +314,10 @@ extension KGraph {
 
     func historyRecent(_ limit: Int) async -> [KSong] {
         do {
-            return try await container.history.recent(limit: Int32(limit)).compactMap { $0 as? KSong }
+            return checkedCast(
+                try await container.history.recent(limit: Int32(limit)),
+                "history.recent(limit: \(limit))"
+            )
         } catch {
             bridgeLog.error("history.recent failed: \(error.localizedDescription)")
             return []
@@ -392,12 +427,27 @@ extension KGraph {
         }
     }
 
-    func removeDownloaded(_ info: KCachedSongInfo) async {
+    /// False means `CacheManager.evictOne` refused: the key is protected (playing, queued,
+    /// mid-download, or the source of an in-flight quality upgrade) or the row was already gone.
+    @discardableResult
+    func removeDownloaded(_ info: KCachedSongInfo) async -> Bool {
         do {
-            try await removeDownload(key: info.song.key)
+            let v = try await removeDownload(key: info.song.key) as? KotlinBoolean
+            return v?.boolValue ?? false
         } catch {
             bridgeLog.error("removeDownload failed: \(error.localizedDescription)")
             onToast?("Check your connection and try again.")
+            return false
+        }
+    }
+
+    /// Terminal graph teardown (Ktor clients, HTTP engine, file log, the state lane's SupervisorJob).
+    /// Suspends, so it needs a live task — see AppEnvironment.teardown().
+    func teardownGraph() async {
+        do {
+            try await dispose()
+        } catch {
+            bridgeLog.error("graph teardown failed: \(error.localizedDescription)")
         }
     }
 

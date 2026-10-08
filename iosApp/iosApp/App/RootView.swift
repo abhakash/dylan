@@ -74,7 +74,12 @@ struct RootView: View {
         .onChange(of: scenePhase) { phase in
             // §9.10: background ⇒ snapshot write + WS close; audio session keeps the
             // process alive during playback so prefetch continues naturally.
-            if phase == .background || phase == .inactive {
+            //
+            // `.inactive` is NOT background: a Control-Center pull, an incoming-call banner, a
+            // permission dialog and the app switcher all pass through it, several times a session.
+            // Firing here closed the search WebSocket under the user's fingers and wrote a resume
+            // snapshot mid-gesture.
+            if phase == .background {
                 env.graph.onBackground()
             }
         }

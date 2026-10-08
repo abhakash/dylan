@@ -8,7 +8,9 @@ import dylan.model.Song
 import dylan.model.SongKey
 import dylan.playback.decodeSnapshot
 import dylan.util.AppDispatchers
-import dylan.util.nowMs
+import dylan.util.Clock
+import dylan.util.Lane
+import dylan.util.SystemClock
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.withContext
 
@@ -24,9 +26,10 @@ import kotlinx.coroutines.withContext
 suspend fun Dylan.admitSongs(
     disp: AppDispatchers,
     songs: List<Song>,
-) = withContext(disp.dbLane) {
+    clock: Clock = SystemClock,
+) = withContext(disp.on(Lane.DB)) {
     if (songs.isEmpty()) return@withContext
-    val now = nowMs()
+    val now = clock.nowMs()
     transaction {
         songs.forEach { song ->
             val r = song.toRow(now)
@@ -68,12 +71,13 @@ class Favorites(
     private val db: Dylan,
     private val disp: AppDispatchers,
     private val cacheManager: CacheManager,
+    private val clock: Clock = SystemClock,
 ) {
     val version = MutableStateFlow(0)
 
     suspend fun add(song: Song) {
-        val now = nowMs()
-        withContext(disp.dbLane) {
+        val now = clock.nowMs()
+        withContext(disp.on(Lane.DB)) {
             db.transaction {
                 // Guard like admitSong — with FK=ON a plain INSERT OR REPLACE on songs would
                 // cascade-delete cached_files/favorites for that key (F2). Only insert if absent.
@@ -96,28 +100,31 @@ class Favorites(
                     )
                 }
                 db.dylanQueries.addFavorite(song.key.provider, song.key.songId, now)
+                // Read inside this transaction, never before it: a `remove` landing between the
+                // read and the write is what used to leave a permanent phantom pin (docs §3.9).
                 db.dylanQueries.setPin(1L, now, song.key.provider, song.key.songId)
             }
         }
-        cacheManager.enforceBudget(netNewBytes = 0)
+        // The pin is a write, not a new row: nothing is pending, so nothing is reserved.
+        cacheManager.enforceBudget()
         version.value += 1
     }
 
     suspend fun remove(key: SongKey) =
-        withContext(disp.dbLane) {
+        withContext(disp.on(Lane.DB)) {
             db.transaction {
                 db.dylanQueries.removeFavorite(key.provider, key.songId)
-                db.dylanQueries.setPin(0L, null, key.provider, key.songId)
+                db.dylanQueries.demotePin(key.provider, key.songId)
             }
         }.also { version.value += 1 }
 
     suspend fun isFavorite(key: SongKey): Boolean =
-        withContext(disp.dbLane) {
+        withContext(disp.on(Lane.DB)) {
             db.dylanQueries.isFavorite(key.provider, key.songId).executeAsOne()
         }
 
     suspend fun all(): List<Song> =
-        withContext(disp.dbLane) {
+        withContext(disp.on(Lane.DB)) {
             db.dylanQueries
                 .allFavorites()
                 .executeAsList()
@@ -130,7 +137,7 @@ class History(
     private val disp: AppDispatchers,
 ) {
     suspend fun recent(limit: Int): List<Song> =
-        withContext(disp.dbLane) {
+        withContext(disp.on(Lane.DB)) {
             db.dylanQueries
                 .recentHistory(limit.toLong())
                 .executeAsList()
@@ -139,7 +146,7 @@ class History(
 
     /** Album carousel personalization — pure SQLite: last-played album per (provider, album_id). */
     suspend fun recentAlbums(limit: Int): List<RecentAlbums> =
-        withContext(disp.dbLane) {
+        withContext(disp.on(Lane.DB)) {
             db.dylanQueries
                 .recentAlbums(limit.toLong())
                 .executeAsList()
@@ -152,18 +159,18 @@ class SearchHistoryRepo(
     private val cfg: AppConfig,
 ) {
     suspend fun record(display: String) =
-        withContext(disp.dbLane) {
+        withContext(disp.on(Lane.DB)) {
             val key = display.trim().lowercase()
             if (key.isNotEmpty()) {
                 db.transaction {
-                    db.dylanQueries.upsertSearchHistory(key, display.trim(), nowMs())
+                    db.dylanQueries.upsertSearchHistory(key, display.trim(), cfg.clock.nowMs())
                     db.dylanQueries.trimSearchHistory(cfg.searchHistoryLimit.toLong())
                 }
             }
         }
 
     suspend fun recent(): List<String> =
-        withContext(disp.dbLane) {
+        withContext(disp.on(Lane.DB)) {
             db.dylanQueries
                 .listSearchHistory(cfg.searchHistoryLimit.toLong())
                 .executeAsList()
@@ -171,7 +178,7 @@ class SearchHistoryRepo(
         }
 
     suspend fun clear() =
-        withContext(disp.dbLane) {
+        withContext(disp.on(Lane.DB)) {
             db.dylanQueries.clearSearchHistory()
         }
 }
@@ -182,37 +189,66 @@ class HomeCacheRepo(
     private val cfg: AppConfig,
 ) {
     suspend fun getJson(key: String): String? =
-        withContext(disp.dbLane) {
+        withContext(disp.on(Lane.DB)) {
             val row = db.dylanQueries.getHomeCache(key).executeAsOneOrNull() ?: return@withContext null
-            if (nowMs() - row.fetched_at_ms > cfg.homeCacheTtlMs) null else row.json
+            if (cfg.clock.nowMs() - row.fetched_at_ms > cfg.homeCacheTtlMs) null else row.json
         }
 
     suspend fun putJson(
         key: String,
         json: String,
-    ) = withContext(disp.dbLane) {
-        db.dylanQueries.putHomeCache(key, json, nowMs())
+    ) = withContext(disp.on(Lane.DB)) {
+        db.dylanQueries.putHomeCache(key, json, cfg.clock.nowMs())
     }
 
     suspend fun evictWeekly() =
-        withContext(disp.dbLane) {
-            db.dylanQueries.evictStaleHomeCache(nowMs() - cfg.homeCacheTtlMs)
-            val keepKeys = db.dylanQueries.newestHomeKeys(cfg.homeCacheRowCap.toLong()).executeAsList()
-            if (keepKeys.isNotEmpty()) db.dylanQueries.evictHomeCacheNotIn(keepKeys)
+        withContext(disp.on(Lane.DB)) {
+            db.dylanQueries.evictStaleHomeCache(cfg.clock.nowMs() - cfg.homeCacheTtlMs)
+            db.dylanQueries.evictHomeCacheKeepNewest(cfg.homeCacheRowCap.toLong())
         }
 }
+
+/**
+ * Quality-upgrade candidates: the predicate, the `has_320` filter and the LIMIT are all in SQL.
+ * The call site used to `selectAllCached()` and then `selectSong()` per row *before* `.take(n)`,
+ * so the limit bounded nothing and a 300-row cache cost 301 round trips through the single
+ * dbLane every 30 minutes, blocking playback DB work for the duration.
+ */
+suspend fun Dylan.upgradeCandidates(
+    disp: AppDispatchers,
+    fromBitrate: Long,
+    limit: Int,
+): List<SongKey> =
+    withContext(disp.on(Lane.DB)) {
+        dylanQueries
+            .selectUpgradeCandidates(fromBitrate, limit.toLong())
+            .executeAsList()
+            .map { SongKey(it.provider, it.song_id) }
+    }
 
 suspend fun Dylan.weeklyGc(
     disp: AppDispatchers,
     cfg: AppConfig,
-) = withContext(disp.dbLane) {
-    val cutoff = nowMs() - cfg.songsGcAgeDays * 24L * 60 * 60 * 1000
+) = withContext(disp.on(Lane.DB)) {
+    // `songsGcAgeDays` is a knob in days; the cutoff it produces is in epoch millis.
+    val cutoff = cfg.clock.nowMs() - cfg.songsGcAgeDays * MS_PER_DAY
     val rawResume = dylanQueries.getSetting("resume").executeAsOneOrNull()
-    val protect = rawResume?.let { decodeSnapshot(it)?.items?.map { r -> "${r.provider}:${r.songId}" } } ?: emptyList<String>()
+    val protect =
+        rawResume
+            ?.let { decodeSnapshot(it)?.items?.map { r -> "${r.provider}:${r.songId}" } }
+            ?: emptyList<String>()
     dylanQueries.gcSongs(cutoff, protect.ifEmpty { listOf("::") })
     // Orphan sweep: history rows whose song row is gone (pre-CASCADE DBs, or rows removed
     // while FK enforcement was off). NOT EXISTS-scoped, so history for live-queue and
     // jump-back-in songs whose rows still exist is never touched — history feeds both the
     // resume snapshot above and the Home carousel, and only truly dangling rows go.
     dylanQueries.deleteOrphanHistory()
+    // The same failure mode for the cache: with PRAGMA foreign_keys off, or a store written
+    // before the PRAGMA existed, a deleted song can leave cached rows behind, and those rows
+    // keep bytes charged against the budget forever.
+    dylanQueries.deleteOrphanLibrary()
+    dylanQueries.deleteOrphanObjects()
 }
+
+/** [AppConfig.songsGcAgeDays] is the GC horizon in days; every cutoff it feeds is in millis. */
+private const val MS_PER_DAY = 60L * 60 * 1000 * 24

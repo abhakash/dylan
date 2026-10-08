@@ -50,6 +50,7 @@ class DylanApp : Application() {
                 scope = appScope,
                 baseDir = filesDir.absolutePath,
                 driverFactory = DriverFactory(this),
+                fs = okio.FileSystem.SYSTEM,
                 netMonitor = NetMonitor(this),
                 httpEngine = OkHttp.create(),
                 engineFactory = { ExoPlayerEngine(this) },

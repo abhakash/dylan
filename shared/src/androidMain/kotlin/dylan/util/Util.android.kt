@@ -9,32 +9,46 @@ import android.os.StatFs
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 
-actual fun nowMs(): Long = System.currentTimeMillis()
+internal actual class LaneThreadLocal actual constructor() {
+    private val tl = ThreadLocal<Lane?>()
 
-actual class NetMonitor(
+    actual fun get(): Lane? = tl.get()
+
+    actual fun set(lane: Lane?) {
+        tl.set(lane)
+    }
+}
+
+internal actual fun platformNowMs(): Long = System.currentTimeMillis()
+
+/**
+ * The one predicate for "is this path unmetered" — `changes()` and `current()` both go through
+ * it, so the metered badge and the download policy cannot disagree.
+ */
+private fun NetworkCapabilities.isUnmeteredPath(): Boolean =
+    hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED) &&
+        hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED)
+
+class AndroidNetMonitor(
     private val ctx: Context,
-) {
-    actual fun current(): NetClass {
-        val cm = ctx.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return NetClass.METERED
-        val caps = cm.getNetworkCapabilities(cm.activeNetwork) ?: return NetClass.METERED
-        val unmetered = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
-        val restricted = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED)
-        return if (unmetered && restricted) NetClass.UNMETERED else NetClass.METERED
+) : NetMonitor {
+    private val service: ConnectivityManager? by lazy {
+        ctx.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
     }
 
-    actual fun isOnline(): Boolean {
-        val cm = ctx.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return false
-        val net = cm.activeNetwork ?: return false
-        val caps = cm.getNetworkCapabilities(net) ?: return false
-        return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-    }
+    override fun current(): NetClass = activeCapabilities()?.classOf() ?: NetMonitorPolicy.UNKNOWN_NET_CLASS
 
-    actual fun changes(): Flow<NetClass> =
+    override fun isOnline(): Boolean =
+        activeCapabilities()?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            ?: NetMonitorPolicy.UNKNOWN_ONLINE
+
+    override fun changes(): Flow<NetClass> =
         callbackFlow {
-            val cm = ctx.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+            val cm = service
             if (cm == null) {
-                trySend(NetClass.METERED)
+                trySend(NetMonitorPolicy.UNKNOWN_NET_CLASS)
                 awaitClose { }
                 return@callbackFlow
             }
@@ -44,21 +58,36 @@ actual class NetMonitor(
                         network: Network,
                         caps: NetworkCapabilities,
                     ) {
-                        trySend(
-                            if (caps.hasCapability(
-                                    NetworkCapabilities.NET_CAPABILITY_NOT_METERED,
-                                )
-                            ) {
-                                NetClass.UNMETERED
-                            } else {
-                                NetClass.METERED
-                            },
-                        )
+                        trySend(caps.classOf())
+                    }
+
+                    override fun onLost(network: Network) {
+                        trySend(NetMonitorPolicy.UNKNOWN_NET_CLASS)
                     }
                 }
-            cm.registerNetworkCallback(NetworkRequest.Builder().build(), cb)
+            cm.registerNetworkCallback(
+                NetworkRequest
+                    .Builder()
+                    .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                    .build(),
+                cb,
+            )
             awaitClose { cm.unregisterNetworkCallback(cb) }
-        }
+        }.distinctUntilChanged()
+
+    private fun activeCapabilities(): NetworkCapabilities? {
+        val cm = service ?: return null
+        val net = cm.activeNetwork ?: return null
+        return cm.getNetworkCapabilities(net)
+    }
+
+    private fun NetworkCapabilities.classOf(): NetClass {
+        val unmetered = isUnmeteredPath()
+        return if (unmetered) NetClass.UNMETERED else NetClass.METERED
+    }
 }
 
-actual fun freeDiskBytes(path: String): Long = runCatching { StatFs(path).availableBytes }.getOrDefault(-1L)
+/** Same-named factory so the pre-existing `NetMonitor(this)` construction sites keep working. */
+fun NetMonitor(ctx: Context): NetMonitor = AndroidNetMonitor(ctx)
+
+actual fun freeDiskBytes(path: String): Long = runCatching { StatFs(path).availableBytes }.getOrDefault(DISK_UNKNOWN)
