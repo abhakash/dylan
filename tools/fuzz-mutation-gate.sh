@@ -98,7 +98,18 @@ if mutate "$SQ" 's/MAX\(0, final_bytes - old\.bytes\)/final_bytes - old.bytes/';
 fi
 
 # G-10 — the pin CHECK is removed. INV-18 alone cannot see it; only the write-and-expect-throw can.
-if mutate "$SQ" 's/^  CHECK \(\(pinned = 0\) = \(pinned_at_ms IS NULL\)\)\n?\z//m'; then
+#
+# This needs TWO edits, not one. The pin CHECK is the last constraint in the `library` table body, so
+# deleting that line alone leaves `CHECK (play_count >= 0),` as the final entry: a dangling comma
+# before `)`. SQLDelight rejects that at *codegen* time, `:shared:generateCommonMainDylanInterface`
+# fails, and the build dies before a single test executes. The gate then reports "red for an
+# unidentified reason" — the mutant build was red, but nothing was *measured*, which is exactly the
+# false-green this gate exists to prevent.
+#
+# `mutate` runs `perl -pi -e`, which is per-line, so `\n` inside a pattern never spans lines and the
+# two edits have to be separate `s///` clauses in one expression (both anchored to a single line).
+# The first drops the now-dangling comma; the second blanks the CHECK line itself.
+if mutate "$SQ" 's/^  CHECK \(play_count >= 0\),$/  CHECK (play_count >= 0)/; s/^  CHECK \(\(pinned = 0\) = \(pinned_at_ms IS NULL\)\)$//'; then
   run "G-10 dylan.sq delete the pin CHECK" "$SQ" 'dylan.fuzz.M1InvariantsTest'
 fi
 
