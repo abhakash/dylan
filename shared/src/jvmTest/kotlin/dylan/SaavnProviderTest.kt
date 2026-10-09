@@ -17,6 +17,7 @@ import dylan.provider.saavn.mapSuggestions
 import dylan.provider.saavn.rowKey
 import dylan.support.MutableClock
 import dylan.support.TestLanes
+import dylan.util.Connectivity
 import dylan.util.Lane
 import dylan.util.NetClass
 import io.ktor.client.HttpClient
@@ -29,6 +30,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -115,11 +118,13 @@ class SaavnProviderTest {
     ) {
         val net =
             object : dylan.util.NetMonitor {
+                private val state = MutableStateFlow(Connectivity(online, netClass))
+
+                override fun connectivity(): Flow<Connectivity> = state
+
                 override fun current(): NetClass = netClass
 
                 override fun isOnline(): Boolean = online
-
-                override fun changes() = kotlinx.coroutines.flow.MutableStateFlow(netClass)
             }
         val scope = CoroutineScope(lanes.disp.io + kotlinx.coroutines.SupervisorJob())
         val p = SaavnProvider(http, cfg, scope, lanes.disp, net, log)
@@ -326,11 +331,13 @@ class SaavnProviderTest {
                 @Volatile
                 var up = true
 
+                private val state = MutableStateFlow(Connectivity(up, NetClass.UNMETERED))
+
+                override fun connectivity(): Flow<Connectivity> = state
+
                 override fun current(): NetClass = NetClass.UNMETERED
 
                 override fun isOnline(): Boolean = up
-
-                override fun changes() = kotlinx.coroutines.flow.MutableStateFlow(NetClass.UNMETERED)
             }
         val scope = CoroutineScope(lanes.disp.io + kotlinx.coroutines.SupervisorJob())
         val page = fixture("search_getresults_p1.json")

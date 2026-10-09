@@ -21,21 +21,36 @@ internal actual fun platformNowMs(): Long = System.currentTimeMillis()
  * reports the documented failure default ([NetMonitorPolicy]) unless it is told otherwise.
  * Tests construct [JvmNetMonitor] with an explicit value (or use `FakeNetMonitor`) — the
  * network is never baked in.
+ *
+ * Both halves live in one [Connectivity] state so the two derived flows (`changes()` and
+ * `online()`) can never disagree about what the monitor knows.
  */
 class JvmNetMonitor(
-    private val netClass: NetClass = NetClass.METERED,
-    private val online: Boolean = false,
+    netClass: NetClass = NetClass.METERED,
+    online: Boolean = false,
 ) : NetMonitor {
-    private val state = MutableStateFlow(netClass)
+    private val state = MutableStateFlow(Connectivity(online, netClass))
 
-    override fun current(): NetClass = state.value
+    override fun connectivity(): Flow<Connectivity> = state
 
-    override fun isOnline(): Boolean = online
+    override fun current(): NetClass = state.value.netClass
 
-    override fun changes(): Flow<NetClass> = state
+    override fun isOnline(): Boolean = state.value.online
 
+    fun push(
+        online: Boolean,
+        netClass: NetClass,
+    ) {
+        state.value = Connectivity(online, netClass)
+    }
+
+    /** Mirrors the platform push API so one signature drives every test that needs a metered toggle. */
     fun pushMetered(isMetered: Boolean) {
-        state.value = if (isMetered) NetClass.METERED else NetClass.UNMETERED
+        push(state.value.online, if (isMetered) NetClass.METERED else NetClass.UNMETERED)
+    }
+
+    fun pushOnline(isOnline: Boolean) {
+        push(isOnline, state.value.netClass)
     }
 }
 

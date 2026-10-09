@@ -10,6 +10,7 @@ import dylan.net.bulkClient
 import dylan.provider.SignedStream
 import dylan.provider.saavn.SaavnProvider
 import dylan.util.AppDispatchers
+import dylan.util.Connectivity
 import dylan.util.NetClass
 import dylan.util.NetMonitor
 import io.ktor.client.HttpClient
@@ -678,11 +679,11 @@ private object TestProbeLanes {
     val disp = AppDispatchers(Dispatchers.Default, Dispatchers.IO, Dispatchers.Default, Dispatchers.Default)
     val net =
         object : NetMonitor {
+            override fun connectivity(): Flow<Connectivity> = MutableStateFlow(Connectivity(true, NetClass.UNMETERED))
+
             override fun current(): NetClass = NetClass.UNMETERED
 
             override fun isOnline(): Boolean = true
-
-            override fun changes(): Flow<NetClass> = MutableStateFlow(NetClass.UNMETERED)
         }
 }
 

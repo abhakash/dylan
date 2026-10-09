@@ -9,6 +9,7 @@ import dylan.diag.LogBuffer
 import dylan.diag.LogLevel
 import dylan.playback.PlayerEngine
 import dylan.util.AppDispatchers
+import dylan.util.Connectivity
 import dylan.util.NetClass
 import dylan.util.NetMonitor
 import io.ktor.client.engine.mock.MockEngine
@@ -333,11 +334,11 @@ class GraphConcurrencyTest {
     private fun freshDir(name: String): String = "$tmp-$name".also { FileSystem.SYSTEM.createDirectories(it.toPath()) }
 
     private object TestNet : NetMonitor {
+        override fun connectivity(): Flow<Connectivity> = MutableStateFlow(Connectivity(true, NetClass.UNMETERED))
+
         override fun current(): NetClass = NetClass.UNMETERED
 
         override fun isOnline(): Boolean = true
-
-        override fun changes(): Flow<NetClass> = MutableStateFlow(NetClass.UNMETERED)
     }
 
     private companion object {

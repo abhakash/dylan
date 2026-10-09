@@ -60,6 +60,8 @@ import dylan.provider.saavn.MiniKind
 import dylan.provider.saavn.kind
 import dylan.provider.saavn.navigable
 import dylan.provider.saavn.rowKey
+import dylan.search.SearchSections
+import dylan.search.settledSubmitQuery
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
@@ -109,6 +111,34 @@ fun SearchScreen(
     val cachedKeys = rememberCachedKeys(container)
     val favKeys = rememberFavoriteKeys(container)
 
+    // F-24: a typed query that has settled is submitted. See [settledSubmitQuery] for why, and for
+    // the trade-off. Every submit path below goes through [submitQuery] so they all set the same
+    // things in the same order — flag the fetch, drop the rows, move the query, move the epoch — and
+    // the settle path cannot drift from the Enter path.
+    fun submitQuery(
+        q: String,
+        record: Boolean = false,
+    ) {
+        results.beginSubmit()
+        results.clearSongs()
+        query = q
+        submittedState.value = q
+        submitEpoch = submitEpoch + 1
+        demand.value = q
+        if (record) scope.launch { runCatching { container.searchHistory.record(q) } }
+    }
+
+    // Reads the typed text and never writes it, so the settle cannot race a keystroke: `demand` is
+    // what the keystrokes publish, and this collector only ever asks a question of the answer.
+    LaunchedEffect(Unit) {
+        demand
+            .debounce(SUBMIT_SETTLE_MS)
+            .distinctUntilChanged()
+            .collect { q ->
+                settledSubmitQuery(q, submittedState.value, MIN_SUBMIT_QUERY)?.let { submitQuery(it) }
+            }
+    }
+
     LaunchedEffect(Unit) {
         recent = runCatching { container.searchHistory.recent() }.getOrDefault(emptyList())
         topSearches = runCatching { container.provider.topSearches() }.getOrDefault(emptyList())
@@ -123,13 +153,7 @@ fun SearchScreen(
                 demand.value = q
             },
             onSubmit = { q ->
-                // In this order: flag the fetch before touching anything, drop the rows, then move the
-                // key the refetch hangs on. See [ResultState.beginSubmit] and [submitEpoch].
-                results.beginSubmit()
-                results.clearSongs()
-                submitted = q
-                submitEpoch = submitEpoch + 1
-                scope.launch { runCatching { container.searchHistory.record(q) } }
+                if (q.isNotBlank()) submitQuery(q, record = true)
             },
         )
 
@@ -156,10 +180,8 @@ fun SearchScreen(
                     suggestions = suggestions,
                     query = query,
                     onSubmitQuery = { q ->
-                        results.beginSubmit()
-                        query = q
-                        submitted = q
-                        submitEpoch = submitEpoch + 1
+                        // A tap on a suggestion is a submit: same steps as the keyboard's.
+                        submitQuery(q)
                     },
                     onOpenAlbum = onOpenAlbum,
                     onOpenArtist = onOpenArtist,
@@ -169,11 +191,7 @@ fun SearchScreen(
                     recent = recent,
                     topSearches = topSearches,
                     onPick = { q ->
-                        results.beginSubmit()
-                        query = q
-                        submitted = q
-                        submitEpoch = submitEpoch + 1
-                        demand.value = q
+                        submitQuery(q)
                     },
                 )
         }
@@ -601,45 +619,62 @@ private fun mergeHits(
 /**
  * The submitted list's rows, its running totals and its paging budgets.
  *
- * Every field is its own snapshot state, read by [SearchResults]; grouping them is only so that the
- * paging arithmetic — which has to stay consistent across the three sections — lives in one place.
+ * The rows and the budgets are one [dylan.search.SearchSections] value, held as a single snapshot
+ * state; the arithmetic that decides when a section is exhausted lives in that type, in `shared`, so
+ * it has a JVM test that can run without a device. This class exists only for the part that cannot
+ * move: the fetches (which need the container and a suspending context) and the fact that Compose
+ * needs a snapshot state per recomposition.
+ *
  * The object is created by [SearchScreen], so its lifetime is the screen's, not the list's.
- *
- * The three `*Exhausted` flags are per-section, replacing a single `hasMore` derived from the
- * origin's totals, and they exist because those totals could not answer the question.
- * `deliveredTotal` decides "there may be more" by comparing the *kept* rows against the requested
- * page size, which is only valid when the page contained nothing but the wanted type. The album and
- * artist endpoints return a **mixed** envelope, so a 20-row page might hold 3 albums and 17 songs;
- * `kept (3) >= pageSize (20)` is false, the section declared itself exhausted after one page, and
- * paging silently stopped. Meanwhile songs kept paging and kept growing, because cross-rendition
- * duplicates (`Mockingbird` from three albums) are distinct `songId`s and so count as distinct rows
- * against the budget. Exhaustion is therefore observed rather than predicted: a section is done when
- * a page brings back no rows it did not already have. That needs no assumption about the origin's
- * `total`.
- *
- * `loadingFirst` is the other half of that: a section's budget says nothing while *page 1* has not
- * arrived, because there is nothing yet for a page 2 to be folded into.
  */
 private class ResultState {
-    var songs by mutableStateOf(emptyList<Song>())
-    var songTotal by mutableLongStateOf(0L)
-    var songPage by mutableStateOf(1)
-    var songsExhausted by mutableStateOf(false)
+    var sections by mutableStateOf(dylan.search.SearchSections())
 
-    var albums by mutableStateOf(emptyList<MiniEntity>())
-    var albumTotal by mutableLongStateOf(0L)
-    var albumPage by mutableStateOf(1)
-    var albumsExhausted by mutableStateOf(false)
+    var songs: List<Song>
+        get() = sections.songs
+        set(value) {
+            sections = sections.copy(songs = value)
+        }
 
-    var artists by mutableStateOf(emptyList<MiniEntity>())
-    var artistTotal by mutableLongStateOf(0L)
-    var artistPage by mutableStateOf(1)
-    var artistsExhausted by mutableStateOf(false)
+    var albums: List<MiniEntity>
+        get() = sections.albums
+        set(value) {
+            sections = sections.copy(albums = value)
+        }
 
-    var loadingMore by mutableStateOf(false)
+    var artists: List<MiniEntity>
+        get() = sections.artists
+        set(value) {
+            sections = sections.copy(artists = value)
+        }
+
+    var songTotal: Long
+        get() = sections.songTotal
+        set(value) {
+            sections = sections.copy(songTotal = value)
+        }
+
+    var albumTotal: Long
+        get() = sections.albumTotal
+        set(value) {
+            sections = sections.copy(albumTotal = value)
+        }
+
+    var artistTotal: Long
+        get() = sections.artistTotal
+        set(value) {
+            sections = sections.copy(artistTotal = value)
+        }
+
+    var loadingMore: Boolean
+        get() = sections.loadingMore
+        set(value) {
+            sections = sections.withLoadingMore(value)
+        }
 
     /** Page 1 of the current submit has been asked for and has not landed yet. */
-    var loadingFirst by mutableStateOf(false)
+    val loadingFirst: Boolean
+        get() = sections.loadingFirst
 
     /**
      * "This list is still growing", for the footer spinner.
@@ -648,66 +683,24 @@ private class ResultState {
      * user wants a spinner. The paging decision is [canExtend].
      */
     val growing: Boolean
-        get() = !songsExhausted || !albumsExhausted || !artistsExhausted
+        get() = sections.budgets.growing
 
-    /**
-     * "A next page may be worth asking for", read at the moment it is asked.
-     *
-     * A function rather than a value computed in the composable, because the scroll listener that
-     * consumes it captures one composition's flags: on a new submit that composition has still not
-     * run [reset], so a captured value is the *previous* query's answer — and for a query that was
-     * paged to the end that answer is a permanent "no".
-     */
-    fun canExtend(): Boolean = !loadingFirst && !loadingMore && growing
+    /** "A next page may be worth asking for", read at the moment it is asked. */
+    fun canExtend(): Boolean = sections.canExtend()
 
-    /**
-     * A new query: fresh budgets, and nothing left over from the last one.
-     *
-     * Deliberately does **not** touch [loadingFirst]: the submit path sets it before it changes
-     * anything (see [beginSubmit]), and clearing it here would reopen the window in which the scroll
-     * listener can ask for page 2 before page 1 exists.
-     */
+    /** A new query: fresh budgets, and nothing left over from the last one. */
     fun reset() {
-        songPage = 1
-        albumPage = 1
-        artistPage = 1
-        loadingMore = false
-        songsExhausted = false
-        albumsExhausted = false
-        artistsExhausted = false
-        songs = emptyList()
-        albums = emptyList()
-        artists = emptyList()
-        songTotal = 0
-        albumTotal = 0
-        artistTotal = 0
+        sections = sections.reset()
     }
 
-    /**
-     * Called synchronously by every submit path, before that path changes anything else.
-     *
-     * The keyboard's submit drops the song rows below, and dropping rows wakes the scroll listener.
-     * Without this flag that listener would see "there may be more" and request page 2 while
-     * [fetchFirst] was still asking for page 1 — and the page-2 fold would then *overwrite* the
-     * page-1 rows rather than extend them. On the chip and suggestion paths there is nothing to
-     * clear, but the flag is set there too so that "a first page is pending" is true by the time any
-     * listener can run, without depending on which effect the runtime happens to dispatch first.
-     */
+    /** Called synchronously by every submit path, before that path changes anything else. */
     fun beginSubmit() {
-        loadingFirst = true
+        sections = sections.beginSubmit()
     }
 
-    /**
-     * The keyboard's submit drops the song rows synchronously, before the refetch effect has run.
-     *
-     * Only the songs: that is what this path has always cleared, and the album and artist rows are
-     * replaced a frame later by [reset] anyway — which, now that the fetch is keyed on the submit
-     * epoch, actually runs on a repeated submit too. Before that, [reset] was the comment's promise
-     * and nothing more: the effect it lived in did not re-fire, so the rows it would have replaced
-     * were never replaced.
-     */
+    /** The keyboard's submit drops the song rows synchronously, before the refetch effect has run. */
     fun clearSongs() {
-        songs = emptyList()
+        sections = sections.clearSongs()
     }
 
     /**
@@ -722,115 +715,54 @@ private class ResultState {
         container: AppContainer,
         query: String,
     ) {
-        loadingFirst = true
         coroutineScope {
             val songsDef = async { pageOrNull { container.provider.search(query, 1) } }
             val albumsDef = async { pageOrNull { container.provider.searchAlbums(query, 1) } }
             val artistsDef = async { pageOrNull { container.provider.searchArtists(query, 1) } }
-            val firstSongs = songsDef.await()
-            val firstAlbums = albumsDef.await()
-            val firstArtists = artistsDef.await()
             // A first page never exhausts a section, not even an empty one: the origin may simply have
-            // nothing for this query.
-            songsExhausted = false
-            albumsExhausted = false
-            artistsExhausted = false
-            foldSongs(foldPage(firstSongs, emptyList()) { it.key }, 1)
-            foldAlbums(foldPage(firstAlbums, emptyList()) { it.rowKey }, 1)
-            foldArtists(foldPage(firstArtists, emptyList()) { it.rowKey }, 1)
+            // nothing for this query — which is what `reset()` before the fold is for, since a fresh
+            // budget starts with every section un-exhausted.
+            sections = sections.reset().foldFirst(songsDef.await(), albumsDef.await(), artistsDef.await())
         }
-        loadingFirst = false
     }
 
     /**
      * Extend every section that still has something to give, then the merged list re-ranks so
      * newcomers slot into their relevance band.
+     *
+     * Each section is asked for independently, so a section that has nothing left — or that never
+     * mapped anything at all — cannot stop the other two from extending. That is the invariant F-25
+     * reported as broken, and it is now asserted in `dylan.search.SearchPagingTest`.
      */
     suspend fun extend(
         container: AppContainer,
         query: String,
-    ): Unit =
-        coroutineScope {
-            val nextSong = songPage + 1
-            val nextAlbum = albumPage + 1
-            val nextArtist = artistPage + 1
-            val songsDef =
-                async { if (!songsExhausted) pageOrNull { container.provider.search(query, nextSong) } else null }
-            val albumsDef =
-                async {
-                    if (!albumsExhausted) {
-                        pageOrNull { container.provider.searchAlbums(query, nextAlbum) }
-                    } else {
-                        null
-                    }
-                }
-            val artistsDef =
-                async {
-                    if (!artistsExhausted) pageOrNull { container.provider.searchArtists(query, nextArtist) } else null
-                }
-            foldSongs(foldPage(songsDef.await(), songs) { it.key }, nextSong)
-            foldAlbums(foldPage(albumsDef.await(), albums) { it.rowKey }, nextAlbum)
-            foldArtists(foldPage(artistsDef.await(), artists) { it.rowKey }, nextArtist)
-        }
-
-    private fun foldSongs(
-        fold: SectionRows<Song>?,
-        nextPage: Int,
     ) {
-        fold ?: return
-        songs = fold.items
-        songTotal = fold.total
-        songPage = nextPage
-        if (fold.exhausted) songsExhausted = true
+        val current = sections
+        val budgets = current.budgets
+        val nextSong = budgets.songPage + 1
+        val nextAlbum = budgets.albumPage + 1
+        val nextArtist = budgets.artistPage + 1
+        val songs =
+            if (budgets.songsExhausted) {
+                null
+            } else {
+                pageOrNull { container.provider.search(query, nextSong) }
+            }
+        val albums =
+            if (budgets.albumsExhausted) {
+                null
+            } else {
+                pageOrNull { container.provider.searchAlbums(query, nextAlbum) }
+            }
+        val artists =
+            if (budgets.artistsExhausted) {
+                null
+            } else {
+                pageOrNull { container.provider.searchArtists(query, nextArtist) }
+            }
+        sections = current.foldMore(songs, albums, artists)
     }
-
-    private fun foldAlbums(
-        fold: SectionRows<MiniEntity>?,
-        nextPage: Int,
-    ) {
-        fold ?: return
-        albums = fold.items
-        albumTotal = fold.total
-        albumPage = nextPage
-        if (fold.exhausted) albumsExhausted = true
-    }
-
-    private fun foldArtists(
-        fold: SectionRows<MiniEntity>?,
-        nextPage: Int,
-    ) {
-        fold ?: return
-        artists = fold.items
-        artistTotal = fold.total
-        artistPage = nextPage
-        if (fold.exhausted) artistsExhausted = true
-    }
-}
-
-/** One section's rows after a page has been folded in, plus the verdict that page implies. */
-private data class SectionRows<T>(
-    val items: List<T>,
-    val total: Long,
-    val exhausted: Boolean,
-)
-
-/**
- * Fold a page into a section's rows, dropping rows already held.
- *
- * A page that adds nothing new is the origin's way of saying it has no more of this type, whatever
- * its `total` claimed — so exhaustion is observed rather than predicted. A page that never arrived
- * returns null: a failed request is not evidence of anything, so the caller leaves its page counter
- * and its exhausted flag alone.
- */
-private fun <T, K> foldPage(
-    page: Paged<T>?,
-    held: List<T>,
-    keyOf: (T) -> K,
-): SectionRows<T>? {
-    page ?: return null
-    val seen = held.mapTo(HashSet<K>()) { keyOf(it) }
-    val fresh = page.items.filter { seen.add(keyOf(it)) }
-    return SectionRows(held + fresh, page.total, fresh.isEmpty())
 }
 
 /** A page, or null when the origin could not answer. */
@@ -838,6 +770,27 @@ private suspend fun <T> pageOrNull(fetch: suspend () -> Paged<T>): Paged<T>? = r
 
 /** Below this the origin has nothing useful to suggest and every keystroke is a wasted request. */
 private const val MIN_SUGGEST_QUERY = 2
+
+/**
+ * How short a typed query has to be to stay on the typeahead instead of being submitted.
+ *
+ * Three, against the channel's two: at one or two characters the typeahead is the better affordance
+ * and there is nothing to page yet; at three the mixed results list is worth its three requests.
+ * The number is a floor, not a threshold a tuned search would rely on — it exists so that a
+ * two-character prefix does not cost a round trip to report two rows.
+ */
+private const val MIN_SUBMIT_QUERY = 3
+
+/**
+ * How long the typed query must hold still before it is submitted (F-24).
+ *
+ * Five times the channel's own typing debounce, deliberately: the typeahead must be allowed to
+ * answer first, or the user sees the results list arrive before the suggestions it is meant to come
+ * up with. The cost of this is one three-way search (songs + albums + artists) per settled query,
+ * where before there was one per explicit submit — which is the trade-off F-24 makes, stated in
+ * [settledSubmitQuery].
+ */
+private const val SUBMIT_SETTLE_MS = 600L
 
 /**
  * How many of the origin's top searches the landing tab offers. Ten is the list as it is worth

@@ -8,6 +8,7 @@ import dylan.search.SaavnSearchChannel
 import dylan.search.WsSessionLike
 import dylan.support.MutableClock
 import dylan.support.TestLanes
+import dylan.util.Connectivity
 import dylan.util.NetClass
 import dylan.util.NetMonitor
 import io.ktor.client.HttpClient
@@ -103,11 +104,11 @@ class SearchChannelTest {
 
     private val net =
         object : NetMonitor {
+            override fun connectivity(): Flow<Connectivity> = MutableStateFlow(Connectivity(true, NetClass.UNMETERED))
+
             override fun current(): NetClass = NetClass.UNMETERED
 
             override fun isOnline(): Boolean = true
-
-            override fun changes(): Flow<NetClass> = MutableStateFlow(NetClass.UNMETERED)
         }
 
     private fun http(): HttpClient =
@@ -473,11 +474,13 @@ class SearchChannelTest {
     fun anOfflineDeviceAnswersOfflineWithoutOpeningASocket() {
         val offline =
             object : NetMonitor {
+                private val state = MutableStateFlow(Connectivity(false, NetClass.METERED))
+
+                override fun connectivity(): Flow<Connectivity> = state
+
                 override fun current(): NetClass = NetClass.METERED
 
                 override fun isOnline(): Boolean = false
-
-                override fun changes(): Flow<NetClass> = MutableStateFlow(NetClass.METERED)
             }
         val ch =
             SaavnSearchChannel(

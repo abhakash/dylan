@@ -16,6 +16,20 @@ import kotlinx.serialization.json.JsonElement
 data class SongDto(
     val id: String = "",
     val title: String = "",
+    /**
+     * The card's name, which is where an **artist** card carries it.
+     *
+     * The live `search.getArtistResults` response (captured 2026-10-09, 20/20 cards) ships
+     * `{"name":"Arijit Singh","id":"459320","perma_url":…,"type":"artist"}` and **no `title` at
+     * all**. A DTO without `name` therefore decoded every artist card with a blank title, and
+     * `mapMini` — which guarded on `title` — dropped all of them: the artist section rendered
+     * empty with `EMPTY_MAPPING` as the only trace, and the live drift gate reported it.
+     *
+     * Present on [SongDto] rather than on a separate DTO because the three card types share one
+     * decoder on purpose (`toDto`): a second type would be a second decode path to keep in step,
+     * and the field is inert on song and album cards, which never carry it.
+     */
+    val name: String = "",
     val subtitle: String? = null,
     val type: String? = null,
     @SerialName("perma_url") val permaUrl: String? = null,

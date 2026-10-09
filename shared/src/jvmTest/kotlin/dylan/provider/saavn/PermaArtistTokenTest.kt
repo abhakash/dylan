@@ -125,19 +125,34 @@ class PermaArtistTokenTest {
 
     // ── 2. what happens to an artist card the mapper drops ───────────────────────────────────────
 
-    /** A well-formed artist card maps, and its id is the token the artist screen can resolve. */
+    /**
+     * A well-formed artist card maps, and its id is the token the artist screen can resolve.
+     *
+     * Both card shapes are pinned, because the live card carries `name` and the fallback carries
+     * `title`, and both must map: the second is F-27's defect, and it is asserted here as well as
+     * in `ArtistSearchMappingTest` because this is the file that pins the drop path.
+     */
     @Test
     fun aWellFormedArtistCardStillMaps() {
-        val m = mapMini(artistCard(permaUrl = "https://www.jiosaavn.com/artist/eminem-songs/-f6Su9-0agk_"))
+        val url = "https://www.jiosaavn.com/artist/eminem-songs/-f6Su9-0agk_"
+        val m = mapMini(artistCard(permaUrl = url))
         assertNotNull(m)
         assertEquals("-f6Su9-0agk_", m.artistId)
         assertEquals("artist", m.type)
+        assertEquals("Eminem", m.title)
+        val titled = mapMini(artistCardWithTitle(permaUrl = url))
+        assertNotNull(titled, "a title-carrying artist card must keep mapping")
+        assertEquals("-f6Su9-0agk_", titled.artistId)
     }
 
     /**
      * The reason an artist card is dropped is available to the caller — this is what makes #9
      * diagnosable at all. It was true before this change too; the finding is that the *search path
      * throws it away* (see [anArtistDropIsClassifiedSoItCanBeDiagnosed] and the report).
+     *
+     * The reason must be the same whichever field carries the name, because a reason computed from
+     * a different field than the mapper reads is a reason that names the wrong cause — which is
+     * exactly what happened to F-27.
      */
     @Test
     fun anArtistDropIsClassifiedSoItCanBeDiagnosed() {
@@ -150,6 +165,10 @@ class PermaArtistTokenTest {
         assertEquals(
             "",
             miniDropReason(artistCard(permaUrl = "https://www.jiosaavn.com/artist/eminem-songs/-f6Su9-0agk_")),
+        )
+        assertEquals(
+            "",
+            miniDropReason(artistCardWithTitle(permaUrl = "https://www.jiosaavn.com/artist/eminem-songs/-f6Su9-0agk_")),
         )
     }
 
@@ -301,7 +320,25 @@ class PermaArtistTokenTest {
 
     private val json = Json { ignoreUnknownKeys = true }
 
+    /**
+     * An artist card in the shape the live endpoint ships it: `name`, **no `title`**.
+     *
+     * This helper carried `title = "Eminem"` until F-27. That is not cosmetic: with a `title` on
+     * it, every card in this file mapped fine, so nothing here could see the defect — the live
+     * `search.getArtistResults` payload has no `title` at all (`fixtures/artists.json`), which is
+     * exactly why `search.getArtistResults` returned zero results while these tests stayed green.
+     * The helper now mirrors the payload.
+     */
     private fun artistCard(permaUrl: String?) =
+        dylan.provider.saavn.dto.SongDto(
+            id = "610240",
+            name = "Eminem",
+            type = "artist",
+            permaUrl = permaUrl,
+        )
+
+    /** The fallback shape: an artist card that carries `title` and no `name`. */
+    private fun artistCardWithTitle(permaUrl: String?) =
         dylan.provider.saavn.dto.SongDto(
             id = "610240",
             title = "Eminem",

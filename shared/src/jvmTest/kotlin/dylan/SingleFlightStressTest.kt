@@ -8,6 +8,7 @@ import dylan.provider.valueOrNull
 import dylan.support.MutableClock
 import dylan.support.TestLanes
 import dylan.util.Clock
+import dylan.util.Connectivity
 import dylan.util.NetClass
 import dylan.util.NetMonitor
 import io.ktor.client.HttpClient
@@ -23,6 +24,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.yield
@@ -61,11 +63,13 @@ class SingleFlightStressTest {
         cfg = AppConfig(clock = clock),
         net =
             object : NetMonitor {
+                private val state = MutableStateFlow(Connectivity(true, NetClass.UNMETERED))
+
+                override fun connectivity(): Flow<Connectivity> = state
+
                 override fun current(): NetClass = NetClass.UNMETERED
 
                 override fun isOnline(): Boolean = true
-
-                override fun changes() = MutableStateFlow(NetClass.UNMETERED)
             },
         scope = scope,
         disp = lanes.disp,

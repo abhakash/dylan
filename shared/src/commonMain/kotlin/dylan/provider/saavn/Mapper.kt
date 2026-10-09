@@ -117,11 +117,31 @@ fun mapSong(
     )
 }
 
-/** One card, one decode attempt. A card that will not decode costs only itself. */
+/**
+ * One card, one decode attempt. A card that will not decode costs only itself.
+ */
 private fun JsonElement.toDto(): SongDto? {
     val serializer = SongDto.serializer()
     return runCatching { json.decodeFromJsonElement(serializer, this) }.getOrNull()
 }
+
+/**
+ * The card's display identity: its **name** when it has one, its `title` otherwise.
+ *
+ * The one place both spellings are reconciled, so the two callers that need a non-empty identity
+ * ([mapMini] and [miniDropReason]) cannot disagree about which field a card's identity lives in.
+ *
+ * `name` outranks `title` and the fallback runs **one way only**. Reversing it would be the
+ * original defect again: an artist card has no `title`, so a `title`-first lookup answers "blank"
+ * and drops the row. Nothing typed `song` or `album` has ever been observed carrying `name`, so
+ * preferring it cannot take a title away from a card that has one; and if the origin ever starts
+ * shipping `name` on song cards, this is the field it will ship, because it is the field it ships
+ * on the artist cards that already exist.
+ *
+ * Runs through [displayTitle] for the same reason [mapMiniOf] does: entity decoding and trimming
+ * belong at the boundary, not in a composable.
+ */
+internal fun SongDto.cardTitle(): String = displayTitle(name.ifBlank { title })
 
 /**
  * One card to a [MiniEntity], with its navigable type.
@@ -132,7 +152,7 @@ private fun JsonElement.toDto(): SongDto? {
  * (verified live 2026-09-28, and the reason `artistRequest` has no numeric branch).
  */
 fun mapMini(d: SongDto): MiniEntity? {
-    if (d.id.isBlank() || d.title.isBlank()) return null
+    if (d.id.isBlank() || d.cardTitle().isBlank()) return null
     val type = d.type ?: TYPE_SONG
     return when (type) {
         TYPE_SONG -> mapMiniOf(type, d, CachePath.segment(d.id))
@@ -154,7 +174,7 @@ private fun mapMiniOf(
         songKey = if (type == TYPE_SONG) SongKey("saavn", identity) else null,
         albumId = if (type == TYPE_ALBUM) identity else null,
         artistId = if (type == TYPE_ARTIST) identity else null,
-        title = displayTitle(d.title),
+        title = displayTitle(d.cardTitle()),
         subtitle = displaySubtitle(d.subtitle),
         type = type,
         image = artUrlOf(d.image),
@@ -167,10 +187,15 @@ private fun mapMiniOf(
  * This is the *whole* answer, not just the perma-token case: a card with no id and no title also
  * returns null from [mapMini], and it used to reach the caller as a silently missing row — the
  * `Ok(drift)` contract says a short page is a page that says so.
+ *
+ * The blank-identity test reads [cardTitle], not `title`, so it can never classify a card as
+ * droppable that [mapMini] would have kept (or the reverse). That is the whole reason
+ * [cardTitle] exists: before it, `miniDropReason` answered `BLANK_IDENTITY` for every artist card
+ * while the live payload was sitting right there with a `name` on it.
  */
 internal fun miniDropReason(d: SongDto): String =
     when {
-        d.id.isBlank() || d.title.isBlank() -> BLANK_IDENTITY
+        d.id.isBlank() || d.cardTitle().isBlank() -> BLANK_IDENTITY
         else ->
             when (d.type ?: TYPE_SONG) {
                 TYPE_ALBUM -> if (permaAlbumToken(d.permaUrl) == null) NO_PERMA_TOKEN else ""

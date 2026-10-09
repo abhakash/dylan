@@ -15,6 +15,7 @@ import dylan.model.Repeat
 import dylan.model.SongKey
 import dylan.playback.PlayerEngine
 import dylan.util.AppDispatchers
+import dylan.util.Connectivity
 import dylan.util.Lane
 import dylan.util.NetClass
 import dylan.util.NetMonitor
@@ -472,11 +473,11 @@ class GraphLifecycleTest {
     ): Long = (1..n).map { measureNanoTime(block) }.sorted()[n / 2]
 
     private object TestNet : NetMonitor {
+        override fun connectivity(): Flow<Connectivity> = MutableStateFlow(Connectivity(true, NetClass.UNMETERED))
+
         override fun current(): NetClass = NetClass.UNMETERED
 
         override fun isOnline(): Boolean = true
-
-        override fun changes(): Flow<NetClass> = MutableStateFlow(NetClass.UNMETERED)
     }
 
     private companion object {

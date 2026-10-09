@@ -16,7 +16,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -67,19 +66,40 @@ fun OfflineBanner() {
 }
 
 /**
- * UI-side online signal: the shared NetMonitor only tracks metered-ness, so true
- * connectivity comes from ConnectivityManager.activeNetwork. The NetMonitor flow is
- * collected as the recompose trigger (capability changes re-evaluate the check).
+ * UI-side online signal: the one predicate, read as a value.
+ *
+ * This used to answer the question itself, in the UI layer:
+ *
+ * ```
+ * val changes = container.netMonitor.changes()
+ * val netClass by changes.collectAsStateWithLifecycle(initialValue = container.netMonitor.current())
+ * return remember(netClass) { cm?.activeNetwork != null }
+ * ```
+ *
+ * Two defects in one line, and together they are F-23.
+ *
+ *  1. It re-implemented a predicate the [NetMonitor] seam already owns, using a *different* test:
+ *     `ConnectivityManager.activeNetwork != null` instead of
+ *     `NET_CAPABILITY_INTERNET` on the active path. The request path gates on the second
+ *     (`ResilientClient`), so the two answered differently for the same device at the same moment.
+ *  2. It keyed the answer on `changes()`, which reports only the **metered-ness** of the path — a
+ *     two-valued ladder. An outage and a returning mobile-data connection are both `METERED`
+ *     (unknown fails closed), so `distinctUntilChanged` swallowed the transition, `remember` never
+ *     re-ran, and the verdict latched `false` for the rest of the session. Every request kept
+ *     succeeding; every song row in Search rendered dimmed as unplayable.
+ *
+ * The verdict now comes from [NetMonitor.online], which is emitted on every network event, so
+ * there is nothing left for a composition to remember: the value is the state, and the state is
+ * updated by the flow.
  */
 @Composable
 fun rememberIsOnline(container: AppContainer): Boolean {
-    val ctx = LocalContext.current
-    val changes = container.netMonitor.changes()
-    val netClass by changes.collectAsStateWithLifecycle(initialValue = container.netMonitor.current())
-    return remember(netClass) {
-        val cm = ctx.getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager
-        cm?.activeNetwork != null
-    }
+    val monitor = container.netMonitor
+    // One flow instance across recompositions: a new one per recomposition would re-register the
+    // network callback on every state change.
+    val online = remember(monitor) { monitor.online() }
+    val isOnlineNow by online.collectAsStateWithLifecycle(initialValue = monitor.isOnline())
+    return isOnlineNow
 }
 
 /** UI-side cached-key set from the library downloads (cached_files rows). */

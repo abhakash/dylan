@@ -3,6 +3,7 @@ package dylan.util
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.combine
 import platform.Foundation.NSDate
 import platform.Foundation.NSFileManager
 import platform.Foundation.timeIntervalSince1970
@@ -26,20 +27,19 @@ internal actual fun platformNowMs(): Long = (NSDate().timeIntervalSince1970 * MS
  * D14 semantics: METERED ⇔ `path.isExpensive || path.isConstrained`, evaluated by the Swift
  * layer's `NWPathMonitor` and pushed in through [pushMetered] / [pushOnline].
  *
- * Both values live in [MutableStateFlow]s because Swift writes them from the `NWPathMonitor`
- * dispatch queue while the state lane reads them — a plain `var` was a data race. Both start at
- * the documented failure default ([NetMonitorPolicy]) rather than at "connected and cheap", so
- * before the first push the app behaves exactly as it does on a device with no path.
+ * The two pushed values are combined into one [Connectivity] rather than handed out as two flows,
+ * so `changes()` and `online()` cannot disagree about what the monitor last knew — the failure mode
+ * is documented on [Connectivity].
  */
 class IosNetMonitor : NetMonitor {
     private val netClass = MutableStateFlow(NetMonitorPolicy.UNKNOWN_NET_CLASS)
     private val onlineState = MutableStateFlow(NetMonitorPolicy.UNKNOWN_ONLINE)
 
+    override fun connectivity(): Flow<Connectivity> = combine(netClass, onlineState) { c, o -> Connectivity(o, c) }
+
     override fun current(): NetClass = netClass.value
 
     override fun isOnline(): Boolean = onlineState.value
-
-    override fun changes(): Flow<NetClass> = netClass
 
     fun pushMetered(isMetered: Boolean) {
         netClass.value = if (isMetered) NetClass.METERED else NetClass.UNMETERED
