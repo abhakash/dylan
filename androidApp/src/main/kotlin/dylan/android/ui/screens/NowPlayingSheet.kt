@@ -504,7 +504,11 @@ private fun BottomRow(
         FavoriteButton(container, song)
         Text(
             when (val p = state.phase) {
-                is dylan.model.Phase.Downloading -> "SAVING ${p.key.songId.uppercase()}…"
+                // `Downloading` deliberately renders nothing. It used to print the internal song id
+                // ("SAVING R3312…"), which is a provider token, not something a listener can act on or
+                // read; the offline fetch is already visible as the row's own progress. `Resolving`
+                // below carries the user-facing "preparing" state, and `Phase.Downloading` falls
+                // through to the empty branch with the rest.
                 is dylan.model.Phase.Resolving -> "PREPARING…"
                 is dylan.model.Phase.Error ->
                     dylan.android.ui.Copy
