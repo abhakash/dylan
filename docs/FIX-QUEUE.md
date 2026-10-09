@@ -174,6 +174,77 @@ cover `androidApp`.
 
 ---
 
+## F-23 · S1 · device-reported, root cause NOT yet established — search rows render dimmed, as if unplayable
+
+Reported on hardware (vivo V2130, Android 14, `v1.1.1`, debug build) against the query `eminem`.
+Some rows in the merged result list render visibly dimmer than their neighbours and read as disabled.
+
+**Verified in code, and it rules out the obvious explanation.** A dimmed row is *not* an album or
+artist row: `MiniRow` (`androidApp/.../components/SongRow.kt:264-274`) and `SongRow`
+(`SongRow.kt:124-130`) both colour their title with `t.textPrimary`, so the two row kinds are
+*identical* in title colour. Nothing passes `greyed = true` to `MiniRow`, so
+`GREYED_ROW_ALPHA` (`:337`) is never applied. The dimming is `SongRow.kt:71`,
+`.alpha(if (enabled) 1f else DISABLED_ROW_ALPHA)` with `DISABLED_ROW_ALPHA = 0.45f` (`:334`).
+
+So a dimmed row is a **song** for which `SearchScreen.kt:432` computed
+`can = canPlay(isOnline, cachedKeys, song.key)` as false, and `Common.kt:137-141` defines that as
+`isOnline || key in cachedKeys`. The rows in question are not in the library, so on the face of it
+`isOnline` was false for them.
+
+**That is the contradiction, and it is unresolved.** Uncached neighbours in the same list render at
+full alpha, and the query itself was served over the network. Either `isOnline` is being read
+inconsistently within one composition, or something narrower is going on. **Not yet root-caused.**
+
+**Fix:** establish which of the two operands of `canPlay` is false before changing anything.
+Note the reporter's proposed remedy — "if you can't play them, don't return that result" — would be
+wrong if the dimming turns out to be a false `isOnline`, because it would delete legitimate results
+to hide a state bug. Fix the state, not the result set.
+
+---
+
+## F-24 · S2 · CERTAIN — infinite scroll cannot arm until the query is submitted
+
+Also reported on hardware: while typing, the list does not page. Pressing Enter (the IME submit)
+starts infinite scroll immediately.
+
+**Confirmed in code.** The scroll listener is `LaunchedEffect(listState, submitted)`
+(`SearchScreen.kt:324`), and `loadMore()` pages `results.extend(container, submitted)` — the
+**submitted** query, not the live typed one (`:310-317`). `submitted` only moves in the submit
+lambda (`:125-131`, `:158-175`). The typeahead feed is a separate path (`demand` at `:96`,
+`rememberSuggestions` at `:100`).
+
+So while the user types, the visible rows and the paged query are *different queries*. Paging
+cannot be armed by typing, by construction. This is a design seam, not a stray guard.
+
+**Fix:** decide which behaviour is wanted and make the two paths agree — either the visible
+typeahead rows page under the typed query, or the list makes clear that only a submitted query
+pages. Silently paging a query the user is not looking at is worse than not paging.
+
+---
+
+## F-25 · S2 · device-reported, NOT reproduced or root-caused — after paging, only Albums come back
+
+Reported on hardware, immediately after F-24's Enter-to-page: further pages surface album rows
+only; songs and artists stop appearing.
+
+**Not investigated yet.** Recorded so it is not lost. One observation that may or may not be
+related, offered as a **lead and not a conclusion**: the device log for the same session shows the
+search websocket mispairing and being struck while the user typed —
+
+```
+W Dylan:search: ws mispair on 'eminem' — the frame answered a different demand
+W Dylan:search: ws socket strike=1/3 fifo mispair
+```
+
+— and no `ws ok` line for the final `eminem`. Whatever the per-section paging does with a socket
+that has been struck under it is unexamined. Do not treat that as the cause without evidence.
+
+**Fix:** reproduce against `ResultState.extend` / `canExtend` and the per-section exhaustion
+budgets, with a test that asserts all three sections still extend. A section silently going
+exhausted would produce exactly this symptom.
+
+---
+
 ## Explicitly out of scope
 
 The audit cleared 13 items that look like defects but are not. See `docs/STAFF-AUDIT.md` §5. Two

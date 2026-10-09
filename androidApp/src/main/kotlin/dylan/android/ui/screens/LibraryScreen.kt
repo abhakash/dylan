@@ -125,20 +125,10 @@ private fun LazyListScope.favoritesSection(
     isOnline: Boolean,
     cachedKeys: Set<SongKey>,
 ) {
-    if (favorites.isEmpty()) {
-        item(key = "favorites-empty") {
-            val t = LocalDylanTokens.current
-            Column(Modifier.padding(horizontal = 16.dp)) {
-                SectionTitle("Your favorites")
-                Text(
-                    "Songs you favorite appear here.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = t.textSecondary,
-                )
-            }
-        }
-        return
-    }
+    // No favourites, no section. HomeScreen already gates on `favoritesShown.isNotEmpty()`; this
+    // keeps the two consistent, so an account with nothing favourited shows neither a heading nor
+    // a placeholder row explaining a list that does not exist.
+    if (favorites.isEmpty()) return
     item(key = "favorites-title") { SectionTitle("Your favorites") }
     items(favorites, key = { "fv" + it.key.songId }) { song ->
         val can = canPlay(isOnline, cachedKeys, song.key)
