@@ -252,13 +252,24 @@ class SaavnSearchChannel(
     val suggestions: StateFlow<Answer?> get() = answer
 
     /**
-     * Publish a demand, bumping the epoch. Normalisation happens here, once, at the boundary:
-     * Android sent untrimmed queries and iOS trimmed them, so the same two keystrokes were two
-     * demands and two HTTP requests.
+     * Normalisation happens here, once, at the boundary: Android sent untrimmed queries and iOS
+     * trimmed them, so the same two keystrokes were two demands and two HTTP requests.
      *
      * A blank query is a real demand, not an early return. It used to return before touching the
      * channel, which left the previous query's socket read running to its full deadline on a
      * session the user had already moved on from.
+     *
+     * A blank demand also **clears the published answer**, and that is the F-26 root cause: a
+     * screen that has no demand yet must not be shown the last query's rows. `suggestions` is a
+     * [StateFlow], so a composition that starts while the last answer is still published — a Search
+     * tab re-entered from the bottom bar, a screen after a configuration change — is handed the
+     * *previous* query's answer on its very first frame and renders it. That is exactly the
+     * "old results for about a second, then an empty Search screen" the user saw: the replay
+     * renders in frame 1, the debounce publishes the blank demand ~120 ms later, and the screen
+     * drops to the landing tab.
+     *
+     * Clearing here rather than in either UI layer is the point: there are two UIs, and a fix in one
+     * leaves the other showing the previous query's rows.
      */
     private fun publish(raw: String): Demand {
         val q = raw.trim()
@@ -271,6 +282,9 @@ class SaavnSearchChannel(
                     // Clearing must reach the engine: the epoch bump already makes anything in
                     // flight unrenderable, and the socket is released rather than held to a deadline.
                     scope.launch(disp.on(Lane.IO)) { dropSocket() }
+                    // And the previous query's answer must stop being *the answer*. Not a socket
+                    // concern but a render one: see the KDoc.
+                    answer.value = Answer("", next.epoch, emptyList(), AnswerSource.HTTP)
                 }
                 return next
             }

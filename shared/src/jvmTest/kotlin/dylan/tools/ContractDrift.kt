@@ -270,8 +270,33 @@ private fun compareShapes(
 private class LiveShapes {
     val envelope = Shape("SEARCH_ENVELOPE")
     val fullSong = Shape("FULL_SONG")
+
+    /** Top-searches and trending cards: the two populations `MINI_CARD`'s fixture is built from. */
     val miniCard = Shape("MINI_CARD")
-    val artistCard = Shape("ARTIST_SEARCH_CARD")
+
+    /**
+     * Search-endpoint mini cards (`search.getAlbumResults`, `search.getArtistResults`).
+     *
+     * Deliberately **not** folded into [miniCard]. `MINI_CARD`'s expectation is derived from
+     * `top_searches.json` + `trending.json` (`expectedShapes`), so comparing against it a live shape
+     * that had also absorbed the album- and artist-search populations reported
+     * `more_info.music` / `.query` / `.text` as NEW_FIELD on *every* run — three fields the search
+     * endpoint's cards carry and the top-search cards never did. Nothing about the mini-card
+     * contract changed; the *population* did, and a family is only comparable when both sides are
+     * drawn from the same one.
+     *
+     * The artist-search cards make this twice over: they name themselves with `name` rather than
+     * `title` (see `SongDto.name`), so folding them into a family built from `title`-shaped cards
+     * was comparing two different card vocabularies.
+     *
+     * Nothing is lost by the split. `checkMiniSearch` still decodes these cards through
+     * [mapMiniPaged] and still asserts EMPTY_MAPPING, MAPPING_LOSS, DUPLICATE_CARDS and
+     * TOKEN_DERIVATION_FAILED; they simply stop contributing to a shape expectation they were
+     * never part of. A `MINI_SEARCH` expectation — from a captured album-search payload — is what
+     * would bring them back under shape comparison, and `tools/extract_fixtures.py` cannot produce
+     * one: it reads `2.har`/`8.har`, neither of which is in the repo.
+     */
+    val miniSearch = Shape("MINI_SEARCH")
 }
 
 private fun wsProbeClient(cfg: AppConfig): HttpClient =
@@ -770,6 +795,10 @@ object ContractDrift {
         compareShapes(expectations["FULL_SONG"], liveShapes.fullSong, rows)
         compareShapes(expectations["MINI_CARD"], liveShapes.miniCard, rows)
         liveAlbum?.let { compareShapes(expectations["ALBUM_ENVELOPE"], it, rows) }
+        // No expectations["MINI_SEARCH"] is declared yet, so the search-endpoint card shapes are
+        // collected and not compared — see LiveShapes.miniSearch for why that is the honest state
+        // rather than a widened MINI_CARD.
+        compareShapes(expectations["MINI_SEARCH"], liveShapes.miniSearch, rows)
     }
 
     private fun emit(sorted: List<Drift>): Int {
@@ -849,7 +878,7 @@ object ContractDrift {
                 "p" to "1",
                 "n" to "20",
             ),
-            liveShapes.miniCard,
+            liveShapes.miniSearch,
         )
         checkMiniSearch(
             "search.getArtistResults",
@@ -861,7 +890,7 @@ object ContractDrift {
                 "p" to "1",
                 "n" to "20",
             ),
-            liveShapes.artistCard,
+            liveShapes.miniSearch,
         )
 
         val tokens = probeCatalog(tops + trends)

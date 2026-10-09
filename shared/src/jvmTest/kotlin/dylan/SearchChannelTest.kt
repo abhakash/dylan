@@ -439,6 +439,11 @@ class SearchChannelTest {
     /**
      * `request("")` used to return before touching the channel, so the previous query's socket read
      * kept the session busy to its full deadline after the user had cleared the box.
+     *
+     * And it used to leave the published answer in place, which is why a re-entered Search tab
+     * showed the previous query's rows for a frame or two before the blank demand cleared them
+     * (F-26). `suggestions` is a [StateFlow], so anything that starts collecting while the last
+     * answer is published is *handed* it.
      */
     @Test
     fun clearingTheQueryReachesTheChannelAndReleasesTheSocket() {
@@ -455,7 +460,37 @@ class SearchChannelTest {
                 ch.stateForTest().epoch,
                 "clearing must advance the epoch, or an in-flight answer is still renderable",
             )
+            assertTrue(
+                ch.answerForTest()!!.items.isEmpty(),
+                "the previous query's rows must stop being the answer",
+            )
             assertTrue(ch.stampsForTest().isEmpty(), "the FIFO must not keep stamps for a cleared demand")
+        }
+        closeChannel()
+    }
+
+    /**
+     * F-26: the observed defect. A screen with no demand of its own — a Search tab re-entered from
+     * the bottom bar — is shown the previous query's rows for a frame, then nothing.
+     *
+     * The channel is process-scoped, so this is not a navigation lifetime; it is a
+     * [StateFlow] handing its last value to whoever starts collecting. ASSERT_RED by not clearing
+     * `answer` on a blank demand.
+     */
+    @Test
+    fun aScreenEnteredWithNoDemandIsShownNoPreviousQuerysRows() {
+        val ch = channel()
+        runBlocking {
+            ch.request("ari")
+            waitFor("an answer for it") { ch.answerForTest()?.query == "ari" }
+            val rows = ch.answerForTest()!!.items
+            assertTrue(rows.isNotEmpty(), "the answer the screen would be handed must not be empty: $rows")
+            // A fresh composition has no demand, so its first act is to publish a blank one.
+            ch.request("")
+            waitFor("the answer to be replaced") { ch.answerForTest()?.items?.isEmpty() == true }
+            val a = ch.answerForTest()!!
+            assertEquals("", a.query, "a screen with no demand has no query to render rows for")
+            assertTrue(a.items.isEmpty(), "a previous query's rows must not be replayed: $a")
         }
         closeChannel()
     }
