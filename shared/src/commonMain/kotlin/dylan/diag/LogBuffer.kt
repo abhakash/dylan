@@ -28,8 +28,52 @@ class LogBuffer(
         val metaJson: String? = null,
     )
 
-    // Copy-on-write ring: lock-free on every platform (no `synchronized` — JVM-only).
-    private val ring = AtomicReference<PersistentList<Entry>>(emptyList<Entry>().toPersistentList())
+    /**
+     * Entries per chunk of the ring.
+     *
+     * One chunk is the unit of eviction, so it must never exceed [capacity]: the invariant that
+     * makes wholesale chunk-dropping safe is that by the time the live count exceeds [capacity]
+     * at least one chunk is already sealed (see [log]).
+     */
+    private val chunkSize: Int = capacity.coerceIn(CHUNK_MIN, CHUNK_MAX)
+
+    private val emptyEntries: PersistentList<Entry> = emptyList<Entry>().toPersistentList()
+
+    private val emptyChunks: PersistentList<PersistentList<Entry>> =
+        emptyList<PersistentList<Entry>>().toPersistentList()
+
+    /**
+     * Copy-on-write ring: lock-free on every platform (no `synchronized` — JVM-only).
+     *
+     * It is a **deque of fixed-size chunks**, not one `PersistentList`. The old shape was
+     * `if (next.size > capacity) next = next.removeAt(0)`, and `PersistentVector.removeAt(0)` is
+     * not O(log n): `removeFromRootAt` copies the whole 32-way root and shifts a full segment
+     * down at every level of the trie, so `log()` paid that on *every* line — ~3 KB of garbage
+     * per retained line at the shipped `capacity = 512`, about 100x a channel `trySend`, on the
+     * one lane that must not stall.
+     *
+     * Splitting the ring into chunks moves that O(capacity) work off the per-line path:
+     *  - appending is `live.add(e)` — one tail-array copy, the irreducible cost of publishing a
+     *    new immutable state;
+     *  - evicting the oldest entry is `headDead++` — a counter, no allocation at all;
+     *  - the actual removal happens once per chunk boundary, as a wholesale `sealed.removeAt(0)`,
+     *    which is where the old per-line cost now lives, amortised over [chunkSize] lines.
+     *
+     * Nothing observable changes. The oldest live entry is still evicted the moment [capacity] is
+     * exceeded — `headDead` is the exact prefix of the oldest chunk that is dead — and [dump]
+     * walks the chunks in order, so it returns the most recent [capacity] entries in order.
+     */
+    private val ring = AtomicReference(RingState(emptyChunks, 0, emptyEntries))
+
+    /** One published state of the ring. Immutable, so a concurrent [dump] reads a whole snapshot. */
+    private data class RingState(
+        /** Sealed chunks, oldest first. Every one holds exactly [chunkSize] entries. */
+        val sealed: PersistentList<PersistentList<Entry>>,
+        /** How many entries at the front of the oldest sealed chunk are already evicted. */
+        val headDead: Int,
+        /** The chunk entries are appended to: the newest, and possibly empty. */
+        val live: PersistentList<Entry>,
+    )
 
     // Sinks (platform mirrors: file appender, Android logcat, iOS NSLog) — additive, so core can
     // own the persistent file sink while each platform adds its console mirror.
@@ -80,14 +124,58 @@ class LogBuffer(
         val e = Entry(clock.nowMs(), level, tag, redact(msg), metaJson?.let(::redact))
         while (true) {
             val cur = ring.load()
-            var next = cur.add(e)
-            if (next.size > capacity) next = next.removeAt(0)
-            if (ring.compareAndSet(cur, next)) break
+            var live = cur.live.add(e)
+            var sealed = cur.sealed
+            var headDead = cur.headDead
+            // Sealing moves the chunk as it is, so the live count is unchanged by it. That is what
+            // makes one eviction per append always enough: the ring was at `capacity` before this
+            // append, so it can be at most `capacity + 1` now.
+            if (live.size >= chunkSize) {
+                sealed = sealed.add(live)
+                live = emptyEntries
+            }
+            // Evicting is a counter, not a restructure — and it is exact. `headDead` names the
+            // first *live* slot of the oldest sealed chunk, so the oldest entry falls off the
+            // instant capacity is exceeded, exactly as the flat list did.
+            if (liveCountOf(sealed, headDead, live) > capacity) {
+                headDead++
+                if (headDead == chunkSize) {
+                    sealed = sealed.removeAt(0)
+                    headDead = 0
+                }
+            }
+            if (ring.compareAndSet(cur, RingState(sealed, headDead, live))) break
         }
         emit(e)
     }
 
-    fun dump(): List<Entry> = ring.load().toList()
+    /**
+     * The most recent [capacity] entries, oldest first.
+     *
+     * Reads one immutable [RingState], so it never sees a half-published ring, and it materialises
+     * in chunk order: [RingState.sealed] oldest-first with [RingState.headDead] lopped off the
+     * front, then [RingState.live]. O(capacity / chunkSize) chunk hops, which is why a chunk is
+     * an inner list the reader can walk directly rather than a per-entry node.
+     */
+    fun dump(): List<Entry> {
+        val cur = ring.load()
+        val out = ArrayList<Entry>(liveCountOf(cur.sealed, cur.headDead, cur.live))
+        var first = true
+        for (chunk in cur.sealed) {
+            val from = if (first) cur.headDead else 0
+            first = false
+            for (i in from until chunk.size) out.add(chunk[i])
+        }
+        out.addAll(cur.live)
+        return out
+    }
+
+    /** Live entries across every chunk of [sealed], plus [live]. O(1). */
+    private fun liveCountOf(
+        sealed: PersistentList<PersistentList<Entry>>,
+        headDead: Int,
+        live: PersistentList<Entry>,
+    ): Int = sealed.size * chunkSize - headDead + live.size
 
     fun d(
         tag: String,
@@ -121,6 +209,16 @@ class LogBuffer(
 
     companion object {
         private const val PLATFORM_MIRROR_KEY = "platform-console"
+
+        /**
+         * Bounds on the chunk size. A chunk is the unit of eviction, so it must fit inside
+         * [capacity] — the smallest ring that still has a chunk to evict is one chunk — and it is
+         * capped so the transient physical overshoot (a sealed chunk plus a partially dead oldest
+         * one) stays a small fraction of any [capacity]: at the shipped 512 that is at most
+         * 512 + 63 entries held, of which 512 are live.
+         */
+        private const val CHUNK_MIN = 1
+        private const val CHUNK_MAX = 32
 
         /**
          * The literal the key takes in a log line — `encrypted_media_url=…` — and exactly the

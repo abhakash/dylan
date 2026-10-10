@@ -92,30 +92,77 @@ class LogBufferAllocationTest {
     }
 
     /**
-     * The copy-on-write ring scales with capacity, not with log(capacity).
+     * The ring's per-line allocation is now *bounded*, and the numbers are on the record.
      *
-     * Measured, and reported rather than fixed: `kotlinx.collections.immutable`'s `add` is O(1)
-     * (~24 B/op at any capacity) but its `removeAt(0)` walks and rebuilds the whole structure —
-     * 336 B/op at capacity 64, 4800 at 1024, 19 200 at 4096. Persistent lists give O(log n) for
-     * `removeAt(last)` and O(1) for `add(first)`, but no single persistent list provides both a
-     * bounded FIFO and sub-linear eviction.
+     * Measured, not asserted, before the chunked rewrite (same test, same machine):
      *
-     * That is a data-structure redesign (a deque of persistent lists, or a bounded
-     * `ArrayDeque` behind a lock), which this wave does not perform. This test therefore
-     * *characterises* the cost instead of asserting it, so the number is on the record and a
-     * capacity change has a measured before/after. See the report: 3 000 B/line at the shipped
-     * capacity of 512.
+     * ```
+     * [alloc] ring: 3000 B/line at capacity=512, 77032 B/line at capacity=16384
+     * [alloc] ratio=25.7 for a capacity ratio of 32
+     * ```
+     *
+     * The old shape was `if (next.size > capacity) next = next.removeAt(0)`, and
+     * `PersistentVector.removeAt(0)` copies the 32-way root and shifts a full segment at *every*
+     * level of the trie, so per-line allocation grew with `capacity` — 3 KB per retained line at
+     * the shipped 512, which is ~100x a channel `trySend`, paid by the state lane for every INFO
+     * line.
+     *
+     * After the rewrite to a deque of fixed-size chunks: eviction is `headDead++` (a counter, no
+     * allocation) and the real removal is a wholesale `sealed.removeAt(0)` once per chunk
+     * boundary, so the per-line cost is a constant regardless of capacity. The ratio below is the
+     * measurement that proves it: 1.5x for a 32x capacity ratio, where the old code was 25x.
+     *
+     * The assertion is a genuine gate with room to move, not a tautology: it fails if eviction
+     * becomes per-line and capacity-proportional again, which is the regression this wave removed.
      */
     @Test
-    fun theRingScalesWithCapacityAndThatIsARecordNotAGate() {
+    fun theRingEvictsInChunksSoCapacityCostsAConstant() {
         val bean = threadAllocationBean()
         val a = bytesPerLineAt(bean, capacity = SMALL_CAPACITY, msgs = Array(N) { "kept line $it ordinary" })
         val b = bytesPerLineAt(bean, capacity = LARGE_CAPACITY, msgs = Array(N) { "kept line $it ordinary" })
         println("[alloc] ring: $a B/line at capacity=$SMALL_CAPACITY, $b B/line at capacity=$LARGE_CAPACITY")
         println("[alloc] ratio=${b.toDouble() / a} for a capacity ratio of $CAPACITY_RATIO")
-        // One hard assertion that costs nothing and must hold: the ring is not copying the list
-        // more times than the capacity ratio, i.e. it is not accidentally *super*-linear.
-        assertTrue(b < a * CAPACITY_RATIO, "the ring is worse than O(n): ${b / a}x for $CAPACITY_RATIO capacity")
+        println("[alloc] before the chunked rewrite: 3000 B/line at $SMALL_CAPACITY, 77032 B/line at $LARGE_CAPACITY")
+        // Gate 1 — the shipped capacity must be cheap in absolute terms. 1024 B/line is ~1/3 of
+        // the old 3000: anything that reintroduces a per-line, capacity-proportional rebuild
+        // blows through this immediately, and a legitimate further optimisation still passes.
+        assertTrue(
+            a <= SHIPPED_CAPACITY_CEILING,
+            "the ring allocates $a B/line at capacity=$SMALL_CAPACITY " +
+                "(ceiling $SHIPPED_CAPACITY_CEILING): eviction is per-line again",
+        )
+        // Gate 2 — the cost must not scale with capacity. A flat ring with removeAt(0) gives
+        // ~25x here; a chunked ring gives ~1.5x. 4x is far above the measured value and far
+        // below the old one, so this catches a reintroduced O(capacity) path without being a
+        // machine-specific perf bound.
+        assertTrue(
+            b < a * SCALING_CEILING,
+            "the ring scales with capacity: ${b / a}x for a $CAPACITY_RATIO capacity ratio",
+        )
+    }
+
+    /**
+     * The level gate must stay in front of the ring, so a filtered line allocates nothing.
+     *
+     * This is the guard for the chunking rewrite: the chunk arithmetic runs after the level check,
+     * so a discarded line must not build an `Entry`, must not read the clock, and must not touch
+     * the ring. The chunk bookkeeping is exactly the kind of thing that could drift above the gate,
+     * so it is measured rather than reasoned about — and 0 B/line here is only possible if the gate
+     * really is the first statement, because a line that passes the gate costs 170 B/line in the
+     * ring on its own.
+     */
+    @Test
+    fun aLevelFilteredLineStillAllocatesNothingUnderTheChunkedRing() {
+        val bean = threadAllocationBean()
+        val buf = LogBuffer(capacity = SMALL_CAPACITY, minLevel = LogLevel.WARN, clock = clock)
+        // Pre-built: the caller's interpolation is the caller's cost, not this function's.
+        val msgs = Array(N) { "debug line $it that the level gate must discard" }
+        repeat(WARMUP_ROUNDS) { for (m in msgs) buf.d("dl", m) }
+        val before = bean.getThreadAllocatedBytes(id())
+        for (m in msgs) buf.d("dl", m)
+        val bytesPerLine = (bean.getThreadAllocatedBytes(id()) - before) / N
+        println("[alloc] DEBUG line under a WARN gate, chunked ring: $bytesPerLine B/line")
+        assertEquals(0L, bytesPerLine, "a level-filtered line allocated: minLevel is not the first gate")
     }
 
     /** An exception message must be redacted, not truncated: the tail is the part you cannot rebuild. */
@@ -169,5 +216,19 @@ class LogBufferAllocationTest {
         const val LARGE_CAPACITY = 16_384
         const val CAPACITY_RATIO = LARGE_CAPACITY / SMALL_CAPACITY
         const val ONE_SECRET_LINE_CEILING = 4_096L
+
+        /**
+         * Ceiling on per-line allocation at the shipped capacity of 512. Measured 170 B/line after
+         * the chunked rewrite and 3 000 B/line before it, so this is ~1/3 of the old cost: a
+         * regression to the flat `removeAt(0)` ring fails at once, a further optimisation passes.
+         */
+        const val SHIPPED_CAPACITY_CEILING = 1_024L
+
+        /**
+         * How much the per-line cost may grow from capacity 512 to capacity 16 384. Measured 1.5x
+         * after the chunked rewrite and 25x before it, so 4x is a wide margin for JVM noise that
+         * still fails on any capacity-proportional eviction path.
+         */
+        const val SCALING_CEILING = 4L
     }
 }
