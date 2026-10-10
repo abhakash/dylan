@@ -221,10 +221,11 @@ jobs:
             echo "| tag | \`v$VER\` |"
           } > notes.md
           if gh release view "v$VER" >/dev/null 2>&1; then
-            gh release upload "v$VER" "$ARTIFACT" notes.md --clobber
-            gh release edit "v$VER" --latest --prerelease=false
+            gh release upload "v$VER" "$ARTIFACT" --clobber
+            gh release edit "v$VER" --latest --prerelease=false --notes-file notes.md
           else
-            gh release create "v$VER" "$ARTIFACT" notes.md --latest --title "Dylan $VER"
+            gh release create "v$VER" "$ARTIFACT" \
+              --notes-file notes.md --latest --title "Dylan $VER"
           fi
           echo "Published v$VER as latest."
 

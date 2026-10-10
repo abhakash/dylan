@@ -156,9 +156,14 @@ jobs:
             echo "Built from the gates in \`ci.yml\` (ktlint, detekt, jvmTest, lint, assemble, iOS klib) plus a re-run of the Kotlin gates in this workflow. Logging is at INFO — DEBUG is reserved for debuggable builds."
           } > notes.md
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" "$ARTIFACT" notes.md --clobber
+            gh release upload "$TAG" "$ARTIFACT" --clobber
+            gh release edit "$TAG" --title "Canary $VER — build $RUN" --notes-file notes.md
           else
-            gh release create "$TAG" "$ARTIFACT" notes.md \
+            # --notes-file, not a positional argument: passing notes.md as a second file
+            # attaches it as an asset and leaves the body empty, which silently strips the
+            # only place the dev-signed warning is shown.
+            gh release create "$TAG" "$ARTIFACT" \
+              --notes-file notes.md \
               --prerelease --latest=false \
               --title "Canary $VER — build $RUN"
           fi
