@@ -139,7 +139,14 @@ class FileLogSink(
             staging.writeUtf8(line)
             written += staging.size
             s.write(staging, staging.size)
-            if (written >= maxBytesPerFile) rotate()
+            if (written >= maxBytesPerFile) {
+                val failure = rotate()
+                if (failure != null) {
+                    noteRotationFailure(e.ts, failure)
+                } else {
+                    lastRotationFailure = null
+                }
+            }
         }.onFailure {
             runCatching { out?.close() }
             out = null
@@ -158,31 +165,144 @@ class FileLogSink(
     /**
      * Roll: live .0 → .1, .1 → .2 … oldest archive deleted. On disk at most
      * (filesToKeep + 1) files ≈ (filesToKeep + 1) × maxBytesPerFile.
+     *
+     * All-or-nothing, and it aborts on the first failure.
+     *
+     * The promotions form a chain: each one's *target* is the next promotion's *source*. So a
+     * promotion that fails leaves its archive at the old path, and the next move in the loop
+     * lands on exactly that path. Continuing after a failure therefore lets a healthy move
+     * clobber the archive the failed move was supposed to preserve — the generation is destroyed
+     * seconds later by ordinary traffic, and `runCatching` around the step guarantees the trail,
+     * the one artefact a week-later triage reads, never says any of it happened. A partially
+     * rolled set is recoverable (the next roll redoes the steps that did not happen); a destroyed
+     * generation is not. So: stop, record, leave the live file writing.
+     *
+     * Nothing is undone. A promotion that already succeeded stays done — there is no portable
+     * way to reverse a rename, and losing data to make the state look tidy would be strictly
+     * worse. What the abort buys is that the steps *after* the failure never run, so no archive
+     * is overwritten and no generation is lost. The next successful roll finishes the set.
+     *
+     * @return null when the roll completed, otherwise why it stopped. The caller writes the
+     *   reason into the trail. Never throws.
      */
-    private fun rotate() {
+    private fun rotate(): String? {
+        // The handle goes first: the live file is about to change name, and the buffered sink
+        // holds the old inode. Closing it here rather than at the next write is what keeps the
+        // promotions from renaming a file under an open descriptor.
         runCatching { out?.close() }
         out = null
         written = 0
-        runCatching { fs.delete(dir / "$BASE.$filesToKeep") }
-        for (i in filesToKeep - 1 downTo 1) {
-            val from = dir / "$BASE.$i"
-            if (fs.exists(from)) {
-                runCatching { fs.atomicMove(from, dir / "$BASE.${i + 1}") }
+
+        // Free the oldest slot before anything shifts. `mustExist = false` makes the eviction
+        // idempotent: a `.filesToKeep` that was never created is the normal case on the first
+        // roll, and must not read as a failure.
+        if (fs.exists(oldestArchive())) {
+            val evicted = runCatching { fs.delete(oldestArchive(), mustExist = false) }
+            if (evicted.isFailure) {
+                return "could not evict ${oldestArchive().name}: ${describe(evicted.exceptionOrNull())}"
             }
         }
-        if (fs.exists(currentFile())) {
-            runCatching { fs.atomicMove(currentFile(), dir / "$BASE.1") }
+
+        for (i in filesToKeep - 1 downTo 1) {
+            val from = dir / "$BASE.$i"
+            if (!fs.exists(from)) continue
+            val to = dir / "$BASE.${i + 1}"
+            val moved = runCatching { fs.atomicMove(from, to) }
+            if (moved.isFailure) {
+                return "could not move ${from.name} to ${to.name}: ${describe(moved.exceptionOrNull())}; " +
+                    "the archive stays at ${from.name} and the live log keeps writing into ${currentFile().name}"
+            }
         }
+
+        if (fs.exists(currentFile())) {
+            val target = dir / "$BASE.1"
+            val moved = runCatching { fs.atomicMove(currentFile(), target) }
+            if (moved.isFailure) {
+                return "could not move ${currentFile().name} to ${target.name}: " +
+                    "${describe(moved.exceptionOrNull())}; the live generation stays at ${currentFile().name}"
+            }
+        }
+        return null
+    }
+
+    private fun oldestArchive(): Path = dir / "$BASE.$filesToKeep"
+
+    /**
+     * Records a failed rotation in the trail itself, once per distinct reason.
+     *
+     * The trail is the artefact this whole class exists to produce, so a rotation failure is only
+     * worth recording there: nothing else reads it, and a week-later triage that finds a short
+     * archive set with no explanation for it cannot act on what it cannot see.
+     *
+     * Once per reason, not once per line: an aborted rotation leaves the live file at or over
+     * [maxBytesPerFile], so the very next line attempts the roll again. Without the dedupe, a
+     * volume that stays broken would write one "rotation failed" line per log line and bury the
+     * real content under noise — and the trail is what is being scraped.
+     *
+     * Best effort by nature and the one place in this class that cannot report upward: if this
+     * write fails too, the volume is down and there is no consumer left to tell. It never
+     * throws, because a failure to *record* a failure must not cost the next real log line.
+     */
+    private fun noteRotationFailure(
+        ts: Long,
+        reason: String,
+    ) {
+        if (reason == lastRotationFailure) return
+        lastRotationFailure = reason
+        val line =
+            "${isoUtc(ts)} ${LogLevel.ERROR.name.first()}/$ROTATION_FAILURE_TAG: " +
+                "rotation failed - $reason; the live generation is not lost and logging continues\n"
+        // A dedicated handle rather than the shared `out`: `rotate()` has already nulled it, and
+        // reusing it here would mean remembering a handle that is closed on the success path.
+        runCatching {
+            val sink = fs.appendingSink(currentFile()).buffer()
+            try {
+                sink.writeUtf8(line)
+                sink.flush()
+            } finally {
+                runCatching { sink.close() }
+            }
+        }
+    }
+
+    /**
+     * A single-line, length-bounded rendering of [t] for the trail. A message is preferred; the
+     * class name is the fallback, because an exception with no message would otherwise record
+     * nothing at all. Newlines are collapsed: the trail is one record per line and a multi-line
+     * message would break every scraper that reads it by line.
+     */
+    private fun describe(t: Throwable?): String {
+        val raw = t?.message?.takeIf { it.isNotBlank() } ?: t?.let { it::class.simpleName } ?: "unknown"
+        return raw
+            .replace(LINE_BREAK_RE, " ")
+            .trim()
+            .take(REASON_MAX_CHARS)
     }
 
     private fun currentFile(): Path = dir / "$BASE.0"
 
     private fun currentSize(): Long = fs.metadataOrNull(currentFile())?.size ?: 0L
 
+    /**
+     * The reason of the rotation failure already recorded in the trail, or null when the last
+     * roll succeeded. Written only from [writeEntryLocked], which every caller reaches through
+     * [writeMutex], so a plain field is safe here and costs nothing on the writer lane.
+     */
+    private var lastRotationFailure: String? = null
+
     internal companion object {
         const val BASE = "dylan.log"
         const val FILE_BYTES_DEFAULT = 512_000L
         const val FLUSH_IDLE_MS = 50L
+
+        /** Tag on the trail line that records a failed rotation, so it is greppable by tag. */
+        const val ROTATION_FAILURE_TAG = "FileLogSink"
+
+        /** Any run of whitespace becomes one space, so a reason never spans two trail lines. */
+        private val LINE_BREAK_RE = Regex("\\s+")
+
+        /** Long enough for a filesystem's own message, short enough to stay a one-line record. */
+        private const val REASON_MAX_CHARS = 160
 
         /**
          * Every timestamp in the trail is written with exactly this many fractional digits —
