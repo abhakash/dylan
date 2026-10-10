@@ -122,8 +122,8 @@ jobs:
           keytool -genkeypair -v -keystore dylan-release.keystore -alias dylan-releasedev \
             -keyalg RSA -keysize 2048 -validity 10000 \
             -storepass dylanreleasedev -keypass dylanreleasedev \
-            -dname "CN=Dylan stable (ephemeral CI key, NOT production), O=Dylan, C=US" \
-            >/dev/null 2>&1
+            -dname "CN=Dylan Stable Development Key, O=Dylan, C=US"
+          test -s dylan-release.keystore || { echo "ERROR: keytool produced no keystore"; exit 1; }
           { echo "storeFile=dylan-release.keystore"; echo "storePassword=dylanreleasedev";
             echo "keyAlias=dylan-releasedev"; echo "keyPassword=dylanreleasedev"; } > keystore.properties
           echo "kind=ephemeral" >> "$GITHUB_OUTPUT"

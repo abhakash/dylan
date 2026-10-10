@@ -85,11 +85,13 @@ jobs:
           # No production secret. An unsigned APK cannot be installed by Android at all, so a
           # canary that ships one is a canary nobody can run. Generate a disposable key instead
           # and label the artifact for what it is rather than pretending it is a release build.
+          # keytool's stderr is NOT suppressed: a DN with unescaped '(' or ')' fails with
+          # "Incorrect AVA format", and swallowing that cost a whole canary run to diagnose.
           keytool -genkeypair -v -keystore dylan-release.keystore -alias dylan-canary \
             -keyalg RSA -keysize 2048 -validity 10000 \
             -storepass dylancanary -keypass dylancanary \
-            -dname "CN=Dylan canary (ephemeral CI key, NOT production), O=Dylan, C=US" \
-            >/dev/null 2>&1
+            -dname "CN=Dylan Canary Development Key, O=Dylan, C=US"
+          test -s dylan-release.keystore || { echo "ERROR: keytool produced no keystore"; exit 1; }
           {
             echo "storeFile=dylan-release.keystore"
             echo "storePassword=dylancanary"
