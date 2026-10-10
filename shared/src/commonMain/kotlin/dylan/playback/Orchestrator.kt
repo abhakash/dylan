@@ -28,7 +28,7 @@ import dylan.util.Lane
 import dylan.util.LaneViolation
 import dylan.util.NetClass
 import dylan.util.NetMonitor
-import dylan.util.logErr
+import dylan.util.logErrRedacted
 import kotlinx.collections.immutable.PersistentList
 import kotlinx.collections.immutable.persistentListOf
 import kotlinx.collections.immutable.toPersistentList
@@ -400,7 +400,7 @@ class Orchestrator(
         t: Throwable,
     ): Nothing {
         log.c("play", "INVARIANT VIOLATION in $what: ${t.message} — the state lane is stopping")
-        logErr("dylan-orchestrator: INVARIANT VIOLATION in $what: $t")
+        logErrRedacted("dylan-orchestrator: INVARIANT VIOLATION in $what: $t")
         throw t
     }
 
@@ -410,7 +410,7 @@ class Orchestrator(
         t: Throwable,
     ) {
         log.c("play", "$what failed: ${t.message}")
-        logErr("dylan-orchestrator: $what failed: $t")
+        logErrRedacted("dylan-orchestrator: $what failed: $t")
     }
 
     private suspend fun process(m: Msg) {

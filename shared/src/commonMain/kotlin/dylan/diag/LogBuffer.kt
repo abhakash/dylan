@@ -122,9 +122,20 @@ class LogBuffer(
     companion object {
         private const val PLATFORM_MIRROR_KEY = "platform-console"
 
-        private const val ENCRYPTED_MEDIA_URL = "encrypted_media_url"
+        /**
+         * The literal the key takes in a log line — `encrypted_media_url=…` — and exactly the
+         * prefix [ENCRYPTED_MEDIA_URL_RE] is anchored on. Not just "the word appears": the regex
+         * requires the `=`, so the pre-filter must require it too or a line carrying the word
+         * pays a full regex scan to produce a byte-identical result.
+         */
+        private const val ENCRYPTED_MEDIA_URL_EQ = "encrypted_media_url="
 
         private const val URL_SCHEME = "://"
+
+        /** [URL_QUERY_VALUE_RE] cannot match without one of these, so the pre-filter must reject too. */
+        private const val URL_QUERY_SEP_FIRST = '?'
+
+        private const val URL_QUERY_SEP_ANY = '&'
 
         // Substitution, never truncation: a redacted line keeps the quality, the CDN host and
         // the timing that follow the secret. The old `substring(0, q) + "?…"` /
@@ -139,12 +150,20 @@ class LogBuffer(
         /**
          * `contains` pre-filters keep the common case (no URL, no token) to two fast scans and
          * zero allocations; the regexes only run on lines that actually carry a secret.
+         *
+         * Each pre-filter is the *strongest* form of the pattern it guards, not merely a prefix of
+         * it. `URL_QUERY_VALUE_RE` is anchored on `?` or `&` and `ENCRYPTED_MEDIA_URL_RE` on `=`,
+         * so a line that has neither cannot match either — and the pre-filters must reject it too,
+         * or a line like `url=http://127.0.0.1:8080/a.m4a` pays a full regex scan and the
+         * allocation of a `Matcher` and its output `String` to produce a byte-identical result.
          */
         internal fun redact(s: String): String {
-            if (ENCRYPTED_MEDIA_URL !in s && URL_SCHEME !in s) return s
+            val hasToken = ENCRYPTED_MEDIA_URL_EQ in s
+            val hasQuery = URL_SCHEME in s && (URL_QUERY_SEP_FIRST in s || URL_QUERY_SEP_ANY in s)
+            if (!hasToken && !hasQuery) return s
             var out = s
-            if (ENCRYPTED_MEDIA_URL in out) out = ENCRYPTED_MEDIA_URL_RE.replace(out, "$1<redacted>")
-            if (URL_SCHEME in out) out = URL_QUERY_VALUE_RE.replace(out, "$1<redacted>")
+            if (hasToken) out = ENCRYPTED_MEDIA_URL_RE.replace(out, "$1<redacted>")
+            if (hasQuery) out = URL_QUERY_VALUE_RE.replace(out, "$1<redacted>")
             return out
         }
     }

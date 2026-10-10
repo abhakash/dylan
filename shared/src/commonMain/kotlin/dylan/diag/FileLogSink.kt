@@ -7,6 +7,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.yield
 import okio.FileSystem
 import okio.Path
 import okio.buffer
@@ -76,6 +77,15 @@ class FileLogSink(
                 while (true) {
                     val next = queue.tryReceive().getOrNull() ?: break
                     writeEntryLocked(next)
+                    // The loop's only cancellation point. `tryReceive` and `writeEntryLocked`
+                    // are both non-suspending, so without this the block above never suspends
+                    // and `withTimeoutOrNull` cannot fire until the whole backlog has been
+                    // written: a `flush(2_000)` issued from `onBackground`/`stop` on a slow or
+                    // stuck volume took as long as the queue was deep, which is the opposite of
+                    // the background budget the timeout exists to spend. The in-flight entry is
+                    // not interruptible — that is a blocking write on this lane — so the bound
+                    // holds at entry boundaries, which is where 1024 entries actually live.
+                    yield()
                 }
                 runCatching { out?.flush() }
             }

@@ -418,6 +418,12 @@ class AppContainer(
             // terminal. Both closes are idempotent, so the RUNNING path pays nothing for this.
             closeNetworkLayer()
             log.i("lifecycle", "shutdown session=$sessionId")
+            // The line above is emitted *after* `cancelAndJoin` has already cancelled the log
+            // sink's writer coroutine, so the channel it lands in has no reader left. Flushing
+            // here is what puts the terminal line on disk: without it the trail ends at "stop",
+            // the graph's final state is missing, and a teardown crash is indistinguishable from
+            // a clean `stop()`.
+            closeLogTrail()
         } finally {
             phase.store(Lifecycle.IDLE)
         }

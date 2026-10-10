@@ -199,7 +199,7 @@ class DownloadEngine
         private val engineFailure =
             kotlinx.coroutines.CoroutineExceptionHandler { _, t ->
                 log.c("dl", "engine job crashed: ${t.message ?: t::class.simpleName}")
-                dylan.util.logErr("dylan-engine: ${t.message ?: t::class.simpleName}")
+                dylan.util.logErrRedacted("dylan-engine: ${t.message ?: t::class.simpleName}")
             }
 
         // The scope *is* the IO lane, so the workers' `assertInContext(Lane.IO)` holds by construction
@@ -505,7 +505,7 @@ class DownloadEngine
                 // there before reporting NETWORK_TIMEOUT.
                 val what = expected.message ?: expected::class.simpleName
                 log.e("dl", "job crashed ${job.label}: $what")
-                dylan.util.logErr("dylan-dl: $what")
+                dylan.util.logErrRedacted("dylan-dl: $what")
                 fail(key, job, DylanFailure(ErrorCode.NETWORK, key, what), job.id)
             } finally {
                 parts.persist(key, m.live.load())

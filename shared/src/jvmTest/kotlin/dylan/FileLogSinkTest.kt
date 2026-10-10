@@ -5,7 +5,9 @@ import dylan.diag.LogBuffer
 import dylan.diag.LogLevel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeoutOrNull
 import okio.FileSystem
@@ -120,6 +122,79 @@ class FileLogSinkTest {
     }
 
     /**
+     * A flush must honour its timeout even when it is the only thing running.
+     *
+     * `flush`'s drain loop is non-suspending from the first entry to the last: `tryReceive` is
+     * non-blocking and `writeEntryLocked` is plain code. Its outer `withTimeoutOrNull` fires at
+     * the *first* suspension point, and the only one in the function is `writeMutex.withLock`.
+     * A contended mutex is a suspension, so a flush racing a live writer is already bounded. The
+     * unbounded case is the one where the mutex is free and never contended — no writer at all.
+     * An uncontended `Mutex.lock()` is a non-suspending fast path, so [withLock] returns without
+     * ever suspending, the loop below it has nothing to cancel at, and the timeout is inert for
+     * the whole backlog.
+     *
+     * That is not a hypothetical schedule. It is the state [AppContainer.shutdown] leaves the
+     * sink in — `cancelAndJoin(componentJobs)` stops the writer, then the terminal lifecycle line
+     * is logged and the trail flushed again — and any flush issued after the writer's scope has
+     * been cancelled.
+     *
+     * The schedule is fixed rather than hoped for. A sink whose scope is already cancelled never
+     * starts `drainLoop`, so `writeMutex` is free and the queue holds everything accepted;
+     * `maxBytesPerFile = 1` rotates after every single entry, so each one re-opens the file and
+     * pays a real blocking open on this lane. That is the slow-volume case the timeout exists
+     * for, and it is not an okio `BufferedSink` in-memory no-op.
+     */
+    @Test
+    fun flushHonoursItsTimeoutWhenNoWriterIsRunning() =
+        kotlinx.coroutines.runBlocking {
+            // A scope that is cancelled before construction: `launch` creates the coroutine and
+            // cancels it, so `drainLoop` never reaches `queue.receive()` and nothing consumes.
+            val noWriter = CoroutineScope(SupervisorJob()).also { it.cancel() }
+            val sink =
+                FileLogSink(
+                    fs = SlowOpenFileSystem(fs),
+                    dir = dir.toPath(),
+                    scope = noWriter,
+                    maxBytesPerFile = 1L,
+                    filesToKeep = 1,
+                )
+            // More than the budget can ever drain, so the timeout is the only thing that can
+            // end the flush early.
+            repeat(BACKLOG) { sink.accept(entry("queued $it")) }
+
+            val begun = System.nanoTime()
+            kotlinx.coroutines.withTimeoutOrNull(FORCED_CEILING_MS) { sink.flush(timeoutMs = FLUSH_BUDGET_MS) }
+            val elapsedMs = (System.nanoTime() - begun) / 1_000_000
+            // Without the fix the loop never suspends, so the inner timeout cannot fire: the
+            // caller asked for 300 ms and waits for the whole backlog.
+            println("[flush-timeout] flush(timeoutMs=$FLUSH_BUDGET_MS) returned after ${elapsedMs}ms")
+            assertTrue(
+                elapsedMs < BUDGET_EXCEEDED_MS,
+                "flush(timeoutMs=$FLUSH_BUDGET_MS) ran for ${elapsedMs}ms with no writer running: " +
+                    "the timeout is never observed",
+            )
+        }
+
+    /**
+     * A volume that takes a fixed slice of wall time to open for append. [FileLogSink] opens the
+     * file once and then writes through an okio `BufferedSink`, whose internal buffer absorbs a
+     * short line without ever reaching the underlying `Sink.write` — so a slow *write* is
+     * bypassed and the drain looks fast. A slow *open* is not: rotation after every entry forces
+     * a real `appendingSink` call per line.
+     */
+    private class SlowOpenFileSystem(
+        private val backing: FileSystem,
+    ) : ForwardingFileSystem(backing) {
+        override fun appendingSink(
+            path: Path,
+            mustExist: Boolean,
+        ): Sink {
+            Thread.sleep(OPEN_SLICE_MS)
+            return backing.appendingSink(path, mustExist)
+        }
+    }
+
+    /**
      * M6: `close()` must be serialised with the writer, not merely concurrent with it.
      *
      * `out` and `written` are plain fields and `writeEntryLocked` is the only code allowed to touch
@@ -194,3 +269,16 @@ private class OpenGate {
 private const val AWAIT_CEILING_MS = 10_000L
 private const val POLL_MS = 25L
 private const val CLOSE_SETTLE_MS = 300L
+
+/** Entries queued for the flush-timeout test: more than the budget can ever drain. */
+private const val BACKLOG = 1_024
+
+/** The timeout `flush` is asked for, and the ceiling that proves the outer caller cannot escape. */
+private const val FLUSH_BUDGET_MS = 300L
+private const val FORCED_CEILING_MS = 5_000L
+
+/** One entry's worth of wall time on the slow volume (the file open, not the write). */
+private const val OPEN_SLICE_MS = 5L
+
+/** The budget plus room for the in-flight entry, and no more. */
+private const val BUDGET_EXCEEDED_MS = 1_500L

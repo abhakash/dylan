@@ -23,10 +23,20 @@ private const val DRIVER_LOG_CAPACITY = 64
 private const val BUSY_TIMEOUT_MS = 5_000L
 
 /**
- * The DB is opened from `Application.onCreate`, i.e. before any shared LogBuffer exists, so
- * unlike every other component this one still needs a default. It is a real (if small) ring
- * with a logcat mirror, not a silently-discarding buffer: "user_version mismatch" has to be
- * visible even while the app graph is still building.
+ * A fallback ring for a caller that genuinely has no buffer yet.
+ *
+ * **Production no longer uses it.** `DylanApp.onCreate` now builds one `LogBuffer` and hands it
+ * to both `DriverFactory` and `AppContainer`, exactly as `IosGraph.create` always did. It used to
+ * be the other way round — this default was the *only* log the DB open had, a separate ring with
+ * a logcat mirror and nothing else, so every line the open emitted (`PRAGMA journal_mode is
+ * 'delete', not wal`, `foreign_keys did not take effect`, `busy_timeout is 0`) never reached the
+ * file trail and a week-later triage could not see why the app's cascade deletes were inert.
+ *
+ * Its `minLevel = WARN` is also why the one `log.i("db", …)` in [verify] used to be unreachable.
+ *
+ * Kept for a caller (a test, a future foreground component) that has no ring of its own, and kept
+ * at WARN so such a caller is not spammed; it is still a real, bounded ring with a logcat mirror,
+ * never a silently-discarding buffer.
  */
 private fun bootLog(): LogBuffer =
     LogBuffer(capacity = DRIVER_LOG_CAPACITY, minLevel = LogLevel.WARN).also { buf ->
