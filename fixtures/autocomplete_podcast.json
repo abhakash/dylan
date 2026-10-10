@@ -1,0 +1,244 @@
+{
+ "albums": {
+  "data": [
+   {
+    "id": "62215897",
+    "title": "Podcast",
+    "image": "https://c.saavncdn.com/059/Podcast-Punjabi-2025-20260304204953-50x50.jpg",
+    "music": "GURLLUV GILL, Ruby Chatha, Master Mind",
+    "url": "https://www.jiosaavn.com/album/podcast/MbtuC,J0Zv8_",
+    "type": "album",
+    "description": "2025 · Punjabi Album · GURLLUV GILL, Ruby Chatha, Master Mind",
+    "ctr": 0,
+    "position": 1,
+    "more_info": {
+     "year": "2025",
+     "is_movie": "",
+     "language": "punjabi",
+     "song_pids": "OJ89OIx2"
+    }
+   },
+   {
+    "id": "65772362",
+    "title": "Podcast (Remix)",
+    "image": "https://c.saavncdn.com/451/Podcast-Remix-Hindi-2025-20250626205653-50x50.jpg",
+    "music": "Vishesh",
+    "url": "https://www.jiosaavn.com/album/podcast-remix/ZEhX5hECTO0_",
+    "type": "album",
+    "description": "2025 · Hindi Album · Vishesh",
+    "ctr": 0,
+    "position": 2,
+    "more_info": {
+     "year": "2025",
+     "is_movie": "",
+     "language": "hindi",
+     "song_pids": "BAvtpLQJ"
+    }
+   },
+   {
+    "id": "69357615",
+    "title": "Podcast",
+    "image": "https://c.saavncdn.com/180/Podcast-Hindi-2025-20251030163841-50x50.jpg",
+    "music": "Kaash",
+    "url": "https://www.jiosaavn.com/album/podcast/H5EPg9B9xIQ_",
+    "type": "album",
+    "description": "2025 · Hindi Album · Kaash",
+    "ctr": 0,
+    "position": 3,
+    "more_info": {
+     "year": "2025",
+     "is_movie": "",
+     "language": "hindi",
+     "song_pids": "ARxG2qyC"
+    }
+   }
+  ],
+  "position": 3
+ },
+ "songs": {
+  "data": [
+   {
+    "id": "C8vC7pB1",
+    "title": "Podcast",
+    "image": "https://c.saavncdn.com/347/Kala-Khatta-Hindi-2025-20250420124855-50x50.jpg",
+    "album": "Kala Khatta",
+    "url": "https://www.jiosaavn.com/song/podcast/M1AdckNAdQI",
+    "type": "song",
+    "description": "Kala Khatta · Bali, Enzo",
+    "ctr": 40,
+    "position": 1,
+    "more_info": {
+     "primary_artists": "Bali, Enzo",
+     "singers": "",
+     "video_available": null,
+     "triller_available": false,
+     "language": "hindi"
+    }
+   },
+   {
+    "id": "OJ89OIx2",
+    "title": "Podcast",
+    "image": "https://c.saavncdn.com/059/Podcast-Punjabi-2025-20260304204953-50x50.jpg",
+    "album": "Podcast",
+    "url": "https://www.jiosaavn.com/song/podcast/PyJTCDt5TwE",
+    "type": "song",
+    "description": "Podcast · Gurlluv, Ruby Chatha, Master Mind, GURLLUV GILL",
+    "ctr": 0,
+    "position": 2,
+    "more_info": {
+     "vcode": "010912023193927",
+     "vlink": "https://jiotunepreview.jio.com/content/Converted/010912023149417.mp3",
+     "primary_artists": "Gurlluv, Ruby Chatha, Master Mind, GURLLUV GILL",
+     "singers": "Gurlluv, Ruby Chatha, Master Mind, GURLLUV GILL",
+     "video_available": null,
+     "triller_available": false,
+     "language": "punjabi"
+    }
+   },
+   {
+    "id": "WAgodL9L",
+    "title": "Podcast",
+    "image": "https://c.saavncdn.com/178/You-Hindi-2025-20260204124622-50x50.jpg",
+    "album": "You",
+    "url": "https://www.jiosaavn.com/song/podcast/JykMXhB8Dn8",
+    "type": "song",
+    "description": "You · Tever",
+    "ctr": 0,
+    "position": 3,
+    "more_info": {
+     "primary_artists": "Tever",
+     "singers": "Tever",
+     "video_available": null,
+     "triller_available": false,
+     "language": "hindi"
+    }
+   }
+  ],
+  "position": 4
+ },
+ "playlists": {
+  "data": [
+   {
+    "id": "1301321159",
+    "title": "Suno Toh Sahi Podcast Playlist",
+    "image": "https://c.saavncdn.com/editorial/SunoTohSahiPodcastPlaylist_20260612062833_50x50.jpg",
+    "extra": "Saavn",
+    "url": "https://www.jiosaavn.com/featured/suno-toh-sahi-podcast-playlist/ECu2DtFSzsqQBCMgztuf8A__",
+    "language": "hindi",
+    "type": "playlist",
+    "description": "Saavn Editor",
+    "position": 1,
+    "more_info": null
+   }
+  ],
+  "position": 1
+ },
+ "artists": {
+  "data": [
+   {
+    "id": "3798379",
+    "title": "The Hog Roast Podcast",
+    "image": "https://c.saavncdn.com/108/Episode-001-English-2017-20170826154505-50x50.jpg",
+    "extra": "",
+    "url": "https://www.jiosaavn.com/artist/the-hog-roast-podcast-songs/u3,e-ajwJXo_",
+    "type": "artist",
+    "description": "Artist",
+    "ctr": 0,
+    "entity": 0,
+    "position": 1
+   },
+   {
+    "id": "6328570",
+    "title": "Not Another Baptist Podcast",
+    "image": "https://c.saavncdn.com/295/To-the-SBC-feat-DJ-Matty-H--English-2019-20190426183140-50x50.jpg",
+    "extra": "",
+    "url": "https://www.jiosaavn.com/artist/not-another-baptist-podcast-songs/Aaxf-yFl,JY_",
+    "type": "artist",
+    "description": "Artist",
+    "ctr": 0,
+    "entity": 0,
+    "position": 2
+   },
+   {
+    "id": "6403460",
+    "title": "Give Him 6 Podcast",
+    "image": "https://c.saavncdn.com/911/B-a-c-k-g-r-o-u-n-d-feat-Elijah-Crouch--English-2019-20190511085925-50x50.jpg",
+    "extra": "",
+    "url": "https://www.jiosaavn.com/artist/give-him-6-podcast-songs/LiQlChPQt4M_",
+    "type": "artist",
+    "description": "Artist",
+    "ctr": 0,
+    "entity": 0,
+    "position": 3
+   }
+  ],
+  "position": 5
+ },
+ "topquery": {
+  "data": [
+   {
+    "id": "171500",
+    "title": "Podcast",
+    "image": "https://c.sop.saavncdn.com/Podcast-20220117002021-500x500.jpg",
+    "type": "show",
+    "season_number": 1,
+    "description": "Show",
+    "url": "https://www.jiosaavn.com/shows/podcast/1/TPIvOr6L,ZE_",
+    "position": 1
+   }
+  ],
+  "position": 0
+ },
+ "shows": {
+  "data": [
+   {
+    "id": "35261",
+    "title": "Podcast",
+    "image": "https://c.sop.saavncdn.com/Podcast-20200921002221-500x500.jpg",
+    "type": "show",
+    "season_number": 1,
+    "description": "Season 1",
+    "url": "https://www.jiosaavn.com/shows/podcast/1/TpV4GMyCDrU_",
+    "position": 2
+   },
+   {
+    "id": "333060",
+    "title": "Podcast",
+    "image": "https://c.sop.saavncdn.com/Podcast-20221130162945-500x500.jpg",
+    "type": "show",
+    "season_number": 1,
+    "description": "Season 1",
+    "url": "https://www.jiosaavn.com/shows/podcast/1/,wjCBTzBF2c_",
+    "position": 3
+   },
+   {
+    "id": "558547",
+    "title": "Podcast..",
+    "image": "https://c.sop.saavncdn.com/Podcast-20240531215753-500x500.jpg",
+    "type": "show",
+    "season_number": 5,
+    "description": "Season 5",
+    "url": "https://www.jiosaavn.com/shows/podcast../5/mQEXNEkQHG0_",
+    "position": 4
+   }
+  ],
+  "position": 2
+ },
+ "episodes": {
+  "data": [],
+  "position": 6
+ },
+ "_capture": {
+  "_captured": "2026-10-09 live, api.php?__call=autocomplete.get&query=podcast",
+  "_note": "show and playlist cards are carried here verbatim. `episodes` is empty in this and five other queries, so `episode` is covered by mapMini's allowlist rather than by a captured card.",
+  "_sections": {
+   "albums": 3,
+   "songs": 3,
+   "playlists": 1,
+   "artists": 3,
+   "topquery": 1,
+   "shows": 3,
+   "episodes": 0
+  }
+ }
+}

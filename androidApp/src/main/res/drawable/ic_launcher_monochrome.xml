@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- DYLAN launcher monochrome (themed-icon) layer: original two-figure pointing
+     silhouette, redrawn. 108dp adaptive viewport; group scales the 512-canvas
+     art into the 66dp safe circle. Single-color black on transparent — the
+     launcher tints it; no cut-outs or second colors allowed here (the belt
+     highlight from the source SVG is intentionally omitted). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <group
+        android:translateX="21"
+        android:translateY="21"
+        android:scaleX="0.129"
+        android:scaleY="0.129">
+        <path
+            android:fillColor="#FF000000"
+            android:pathData="M62,177 C72,168 84,166 96,169 L130,178 L187,190 L231,211 L215,247 L171,225 L121,211 L91,200 L71,201 L57,194 L61,185 L43,180 L45,172 Z" />
+        <path
+            android:fillColor="#FF000000"
+            android:pathData="M48,179 C40,176 33,174 26,173 C19,172 15,166 18,161 C21,157 27,157 34,159 L53,165 L70,156 C75,153 81,155 82,160 C83,165 79,169 73,172 L58,180 Z" />
+        <path
+            android:fillColor="#FF000000"
+            android:pathData="M238,109 C224,111 211,121 205,138 C199,156 204,177 218,188 C231,199 250,201 265,192 C279,184 286,168 282,150 C279,132 266,113 248,109 Z" />
+        <path
+            android:fillColor="#FF000000"
+            android:pathData="M204,143 C195,137 194,125 201,116 C205,105 216,100 225,102 C229,92 243,89 252,96 C263,91 276,100 275,112 C288,117 291,131 282,145 C272,132 259,126 246,126 C230,126 216,132 204,143 Z" />
+        <path
+            android:fillColor="#FF000000"
+            android:pathData="M212,193 C227,185 251,184 272,194 C292,204 306,221 314,244 L335,346 L305,416 L197,416 L174,342 L180,275 L200,224 Z" />
+        <path
+            android:fillColor="#FF000000"
+            android:pathData="M204,400 L258,400 L271,492 L215,492 Z" />
+        <path
+            android:fillColor="#FF000000"
+            android:pathData="M267,399 L310,391 L351,492 L294,492 Z" />
+        <path
+            android:fillColor="#FF000000"
+            android:pathData="M326,156 C326,126 347,104 376,104 C406,104 428,128 428,159 C428,184 412,204 387,210 C360,216 334,199 328,174 Z" />
+        <path
+            android:fillColor="#FF000000"
+            android:pathData="M350,120 C365,99 398,98 418,119 C434,136 436,159 429,181 L452,283 L422,300 L400,211 C383,224 358,220 343,206 C329,194 322,174 327,153 C331,139 338,128 350,120 Z" />
+        <path
+            android:fillColor="#FF000000"
+            android:pathData="M345,205 C361,194 386,193 405,205 C426,218 440,240 444,271 L465,413 L407,438 L342,426 L301,354 L312,267 C316,239 327,216 345,205 Z" />
+        <path
+            android:fillColor="#FF000000"
+            android:pathData="M350,230 C336,239 327,253 323,270 L307,320 C302,334 306,345 317,350 C328,355 340,350 346,337 L363,294 L386,264 Z" />
+        <path
+            android:fillColor="#FF000000"
+            android:pathData="M342,416 L391,423 L383,492 L331,492 Z" />
+        <path
+            android:fillColor="#FF000000"
+            android:pathData="M394,422 L438,411 L475,492 L421,492 Z" />
+    </group>
+</vector>

@@ -1,0 +1,70 @@
+# Signing material — NEVER commit
+keystore.properties
+*.keystore
+!debug.keystore
+*.jks
+
+# Gradle / Kotlin / KMP
+.gradle/
+.kotlin/
+build/
+out/
+shared/build/
+androidApp/build/
+.gradle-home/
+.kotlin-home/
+
+# Local env / secrets
+local.properties
+*.env
+.DS_Store
+*.hprof
+
+# IDE — JetBrains / VS Code
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+*.code-workspace
+
+# Xcode / iOS
+iosApp/build/
+iosApp/DerivedData/
+iosApp/*.xcworkspace/xcuserdata/
+iosApp/*.xcodeproj/xcuserdata/
+iosApp/*.xcodeproj/project.xcworkspace/xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+DerivedData/
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Coverage / reports
+.coverage/
+coverage.xml
+*.lcov
+build/reports/
+build/test-results/
+
+# OS
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Tools / temp
+/tmp/
+*.tmp
+*.log
+/har/*.log
+
+# Dylan scratch — large, regenerated, never commit (fixtures kept in fixtures/ if needed)
+*.har
+bobdylan.svg.png
+diff.png
+saavn_har.json
+www.jiosaavn.com.har
+
+# Version bump artifacts (generated)
+VERSION.bak

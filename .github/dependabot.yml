@@ -1,0 +1,31 @@
+version: 2
+updates:
+  - package-ecosystem: gradle
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Asia/Kolkata
+    open-pull-requests-limit: 10
+    reviewers: ["abhakash"]
+    labels: [deps, gradle]
+    commit-message:
+      prefix: chore
+      include: scope
+    # Group minor/patch to reduce noise
+    groups:
+      ktor:
+        patterns: ["io.ktor*"]
+      compose:
+        patterns: ["androidx.compose*"]
+      kotlin:
+        patterns: ["org.jetbrains.kotlin*"]
+      sqldelight:
+        patterns: ["app.cash.sqldelight*"]
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    labels: [deps, github-actions]

@@ -1,0 +1,133 @@
+name: release
+
+# Actions SHA-pinned per ci.yml policy.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Semver bump (patch/minor/major)"
+        required: true
+        default: "patch"
+        type: choice
+        options: [patch, minor, major]
+      dry_run:
+        description: "Dry run (no push/tag)"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  bump-and-tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@0b6dd653ba04f4f93bf581ec31e66cbd7dcb644d # v4
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Bump VERSION + sync iOS
+        run: |
+          ./tools/bump-version.sh ${{ inputs.bump }}
+          cat VERSION
+          cat iosApp/iosApp.xcodeproj/project.pbxproj | grep -E "MARKETING_VERSION|CURRENT_PROJECT_VERSION" | head -n 2
+
+      - name: Verify gates (no UP-TO-DATE)
+        # --rerun re-executes only the test task; probeCi is nightly-only (live API).
+        run: ./gradlew ktlintCheck detekt :shared:jvmTest --rerun
+
+      - name: Materialize release keystore (fail closed)
+        id: keys
+        env:
+          ANDROID_KEYSTORE_PROPERTIES: ${{ secrets.ANDROID_KEYSTORE_PROPERTIES }}
+          ANDROID_KEYSTORE_FILE: ${{ secrets.ANDROID_KEYSTORE_FILE }}
+        run: |
+          set -euo pipefail
+          # A release that silently falls back to the debug key is worse than no
+          # release: refuse to run rather than ship a debug-signed "release" APK.
+          if [ -z "$ANDROID_KEYSTORE_PROPERTIES" ] || [ -z "$ANDROID_KEYSTORE_FILE" ]; then
+            echo "ERROR: ANDROID_KEYSTORE_PROPERTIES / ANDROID_KEYSTORE_FILE secrets are not set."
+            echo "       A release build would fall back to the debug signing config."
+            exit 1
+          fi
+          if [ ! -f dylan-release.keystore ]; then
+            echo "$ANDROID_KEYSTORE_PROPERTIES" | base64 --decode > keystore.properties
+            echo "$ANDROID_KEYSTORE_FILE" | base64 --decode > dylan-release.keystore
+          fi
+          test -s keystore.properties || { echo "ERROR: keystore.properties is empty"; exit 1; }
+          test -s dylan-release.keystore || { echo "ERROR: dylan-release.keystore is empty"; exit 1; }
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Commit, tag and push
+        if: ${{ !inputs.dry_run }}
+        # NOTE: branch protection on main requires PR + green gates — this direct
+        # push needs a "bypass allowances" entry for github-actions[bot], or run
+        # with dry_run and open the release PR manually.
+        run: |
+          set -euo pipefail
+          VER=$(cat VERSION)
+          git add VERSION iosApp/iosApp.xcodeproj/project.pbxproj
+          git commit -m "chore(release): v$VER"
+          # Signed tag when a GPG key is configured, annotated otherwise.
+          if gpg --list-secret-keys 2>/dev/null | grep -q .; then
+            git tag -s "v$VER" -m "v$VER"
+          else
+            echo "No GPG key — falling back to annotated tag (configure signing for -s)"
+            git tag -a "v$VER" -m "v$VER"
+          fi
+          git push origin HEAD:main
+          git push origin "v$VER"
+
+      - name: Build release APK
+        run: ./gradlew :androidApp:assembleRelease
+
+      - name: Refuse silent debug signature
+        # androidApp/build.gradle.kts falls back to the debug key when no release
+        # keystore is configured — the artifact must never be debug-signed.
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          apks=(androidApp/build/outputs/apk/release/*.apk)
+          if [ "${#apks[@]}" -eq 0 ]; then echo "MISSING ARTIFACT: no release APK produced"; exit 1; fi
+          APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | head -n1)
+          for apk in "${apks[@]}"; do
+            "$APKSIGNER" verify --print-certs "$apk"
+            if "$APKSIGNER" verify --print-certs "$apk" | grep -qi 'Android Debug'; then
+              echo "ERROR: $apk is debug-signed — release keystore was not applied."
+              exit 1
+            fi
+          done
+          echo "Confirmed: release APKs are not debug-signed."
+
+      - name: Version stamp
+        id: ver
+        run: |
+          VER=$(cat VERSION)
+          SHA=$(git rev-parse --short HEAD)
+          echo "ver=$VER" >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Upload release APK
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-apk-v${{ steps.ver.outputs.ver }}-${{ steps.ver.outputs.sha }}
+          path: |
+            androidApp/build/outputs/apk/release/*.apk
+            androidApp/build/outputs/mapping/release/mapping.txt
+          if-no-files-found: error
+          retention-days: 30

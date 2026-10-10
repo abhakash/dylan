@@ -1,0 +1,641 @@
+-- DYLAN catalog DB. SQLDelight schema version 1.
+--
+-- v0 was a single `cached_files` row meaning "there is a playable file at
+-- {provider}_{sanitize(songId)}_{bitrate}.{ext} of `bytes` bytes" — simultaneously the
+-- filesystem index, the LRU record, the pin record and the eviction work queue. v1:
+--
+--   library        one row per song with a playable file: the LRU/pin record AND a copy of the
+--                  active rendition's descriptor (bitrate/ext/bytes). The copy is what keeps the
+--                  10-argument positional insertCached() contract that the download engine, the
+--                  iOS graph and the test harness all call; trg_library_asset_{ins,upd} maintain
+--                  it from the INSERT, so media_objects is derived, never a second truth.
+--   media_objects  every rendition on disk, keyed the way the FILENAME is keyed, with the
+--                  lifecycle state that makes eviction a state machine and the Reconciler a
+--                  single indexed query.
+--   cache_totals   materialised byte/count totals: O(1) budget checks, no COUNT/SUM scans, no
+--                  double-counting question, no directory walk for .part bytes.
+--   protected_keys the live protection set as a table, so victim selection reads it in the same
+--                  snapshot the UPDATE is applied in (the class fix for CA-1/CA-2/CA-3).
+--
+-- `cached_files` survives as a VIEW over library with the v0 column list and types, so every
+-- existing reader (androidApp Downloads, IosGraph.libraryDownloads, DownloadEngine,
+-- WindowPreparer) is untouched.
+--
+-- There is no rel_path column: the on-disk name is a pure function of
+-- (provider, song_id, bitrate, ext) through the single CachePath grammar that Paths, the
+-- Reconciler and the download engine's part parser share. A persisted copy could only ever
+-- disagree with Paths.
+--
+-- INSERT HYGIENE: every INSERT names its columns explicitly, so an old/new shape never shifts a
+-- value into the wrong slot.
+
+CREATE TABLE songs (
+  provider      TEXT NOT NULL DEFAULT 'saavn',
+  song_id       TEXT NOT NULL,
+  title         TEXT NOT NULL,
+  subtitle      TEXT NOT NULL,
+  album_id      TEXT,
+  album_name    TEXT,
+  art_url_150   TEXT NOT NULL,
+  art_url_500   TEXT NOT NULL,
+  duration_s    INTEGER NOT NULL,
+  has_320       INTEGER NOT NULL,
+  resolve_ref   TEXT,
+  perma_token   TEXT,
+  updated_at_ms INTEGER NOT NULL,
+  PRIMARY KEY (provider, song_id)
+);
+-- gcSongs drives on updated_at_ms; without this it full-scans songs.
+CREATE INDEX idx_songs_gc ON songs(updated_at_ms);
+-- recentAlbums' per-album "which song of this album did the user play last" probe.
+CREATE INDEX idx_songs_album ON songs(provider, album_id, song_id);
+
+CREATE TABLE library (
+  provider     TEXT NOT NULL,
+  song_id      TEXT NOT NULL,
+  bitrate      INTEGER NOT NULL,
+  ext          TEXT NOT NULL,
+  bytes        INTEGER NOT NULL,
+  cached_at_ms INTEGER NOT NULL,
+  last_used_ms INTEGER,
+  play_count   INTEGER NOT NULL DEFAULT 0,
+  pinned       INTEGER NOT NULL DEFAULT 0 CHECK (pinned IN (0,1)),
+  pinned_at_ms INTEGER,
+  PRIMARY KEY (provider, song_id),
+  FOREIGN KEY (provider, song_id) REFERENCES songs(provider, song_id) ON DELETE CASCADE,
+  CHECK (bytes >= 0),
+  CHECK (bitrate > 0),
+  CHECK (ext <> ''),
+  CHECK (play_count >= 0),
+  -- A pin without a pin timestamp (or the reverse) is the phantom-pin bug of §3.9: nothing
+  -- clears it. They are one fact.
+  CHECK ((pinned = 0) = (pinned_at_ms IS NULL))
+);
+
+-- The LRU sort keys are expressions, so the old (last_used_ms, bytes DESC) index served no
+-- ORDER BY and every lruVictim call sorted the whole unpinned set into a temp b-tree. This index
+-- IS the ORDER BY, verbatim, restricted to the pool it can serve.
+CREATE INDEX idx_cached_lru ON library
+  ((play_count = 0) DESC, (last_used_ms IS NULL) DESC, last_used_ms, cached_at_ms, provider, song_id)
+  WHERE pinned = 0;
+-- Deterministic demotion: pinned_at_ms first (a bulk heart gives every row the same one), then
+-- last_used_ms and play_count so a daily-played pin survives ahead of an untouched one.
+CREATE INDEX idx_cached_pinned ON library(pinned_at_ms, last_used_ms, play_count, provider, song_id)
+  WHERE pinned = 1;
+
+CREATE TABLE media_objects (
+  provider       TEXT NOT NULL,
+  song_id        TEXT NOT NULL,
+  bitrate        INTEGER NOT NULL,
+  ext            TEXT NOT NULL,
+  bytes          INTEGER NOT NULL DEFAULT 0,
+  state          TEXT NOT NULL DEFAULT 'READY'
+                 CHECK (state IN ('WRITING','READY','VERIFY_FAILED','EVICTING')),
+  etag           TEXT,
+  verified_at_ms INTEGER,
+  PRIMARY KEY (provider, song_id, bitrate, ext),
+  FOREIGN KEY (provider, song_id) REFERENCES songs(provider, song_id) ON DELETE CASCADE,
+  CHECK (bytes >= 0),
+  CHECK (bitrate > 0),
+  CHECK (ext <> '')
+);
+-- Boot sweep: one indexed seek per reapable state, zero rows for a healthy library. The
+-- verified_at_ms tail also orders the weekly re-verification batch.
+CREATE INDEX idx_media_state ON media_objects(state, provider, song_id, bitrate, ext);
+
+CREATE TABLE cache_totals (
+  id          INTEGER PRIMARY KEY CHECK (id = 0),
+  final_bytes INTEGER NOT NULL DEFAULT 0,
+  final_count INTEGER NOT NULL DEFAULT 0,
+  part_bytes  INTEGER NOT NULL DEFAULT 0,
+  part_count  INTEGER NOT NULL DEFAULT 0,
+  CHECK (final_bytes >= 0 AND final_count >= 0 AND part_bytes >= 0 AND part_count >= 0)
+);
+
+CREATE TABLE protected_keys (
+  provider TEXT NOT NULL,
+  song_id  TEXT NOT NULL,
+  reason   TEXT NOT NULL CHECK (reason IN ('PLAYING','INFLIGHT','UPGRADE_SOURCE','EXEMPT')),
+  PRIMARY KEY (provider, song_id)
+);
+
+-- `cached_files` survives as a VIEW over library with the v0 column list, types and ORDER, so
+-- every existing reader (androidApp Downloads, IosGraph.libraryDownloads, DownloadEngine,
+-- WindowPreparer, the test harness) is untouched. The redundant WHERE is load-bearing: it is
+-- what makes SQLDelight materialise a `Cached_files` type of its own instead of collapsing the
+-- view onto `Library`, and a NOT NULL column makes the predicate free for the planner.
+CREATE VIEW cached_files AS
+SELECT provider, song_id, bitrate, ext, bytes, cached_at_ms, last_used_ms, play_count, pinned, pinned_at_ms
+  FROM library
+ WHERE provider IS NOT NULL;
+
+-- cache_totals is trigger-maintained, so every writer outside this module (the download engine's
+-- COMMIT, the repos) updates it for free and can never leave it stale.
+--
+-- Each trigger seeds the singleton row before updating it, rather than relying on a caller to
+-- have done so. `INSERT OR IGNORE` is NOT usable here: SQLite always resolves the update half of
+-- an UPSERT with ABORT, and that resolution wins over anything the fired trigger's own statement
+-- asks for -- so an `OR IGNORE` inside a trigger degrades to a plain INSERT whenever an UPSERT
+-- (`upsertCached`) fires it, and the statement dies on `UNIQUE constraint failed`. A guarded
+-- `INSERT ... SELECT ... WHERE NOT EXISTS` cannot conflict, so no resolution algorithm is
+-- involved and the statement is correct under every outer one.
+CREATE TRIGGER trg_library_total_ins AFTER INSERT ON library
+BEGIN
+  INSERT INTO cache_totals(id, final_bytes, final_count, part_bytes, part_count)
+    SELECT 0, 0, 0, 0, 0 WHERE NOT EXISTS (SELECT 1 FROM cache_totals WHERE id = 0);
+  UPDATE cache_totals SET final_bytes = final_bytes + new.bytes, final_count = final_count + 1 WHERE id = 0;
+END;
+
+CREATE TRIGGER trg_library_total_del AFTER DELETE ON library
+BEGIN
+  INSERT INTO cache_totals(id, final_bytes, final_count, part_bytes, part_count)
+    SELECT 0, 0, 0, 0, 0 WHERE NOT EXISTS (SELECT 1 FROM cache_totals WHERE id = 0);
+  UPDATE cache_totals
+     SET final_bytes = MAX(0, final_bytes - old.bytes),
+         final_count = MAX(0, final_count - 1)
+   WHERE id = 0;
+END;
+
+CREATE TRIGGER trg_library_total_upd AFTER UPDATE OF bytes ON library
+BEGIN
+  INSERT INTO cache_totals(id, final_bytes, final_count, part_bytes, part_count)
+    SELECT 0, 0, 0, 0, 0 WHERE NOT EXISTS (SELECT 1 FROM cache_totals WHERE id = 0);
+  UPDATE cache_totals SET final_bytes = MAX(0, final_bytes - old.bytes + new.bytes) WHERE id = 0;
+END;
+
+-- library -> media_objects: the active rendition's asset row. (Verified against SQLite: a DELETE
+-- in a trigger body does fire the child's DELETE triggers with recursive_triggers at its default
+-- of OFF, which is why the totals above still see the cascade.)
+CREATE TRIGGER trg_library_asset_ins AFTER INSERT ON library
+BEGIN
+  INSERT INTO media_objects(provider, song_id, bitrate, ext, bytes, state, verified_at_ms)
+    VALUES (new.provider, new.song_id, new.bitrate, new.ext, new.bytes, 'READY', new.cached_at_ms)
+    ON CONFLICT(provider, song_id, bitrate, ext) DO UPDATE SET
+      bytes = excluded.bytes, state = 'READY', verified_at_ms = excluded.verified_at_ms;
+  DELETE FROM media_objects
+   WHERE provider = new.provider AND song_id = new.song_id
+     AND (bitrate <> new.bitrate OR ext <> new.ext)
+     AND state <> 'WRITING';
+END;
+
+CREATE TRIGGER trg_library_asset_upd AFTER UPDATE OF bitrate, ext, bytes ON library
+BEGIN
+  INSERT INTO media_objects(provider, song_id, bitrate, ext, bytes, state, verified_at_ms)
+    VALUES (new.provider, new.song_id, new.bitrate, new.ext, new.bytes, 'READY', new.cached_at_ms)
+    ON CONFLICT(provider, song_id, bitrate, ext) DO UPDATE SET
+      bytes = excluded.bytes, state = 'READY', verified_at_ms = excluded.verified_at_ms;
+  DELETE FROM media_objects
+   WHERE provider = new.provider AND song_id = new.song_id
+     AND (bitrate <> new.bitrate OR ext <> new.ext)
+     AND state <> 'WRITING';
+END;
+
+-- A rendition that is not the library row's active one is a leftover (a superseded upgrade, or
+-- an unlinked-but-still-recorded eviction). Dropping the per-song record drops them with it.
+CREATE TRIGGER trg_library_drop_assets AFTER DELETE ON library
+BEGIN
+  DELETE FROM media_objects WHERE provider = old.provider AND song_id = old.song_id;
+END;
+
+-- ...and the reverse: an asset dies, so the per-song record dies with it unless another
+-- rendition is still active. Without this a reaped song lingers as a phantom LRU/pin row.
+CREATE TRIGGER trg_media_drop_library AFTER DELETE ON media_objects
+WHEN NOT EXISTS (SELECT 1 FROM media_objects m2 JOIN library l2
+                    ON l2.provider = m2.provider AND l2.song_id = m2.song_id
+                   AND l2.bitrate = m2.bitrate AND l2.ext = m2.ext
+                  WHERE m2.provider = old.provider AND m2.song_id = old.song_id)
+BEGIN
+  DELETE FROM library WHERE provider = old.provider AND song_id = old.song_id;
+END;
+
+CREATE TABLE favorites (
+  provider    TEXT NOT NULL,
+  song_id     TEXT NOT NULL,
+  added_at_ms INTEGER NOT NULL,
+  PRIMARY KEY (provider, song_id),
+  FOREIGN KEY (provider, song_id) REFERENCES songs(provider, song_id) ON DELETE CASCADE
+);
+CREATE INDEX idx_favorites ON favorites(added_at_ms DESC);
+
+CREATE TABLE play_history (
+  id           INTEGER PRIMARY KEY,
+  provider     TEXT NOT NULL,
+  song_id      TEXT NOT NULL,
+  played_at_ms INTEGER NOT NULL,
+  FOREIGN KEY (provider, song_id) REFERENCES songs(provider, song_id) ON DELETE CASCADE
+);
+-- (a) trimHistory's ORDER BY, so trimming is a covering-index range delete instead of
+-- SCAN play_history plus a materialised bloom filter for the outer NOT IN (plan verified).
+-- (b) gcSongs' NOT EXISTS probe, which full-scanned play_history per candidate song without it.
+-- (c) makes ON DELETE CASCADE non-scanning.
+CREATE INDEX idx_history ON play_history(played_at_ms DESC);
+CREATE INDEX idx_history_song ON play_history(provider, song_id, played_at_ms DESC);
+
+CREATE TABLE search_history (
+  query_key  TEXT PRIMARY KEY NOT NULL,
+  display    TEXT NOT NULL,
+  used_at_ms INTEGER NOT NULL
+);
+CREATE INDEX idx_search_history ON search_history(used_at_ms DESC);
+
+CREATE TABLE settings (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);
+
+CREATE TABLE home_cache (
+  key           TEXT PRIMARY KEY NOT NULL,
+  json          TEXT NOT NULL,
+  fetched_at_ms INTEGER NOT NULL
+);
+CREATE INDEX idx_home_cache ON home_cache(fetched_at_ms DESC);
+
+CREATE TABLE download_intents (
+  provider       TEXT NOT NULL,
+  song_id        TEXT NOT NULL,
+  reason         TEXT NOT NULL,
+  bitrate        INTEGER NOT NULL,
+  enqueued_at_ms INTEGER NOT NULL,
+  priority       INTEGER NOT NULL DEFAULT 3,
+  PRIMARY KEY (provider, song_id),
+  CHECK (priority BETWEEN 0 AND 3),
+  CHECK (reason IN ('USER_NOW','USER_BULK','PREFETCH_NEXT','QUALITY_UPGRADE'))
+);
+
+-- The scheduler pops intents in (priority, enqueued_at_ms) order. Without this index every pop
+-- sorts the whole table into a temp b-tree; with it the ORDER BY is the index.
+CREATE INDEX idx_intent_priority ON download_intents(priority, enqueued_at_ms);
+
+-- The scheduling order is an indexed integer, not a CASE expression duplicated across two
+-- queries. The CASE that defines it exists exactly once, in these two triggers.
+CREATE TRIGGER trg_intent_priority_ins AFTER INSERT ON download_intents
+BEGIN
+  UPDATE download_intents
+     SET priority = (CASE new.reason WHEN 'USER_NOW' THEN 0 WHEN 'USER_BULK' THEN 1
+                                     WHEN 'PREFETCH_NEXT' THEN 2 ELSE 3 END)
+   WHERE provider = new.provider AND song_id = new.song_id;
+END;
+
+CREATE TRIGGER trg_intent_priority_upd AFTER UPDATE OF reason ON download_intents
+BEGIN
+  UPDATE download_intents
+     SET priority = (CASE new.reason WHEN 'USER_NOW' THEN 0 WHEN 'USER_BULK' THEN 1
+                                     WHEN 'PREFETCH_NEXT' THEN 2 ELSE 3 END)
+   WHERE provider = new.provider AND song_id = new.song_id;
+END;
+
+insertSong:
+INSERT OR IGNORE INTO songs(provider, song_id, title, subtitle, album_id, album_name, art_url_150, art_url_500, duration_s, has_320, resolve_ref, perma_token, updated_at_ms)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+
+updateSongMetadata:
+INSERT INTO songs(provider, song_id, title, subtitle, album_id, album_name, art_url_150, art_url_500, duration_s, has_320, resolve_ref, perma_token, updated_at_ms)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(provider, song_id) DO UPDATE SET
+  title = excluded.title,
+  subtitle = excluded.subtitle,
+  album_id = excluded.album_id,
+  album_name = excluded.album_name,
+  art_url_150 = excluded.art_url_150,
+  art_url_500 = excluded.art_url_500,
+  has_320 = excluded.has_320,
+  resolve_ref = excluded.resolve_ref,
+  perma_token = excluded.perma_token,
+  updated_at_ms = excluded.updated_at_ms;
+
+selectSong:
+SELECT * FROM songs WHERE provider = ? AND song_id = ?;
+
+selectSongsByIds:
+SELECT * FROM songs WHERE song_id IN ?;
+
+updateSongSource:
+UPDATE songs SET resolve_ref = ?, perma_token = ?, updated_at_ms = ? WHERE provider = ? AND song_id = ?;
+
+gcSongs:
+DELETE FROM songs
+ WHERE updated_at_ms < ?
+   AND NOT EXISTS (SELECT 1 FROM favorites f       WHERE f.provider = songs.provider AND f.song_id = songs.song_id)
+   AND NOT EXISTS (SELECT 1 FROM play_history h    WHERE h.provider = songs.provider AND h.song_id = songs.song_id)
+   AND NOT EXISTS (SELECT 1 FROM media_objects c    WHERE c.provider = songs.provider AND c.song_id = songs.song_id)
+   AND NOT EXISTS (SELECT 1 FROM library l          WHERE l.provider = songs.provider AND l.song_id = songs.song_id)
+   AND NOT EXISTS (SELECT 1 FROM download_intents d WHERE d.provider = songs.provider AND d.song_id = songs.song_id)
+   AND provider || '#' || song_id NOT IN ?;
+
+insertCached:
+INSERT INTO library(provider, song_id, bitrate, ext, bytes, cached_at_ms, last_used_ms, play_count, pinned, pinned_at_ms)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+
+upsertCached:
+INSERT INTO library(provider, song_id, bitrate, ext, bytes, cached_at_ms, last_used_ms, play_count, pinned, pinned_at_ms)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(provider, song_id) DO UPDATE SET
+  bitrate = excluded.bitrate,
+  ext = excluded.ext,
+  bytes = excluded.bytes,
+  cached_at_ms = excluded.cached_at_ms,
+  last_used_ms = excluded.last_used_ms,
+  play_count = excluded.play_count,
+  pinned = excluded.pinned,
+  pinned_at_ms = excluded.pinned_at_ms;
+
+deleteCached:
+DELETE FROM library WHERE provider = ? AND song_id = ?;
+
+selectAllCached:
+SELECT * FROM cached_files;
+
+selectCached:
+SELECT * FROM cached_files WHERE provider = ? AND song_id = ?;
+
+-- Downloads screen: ONE round trip. Replaces selectAllCached() plus a selectSong() per row,
+-- which is 301 hops through the single-threaded dbLane on every screen open at the cap.
+selectDownloads:
+SELECT s.provider AS provider, s.song_id AS song_id, s.title AS title, s.subtitle AS subtitle,
+       s.album_id AS albumId, s.album_name AS albumName, s.art_url_150 AS artUrl150,
+       s.art_url_500 AS artUrl500, s.duration_s AS durationS, s.has_320 AS has320,
+       s.resolve_ref AS resolveRef, s.perma_token AS permaToken,
+       c.bitrate AS bitrate, c.bytes AS bytes, c.pinned AS pinned
+  FROM library c JOIN songs s ON s.provider = c.provider AND s.song_id = c.song_id
+ ORDER BY c.cached_at_ms DESC;
+
+-- Quality-scan candidates: predicate, has_320 filter and LIMIT all in SQL, so this is one round
+-- trip instead of 1 + N, and the limit now bounds the query rather than a post-map .take(3).
+selectUpgradeCandidates:
+SELECT c.provider AS provider, c.song_id AS song_id
+  FROM library c JOIN songs s ON s.provider = c.provider AND s.song_id = c.song_id
+ WHERE c.bitrate = ? AND s.has_320 = 1 AND (c.pinned = 1 OR c.play_count >= 2)
+ ORDER BY c.last_used_ms DESC, c.provider, c.song_id
+ LIMIT ?;
+
+-- Eviction phase 1: select and claim in ONE statement, so the subquery's read of
+-- protected_keys is the same snapshot the UPDATE lands in. '#' is the key separator; it is in
+-- no provider id and in no sanitized song id (CachePath.SEPARATOR).
+-- The CROSS JOIN is load-bearing, not a style choice: written as a plain JOIN, the planner drives
+-- from media_objects, the sort keys all come from library, and the whole unpinned set goes through
+-- a temp b-tree on every call. Written this way the plan is `SCAN l USING INDEX idx_cached_lru`
+-- with no sort at all (verified with EXPLAIN QUERY PLAN).
+lruVictims:
+UPDATE media_objects
+   SET state = 'EVICTING'
+ WHERE state = 'READY'
+   AND provider || '#' || song_id || '#' || bitrate || '#' || ext IN (
+     SELECT m.provider || '#' || m.song_id || '#' || m.bitrate || '#' || m.ext
+       FROM library l
+       CROSS JOIN media_objects m
+      WHERE m.provider = l.provider AND m.song_id = l.song_id AND m.state = 'READY'
+        AND l.pinned = 0
+        AND m.provider || '#' || m.song_id NOT IN (SELECT provider || '#' || song_id FROM protected_keys)
+      ORDER BY (l.play_count = 0) DESC, (l.last_used_ms IS NULL) DESC, l.last_used_ms, l.cached_at_ms,
+               l.provider, l.song_id
+      LIMIT ?)
+ RETURNING provider, song_id, bitrate, ext, bytes;
+
+-- Every unprotected rendition, claimed in one statement and one snapshot. "Clear cache" is not
+-- an LRU pass, so this deliberately has no LIMIT: the set is bounded by the cache itself.
+claimAllUnprotected:
+UPDATE media_objects
+   SET state = 'EVICTING'
+ WHERE state = 'READY'
+   AND provider || '#' || song_id NOT IN (SELECT provider || '#' || song_id FROM protected_keys)
+ RETURNING provider, song_id, bitrate, ext, bytes;
+
+-- The per-key form, and the ONLY correct way to remove one download: the protection set it
+-- consults is a table, not a StateFlow read before the statement, so the guard and the claim
+-- cannot disagree.
+claimOne:
+UPDATE media_objects
+   SET state = 'EVICTING'
+ WHERE provider = ? AND song_id = ? AND state = 'READY'
+   AND provider || '#' || song_id NOT IN (SELECT provider || '#' || song_id FROM protected_keys)
+ RETURNING provider, song_id, bitrate, ext, bytes;
+
+-- Demotion is a pin-state change, not a destruction, so it selects instead of claiming.
+-- ORDER BY matches idx_cached_pinned exactly, so it is an index seek and never a temp b-tree.
+oldestPinned:
+SELECT provider, song_id FROM library
+ WHERE pinned = 1
+   AND provider || '#' || song_id NOT IN (SELECT provider || '#' || song_id FROM protected_keys)
+ ORDER BY pinned_at_ms, last_used_ms, play_count, provider, song_id
+ LIMIT ?;
+
+evictingObjects:
+SELECT * FROM media_objects WHERE state = 'EVICTING' ORDER BY provider, song_id, bitrate, ext;
+
+-- Crash recovery for the EVICTING half of the state machine: an interrupted sweep leaves the
+-- row claimed and the file untouched, and the next boot re-runs the unlink from here.
+reapableObjects:
+SELECT * FROM media_objects
+ WHERE state <> 'READY'
+   AND NOT EXISTS (SELECT 1 FROM library l
+                    WHERE l.provider = media_objects.provider AND l.song_id = media_objects.song_id
+                      AND l.bitrate = media_objects.bitrate AND l.ext = media_objects.ext)
+ ORDER BY state, provider, song_id, bitrate, ext
+ LIMIT ?;
+
+restoreObject:
+UPDATE media_objects SET state = 'READY' WHERE provider = ? AND song_id = ? AND bitrate = ? AND ext = ?;
+
+dropObject:
+DELETE FROM media_objects WHERE provider = ? AND song_id = ? AND bitrate = ? AND ext = ?;
+
+-- A rendition being written: it is NOT the library row's active object, so an upgrade in flight
+-- cannot hide the playable file it is replacing.
+beginWrite:
+INSERT INTO media_objects(provider, song_id, bitrate, ext, bytes, state, etag)
+VALUES (?, ?, ?, ?, ?, 'WRITING', ?)
+ON CONFLICT(provider, song_id, bitrate, ext) DO UPDATE SET
+  bytes = excluded.bytes, state = 'WRITING', etag = excluded.etag;
+
+promoteObject:
+UPDATE media_objects
+   SET state = 'READY', bytes = ?, etag = ?, verified_at_ms = ?
+ WHERE provider = ? AND song_id = ? AND bitrate = ? AND ext = ?;
+
+failObject:
+UPDATE media_objects SET state = 'VERIFY_FAILED'
+ WHERE provider = ? AND song_id = ? AND bitrate = ? AND ext = ?;
+
+-- Rows that have never had their file stat'ed since it was written. Empty for a library the last
+-- weekly sweep has seen, which is what makes the boot sweep touch zero files.
+unstampedObjects:
+SELECT * FROM media_objects
+ WHERE state = 'READY' AND verified_at_ms IS NULL
+ ORDER BY provider, song_id, bitrate, ext
+ LIMIT ?;
+
+markVerified:
+UPDATE media_objects SET verified_at_ms = ?
+ WHERE provider = ? AND song_id = ? AND bitrate = ? AND ext = ?;
+
+cachedCountAndBytes:
+SELECT COALESCE((SELECT final_count FROM cache_totals WHERE id = 0), 0) AS song_count,
+       COALESCE((SELECT final_bytes FROM cache_totals WHERE id = 0), 0) AS total_bytes;
+
+pinnedCount:
+SELECT COUNT(*) FROM library WHERE pinned = 1;
+
+pinnedBytes:
+SELECT COALESCE(SUM(bytes), 0) FROM library WHERE pinned = 1;
+
+cachedRowCount:
+SELECT COUNT(*) FROM library;
+
+seedTotals:
+INSERT OR IGNORE INTO cache_totals(id, final_bytes, final_count, part_bytes, part_count) VALUES (0, 0, 0, 0, 0);
+
+syncTotals
+{
+  INSERT OR IGNORE INTO cache_totals(id, final_bytes, final_count, part_bytes, part_count) VALUES (0, 0, 0, 0, 0);
+  UPDATE cache_totals
+     SET final_bytes = (SELECT COALESCE(SUM(bytes), 0) FROM library),
+         final_count = (SELECT COUNT(*) FROM library)
+   WHERE id = 0;
+}
+
+setPartTotals:
+UPDATE cache_totals SET part_bytes = ?, part_count = ? WHERE id = 0;
+
+partTotals:
+SELECT COALESCE((SELECT part_bytes FROM cache_totals WHERE id = 0), 0) AS part_bytes,
+       COALESCE((SELECT part_count FROM cache_totals WHERE id = 0), 0) AS part_count;
+
+clearProtectedKeys:
+DELETE FROM protected_keys;
+
+putProtectedKey:
+INSERT OR REPLACE INTO protected_keys(provider, song_id, reason) VALUES (?, ?, ?);
+
+protectedKeyCount:
+SELECT COUNT(*) FROM protected_keys;
+
+demotePin:
+UPDATE library SET pinned = 0, pinned_at_ms = NULL WHERE provider = ? AND song_id = ?;
+
+setPin:
+UPDATE library SET pinned = ?, pinned_at_ms = ? WHERE provider = ? AND song_id = ?;
+
+touchUsed:
+UPDATE library SET last_used_ms = ? WHERE provider = ? AND song_id = ?;
+
+bumpPlayCount:
+UPDATE library SET play_count = play_count + 1 WHERE provider = ? AND song_id = ?;
+
+addFavorite:
+INSERT OR IGNORE INTO favorites(provider, song_id, added_at_ms) VALUES (?, ?, ?);
+
+removeFavorite:
+DELETE FROM favorites WHERE provider = ? AND song_id = ?;
+
+isFavorite:
+SELECT EXISTS(SELECT 1 FROM favorites WHERE provider = ? AND song_id = ?);
+
+allFavorites:
+SELECT s.* FROM favorites f JOIN songs s ON s.provider = f.provider AND s.song_id = f.song_id ORDER BY f.added_at_ms DESC;
+
+favoriteKeys:
+SELECT provider, song_id FROM favorites;
+
+insertHistory:
+INSERT INTO play_history(provider, song_id, played_at_ms) VALUES (?, ?, ?);
+
+-- Keeps the newest ? rows, driven off idx_history: one seek for the cut timestamp, then a
+-- covering-index range delete. `LIMIT ?` still means "keep ?", so the call site is unchanged.
+-- Ties at the cut millisecond are all kept, which is the right reading of "newest 500" and is
+-- what keeps the trim monotone: a rowid-range form would stop trimming entirely if a clock
+-- correction ever made id order disagree with played_at order.
+trimHistory:
+DELETE FROM play_history
+ WHERE played_at_ms < (SELECT MIN(t) FROM (SELECT played_at_ms AS t FROM play_history ORDER BY played_at_ms DESC LIMIT ?));
+
+deleteOrphanHistory:
+DELETE FROM play_history
+ WHERE NOT EXISTS (
+  SELECT 1 FROM songs s WHERE s.provider = play_history.provider AND s.song_id = play_history.song_id
+);
+
+-- FK enforcement is a connection setting that can be off (a pre-v1 store, a driver connection
+-- that missed the PRAGMA). These two make that failure mode self-healing on the weekly sweep
+-- instead of permanent.
+deleteOrphanLibrary:
+DELETE FROM library
+ WHERE NOT EXISTS (SELECT 1 FROM songs s WHERE s.provider = library.provider AND s.song_id = library.song_id);
+
+deleteOrphanObjects:
+DELETE FROM media_objects
+ WHERE NOT EXISTS (SELECT 1 FROM songs s WHERE s.provider = media_objects.provider AND s.song_id = media_objects.song_id);
+
+-- Safe under SQLite bare-column rules: the join is on songs' primary key, so each group matches
+-- exactly one row.
+recentHistory:
+SELECT s.* FROM play_history h JOIN songs s ON s.provider = h.provider AND s.song_id = h.song_id GROUP BY h.provider, h.song_id ORDER BY MAX(h.played_at_ms) DESC LIMIT ?;
+
+-- NOT safe: album_name/art_url_500 are neither aggregated nor grouped, so the tile rendered
+-- whichever row the group scan happened to visit, a value that can change after a VACUUM.
+-- rn = 1 is the song of the album's most recent play, deterministically.
+recentAlbums:
+SELECT s.album_id AS albumId,
+       s.album_name AS albumName,
+       s.art_url_500 AS artUrl,
+       h.played_at_ms AS lastPlayedMs
+  FROM play_history h
+  JOIN songs s ON s.provider = h.provider AND s.song_id = h.song_id
+ WHERE s.album_id IS NOT NULL AND s.album_id != ''
+   AND h.id = (SELECT h2.id
+                 FROM play_history h2
+                 JOIN songs s2 ON s2.provider = h2.provider AND s2.song_id = h2.song_id
+                WHERE s2.provider = s.provider AND s2.album_id = s.album_id
+                ORDER BY h2.played_at_ms DESC, h2.id DESC
+                LIMIT 1)
+ ORDER BY lastPlayedMs DESC, albumId ASC
+ LIMIT ?;
+
+upsertSearchHistory:
+INSERT OR REPLACE INTO search_history(query_key, display, used_at_ms) VALUES (?, ?, ?);
+
+trimSearchHistory:
+DELETE FROM search_history WHERE query_key NOT IN (SELECT query_key FROM search_history ORDER BY used_at_ms DESC LIMIT ?);
+
+listSearchHistory:
+SELECT * FROM search_history ORDER BY used_at_ms DESC LIMIT ?;
+
+clearSearchHistory:
+DELETE FROM search_history;
+
+getSetting:
+SELECT value FROM settings WHERE key = ?;
+
+putSetting:
+INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?);
+
+putHomeCache:
+INSERT OR REPLACE INTO home_cache(key, json, fetched_at_ms) VALUES (?, ?, ?);
+
+getHomeCache:
+SELECT * FROM home_cache WHERE key = ?;
+
+evictStaleHomeCache:
+DELETE FROM home_cache WHERE fetched_at_ms < ?;
+
+-- Same semantics as "delete everything not among the newest ?", without 200 bound parameters.
+evictHomeCacheKeepNewest:
+DELETE FROM home_cache WHERE key NOT IN (SELECT key FROM home_cache ORDER BY fetched_at_ms DESC LIMIT ?);
+
+upsertIntent:
+INSERT INTO download_intents(provider, song_id, reason, bitrate, enqueued_at_ms)
+VALUES (?, ?, ?, ?, ?)
+ON CONFLICT(provider, song_id) DO UPDATE SET
+  reason = excluded.reason,
+  bitrate = excluded.bitrate,
+  enqueued_at_ms = excluded.enqueued_at_ms
+WHERE (CASE excluded.reason WHEN 'USER_NOW' THEN 0 WHEN 'USER_BULK' THEN 1 WHEN 'PREFETCH_NEXT' THEN 2 ELSE 3 END)
+    <= download_intents.priority;
+
+deleteIntent:
+DELETE FROM download_intents WHERE provider = ? AND song_id = ?;
+
+selectIntent:
+SELECT * FROM download_intents WHERE provider = ? AND song_id = ?;
+
+allIntents:
+SELECT * FROM download_intents;
+
+intentsOrdered:
+SELECT * FROM download_intents ORDER BY priority, enqueued_at_ms;

@@ -1,0 +1,353 @@
+name: ci
+
+# Action pinning policy: every `uses:` is pinned to its commit SHA with the
+# major tag as trailing comment (supply-chain: tags are mutable, SHAs are not).
+# Bump via: gh api repos/<owner>/<repo>/commits/<tag> --jq .sha (dependabot
+# understands SHA+tag-comment pins and proposes updates weekly).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "30 21 * * *" # nightly 03:00 IST
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+  checks: write
+  actions: read
+  security-events: write
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  wrapper-validation:
+    name: supply-chain/wrapper
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: gradle/actions/wrapper-validation@0b6dd653ba04f4f93bf581ec31e66cbd7dcb644d # v4
+
+  # ── Static analysis (ktlint + detekt + Android Lint + SQLDelight) ─────────
+  lint:
+    name: lint
+    needs: wrapper-validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@0b6dd653ba04f4f93bf581ec31e66cbd7dcb644d # v4
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+          cache-encryption-key: ${{ secrets.GRADLE_ENCRYPTION_KEY }}
+          gradle-home-cache-cleanup: true
+      - name: ktlint + detekt + Android lint
+        run: ./gradlew ktlintCheck detekt :androidApp:lintDebug
+      - name: lane discipline check (tools/lane-check.sh)
+        # Hermetic: a grep over shared/src/commonMain plus the ALLOWED table in the script.
+        # The runtime Lane assertion only fires when a wrong-lane call actually executes, so a
+        # rarely-taken branch would never trip it — this is the lexical gate that fails at PR time.
+        # The script also fails on a STALE ALLOWED entry, so an exception cannot outlive the line
+        # it was granted for.
+        run: ./tools/lane-check.sh
+      - name: pbxproj structure check (iosApp/Tools/check_pbxproj.py)
+        # Hermetic: pure static parse of iosApp/iosApp.xcodeproj/project.pbxproj —
+        # no secrets, no network, no Xcode, so it is presubmit/fork-safe.
+        # The script resolves both the pbxproj and the `iosApp/` Swift walk
+        # relative to CWD, so it MUST run from inside iosApp/.
+        working-directory: iosApp
+        run: python3 Tools/check_pbxproj.py
+      - name: Upload lint reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: lint-reports
+          path: |
+            **/build/reports/lint-results-debug.html
+            **/build/reports/detekt/detekt.html
+            **/build/reports/ktlint/**
+            **/build/reports/detekt/**
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # ── Unit + contract tests (JVM) ───────────────────────────────────────────
+  test:
+    name: test/jvm
+    needs: wrapper-validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@0b6dd653ba04f4f93bf581ec31e66cbd7dcb644d # v4
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+      - name: JVM tests (hermetic)
+        # --rerun re-executes ONLY the test task, so results are never stale while
+        # the Kotlin compilation stays cached. --rerun-tasks would force a full
+        # main+test recompile on every run for no correctness gain.
+        # contractDrift + probeCi are nightly-only (live catalog) — see
+        # nightly/contract-drift and nightly/probe.
+        run: ./gradlew :shared:jvmTest --rerun
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: jvmTest-results
+          path: |
+            shared/build/test-results/**
+            shared/build/reports/tests/**
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # ── Android debug (presubmit-safe: no signing secrets) ─────────────────
+  # Signed prod (R8 APK + AAB) lives in builds.yml (manual / tags), which
+  # skips gracefully without keystore secrets instead of failing presubmit.
+  android-debug:
+    name: android/debug
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # VERSION → versionCode
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@0b6dd653ba04f4f93bf581ec31e66cbd7dcb644d # v4
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+      - name: Assemble debug
+        run: ./gradlew :androidApp:assembleDebug
+      - name: Version + checksums
+        run: |
+          set -euo pipefail
+          echo "VERSION=$(cat VERSION)"
+          shopt -s nullglob
+          apks=(androidApp/build/outputs/apk/debug/*.apk)
+          if [ "${#apks[@]}" -eq 0 ]; then echo "MISSING ARTIFACT: no debug APK produced"; exit 1; fi
+          ls -lh "${apks[@]}"
+          sha256sum "${apks[@]}"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: apks-debug
+          path: |
+            androidApp/build/outputs/apk/debug/*.apk
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # ── iOS klibs (Kotlin/Native, no Xcode link — cheap gate) ────────────────
+  ios-klib:
+    name: ios/klib
+    needs: wrapper-validation
+    runs-on: macos-14
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@0b6dd653ba04f4f93bf581ec31e66cbd7dcb644d # v4
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+      - name: Select Xcode 16.2 (pin — FAANG hermetic)
+        uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1
+        with:
+          xcode-version: "16.2"
+      - name: Compile iOS klibs
+        run: ./gradlew :shared:compileKotlinIosSimulatorArm64 :shared:compileKotlinIosArm64
+
+  # ── iOS simulator (full Xcode link — FAANG presubmit for Swift) ──────────
+  ios:
+    name: ios/simulator
+    needs: [lint, test]
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@0b6dd653ba04f4f93bf581ec31e66cbd7dcb644d # v4
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+      - name: Select Xcode 16.2
+        uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1
+        with:
+          xcode-version: "16.2"
+      - name: Cache Kotlin/Native + DerivedData
+        # NOTE: shared/build is intentionally NOT cached (stale klibs caused
+        # phantom-green simulator links); only konan + DerivedData persist.
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.konan
+            ~/Library/Developer/Xcode/DerivedData
+          key: ios-${{ runner.os }}-${{ hashFiles('gradle/libs.versions.toml', 'shared/build.gradle.kts', 'shared/src/**/*.kt') }}
+          restore-keys: ios-${{ runner.os }}-
+      - name: Build shared frameworks
+        run: ./gradlew :shared:assemble
+      - name: Kotlin/Native simulator unit tests
+        # iosSimulatorArm64Test executes shared's commonTest on the simulator —
+        # without it the whole commonTest source set is compile-only on iOS.
+        run: ./gradlew :shared:iosSimulatorArm64Test
+      - name: xcodebuild simulator (CODE_SIGNING_ALLOWED=NO)
+        run: |
+          set -o pipefail
+          xcodebuild -project iosApp/iosApp.xcodeproj \
+            -scheme iosApp \
+            -sdk iphonesimulator \
+            -destination 'platform=iOS Simulator,name=iPhone 16,OS=18.2' \
+            -configuration Debug \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build 2>&1 | tee /tmp/xcode-sim.log
+          EXIT=${PIPESTATUS[0]}
+          if [ $EXIT -ne 0 ]; then cat /tmp/xcode-sim.log; exit $EXIT; fi
+      - name: Upload Xcode logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: xcode-logs
+          path: |
+            ~/Library/Logs/DiagnosticReports/*.ips
+            /tmp/xcode-*.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # ── dylan-sign (Go): must build + vet on macOS and Linux ───────────────
+  gosign:
+    name: gosign/${{ matrix.os }}
+    needs: wrapper-validation
+    strategy:
+      matrix:
+        os: [macos-14, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.22"
+          cache-dependency-path: tools/dylan-sign/go.sum
+      - name: go build + vet + test
+        working-directory: tools/dylan-sign
+        run: |
+          go build ./...
+          go vet ./...
+          go test ./...
+
+  # ── Falsifiability gate (schedule / manual only; intentionally RED) ─────
+  # Each of the 12 mutations below is a single line, and each is pinned to the
+  # test that MUST go red because of it. A mutation that does not redden its
+  # test is a hard failure of this job, not a warning: it means the test named
+  # in tools/fuzz-mutation-gate.sh is vacuous, which is precisely the failure
+  # mode this repo keeps hitting (feedback-ledger.md:92-94).
+  #
+  # It cannot share a job with anything else — it *deliberately* breaks the
+  # build while it runs — and it must never be a presubmit gate.
+  #
+  # The script mutates a private rsync'd copy of the tree, never the checkout,
+  # so nothing another job reads is ever in a broken state.
+  nightly-mutation-gate:
+    name: nightly/fuzz-mutation
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@0b6dd653ba04f4f93bf581ec31e66cbd7dcb644d # v4
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+      - name: Fuzzy mutation gate (12 mutations; a vacuous test fails the job)
+        run: ./tools/fuzz-mutation-gate.sh
+      - name: Upload the scratch tree on failure
+        # FUZZ_MUT_KEEP makes the script leave its scratch copy behind, which is the
+        # only way to read a red mutation's actual failure message without
+        # re-running it. Uploaded on failure only: on a green gate there is nothing
+        # there, and on a red one it is the diagnosis.
+        if: failure()
+        env:
+          FUZZ_MUT_KEEP: "1"
+        run: |
+          scratch=$(ls -dt "${RUNNER_TEMP}"/dylan-mutgate.* 2>/dev/null | head -1 || true)
+          echo "scratch=${scratch:-none}"
+          if [ -n "$scratch" ]; then
+            tar -czf fuzz-mutation-gate-tree.tgz -C "$(dirname "$scratch")" "$(basename "$scratch")" \
+              --exclude='*/build/' --exclude='*/.gradle/' || true
+            ls -lh fuzz-mutation-gate-tree.tgz
+          fi
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: failure()
+        with:
+          name: fuzz-mutation-gate-scratch
+          path: fuzz-mutation-gate-tree.tgz
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # ── Nightly live probe (schedule / manual only) ─────────────────────────
+  nightly-probe-local:
+    name: nightly/probe
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@0b6dd653ba04f4f93bf581ec31e66cbd7dcb644d # v4
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+      - name: Fast live probe (catalog sanity)
+        run: ./gradlew :shared:probeLocal -PprobeFast
+      - name: Live structural probe (S1-S3, M0-gated)
+        # S1-S3 hit api.php, the plain-HTTP autocomplete fallback and the WS
+        # handshake, so this is nightly/manual only — never a presubmit gate.
+        # probeCi exits non-zero when any M0 check fails.
+        run: ./gradlew :shared:probeCi
+
+  # ── Nightly contract drift (live vs fixtures; NOT presubmit) ────────────
+  nightly-contract-drift:
+    name: nightly/contract-drift
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@0b6dd653ba04f4f93bf581ec31e66cbd7dcb644d # v4
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+      - name: Live contract drift (nightly-only, gating)
+        # Non-zero on NEW_FIELD / TYPE_DRIFT / MISSING_FIELD / MAPPING_LOSS or on
+        # any unreachable endpoint. Not presubmit: it hits the live JioSaavn API.
+        run: ./gradlew :shared:contractDrift
