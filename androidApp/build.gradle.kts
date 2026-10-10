@@ -36,26 +36,35 @@ if (keystorePropsFile.exists()) {
     keystorePropsFile.inputStream().use { keystoreProperties.load(it) }
 }
 
-// ── Semver: source of truth root/VERSION (e.g. 0.1.0) ─────────────────────
-// version.yml auto-bumps VERSION on every main push (conventional commits:
-// feat: → minor, "!:"/BREAKING CHANGE → major, else patch) and tags v<ver>.
-// versionCode advances every commit (count-based); versionName is unique per
-// commit, so each main push yields distinct, installable versioned artifacts.
-// versionCode = MAJOR*1_000_000 + MINOR*10_000 + PATCH*100 + (commitCount %100)  (Play limit 2.1B)
-// versionName = 0.1.0 (tag) / 0.1.0+42 (CI) / 0.1.0-dev.42+abc123 (local)
+// ── Semver: source of truth root/VERSION (e.g. 1.0.0) ──────────────────────
+// Release model (FAANG-style channels):
+//   main                    -> canary   versionName 1.0.0-canary.<n>  (GitHub prerelease)
+//   release/x.y             -> stable   versionName 1.0.0            (GitHub release, latest)
+//   local dev tree          ->          versionName 1.0.0+<n>.<sha>
+// VERSION is bumped once per stable cut (release.yml, workflow_dispatch only), never per
+// commit. When a cut happens the bump is DERIVED by aggregating every conventional commit
+// since the previous tag (minor on `feat:`, patch on `fix:`/`chore:`/`docs:`, else patch);
+// a major bump is a deliberate act, since it needs a `!:`/`BREAKING CHANGE` commit to reach
+// the release branch. main never has its VERSION rewritten — the canary is identified by the
+// `-canary.<n>` suffix on the tag, not by a bumped base version.
+//
+// versionCode = MAJOR*10_000_000 + MINOR*100_000 + PATCH*1_000 + (BUILD % 1_000)
+// (Play limit 2.1B, so MAJOR ≤ 210, MINOR/PATCH ≤ 99, BUILD ≤ 999 — plenty of room)
+//
+// BUILD must NOT come from `git rev-list --count HEAD`: that is a count of reachable
+// commits, so a history squash silently resets it (this repo was squashed to a single
+// commit and versionCode regressed ~24 -> 1, which would make an overwrite-install roll
+// backwards). GITHUB_RUN_NUMBER is monotonic per repo across any rewrite, so it is
+// preferred when present.
+//
+// The BUILD field is capped at 1000, not unbounded: packing an unbounded run number
+// into the same integer as the semver fields would let a large run number bleed into
+// PATCH. 1000 canaries per release line is far more headroom than this repo needs, and
+// a stricter cap would wrap backwards every 100 pushes (the old formula's bug).
 fun semver(): Triple<String, Int, String> {
     val vf = rootProject.file("VERSION")
     val base = if (vf.exists()) vf.readText().trim() else "0.1.0"
     val (maj, min, pat) = base.split(".").map { it.toInt() }
-    val cnt =
-        runCatching {
-            providers
-                .exec { commandLine("git", "rev-list", "--count", "HEAD") }
-                .standardOutput.asText
-                .get()
-                .trim()
-                .toInt()
-        }.getOrDefault(0)
     val hash =
         runCatching {
             providers
@@ -65,12 +74,37 @@ fun semver(): Triple<String, Int, String> {
                 .trim()
         }.getOrDefault("dev")
     val isCI = providers.environmentVariable("CI").isPresent || providers.environmentVariable("GITHUB_ACTIONS").isPresent
-    val code = maj * 1_000_000 + min * 10_000 + pat * 100 + (cnt % 100)
+
+    // BUILD: monotonic across history rewrites. GITHUB_RUN_NUMBER wins; commit count is the
+    // local fallback. See the comment above for why the count alone is not safe.
+    val buildNum =
+        providers
+            .environmentVariable("GITHUB_RUN_NUMBER")
+            .orNull
+            ?.trim()
+            ?.toIntOrNull()
+            ?: runCatching {
+                providers
+                    .exec { commandLine("git", "rev-list", "--count", "HEAD") }
+                    .standardOutput.asText
+                    .get()
+                    .trim()
+                    .toInt()
+            }.getOrDefault(0)
+
+    // Channel, from the ref being built rather than from a convention anyone can forget:
+    // a tag push is a stable release, main is the canary train, release/* is stabilized.
+    val refType = providers.environmentVariable("GITHUB_REF_TYPE").orNull?.trim()
+    val refName = providers.environmentVariable("GITHUB_REF_NAME").orNull?.trim()
+    val code = maj * 10_000_000 + min * 100_000 + pat * 1_000 + (buildNum % 1_000)
     val name =
         when {
-            isCI && cnt == 0 -> base
-            isCI -> "$base+$cnt"
-            else -> "$base-dev.$cnt+$hash"
+            refType == "tag" -> base
+            !isCI -> "$base+$buildNum.$hash"
+            refName == "main" -> "$base-canary.$buildNum"
+            refName != null && refName.startsWith("release/") -> base
+            buildNum == 0 -> base
+            else -> "$base+$buildNum"
         }
     return Triple(base, code, name)
 }

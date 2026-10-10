@@ -1,0 +1,176 @@
+name: canary
+
+# Canary train: every push to main produces an installable, versioned, PRE-RELEASE artifact
+# on the GitHub Releases tab. Canaries are allowed to be broken — that is the point. They are
+# cut from main, they are never what a user gets by default, and they are superseded.
+#
+# Why this exists instead of version.yml's "bump + tag on every push":
+#   - A per-commit version bump rewrote main constantly and collided on tags the moment
+#     history was ever rewritten (`fatal: tag 'v1.1.6' already exists`).
+#   - Version numbers are a release decision, not a commit by-product. main no longer has its
+#     VERSION rewritten; the canary is identified by tag suffix, not by a bumped base version.
+#
+# Signing: production secrets are used when present. When absent (the current state), an
+# EPHEMERAL keystore is generated in the job so the artifact is at least installable, and the
+# release body + artifact name say so explicitly. Adding ANDROID_KEYSTORE_PROPERTIES /
+# ANDROID_KEYSTORE_FILE transparently upgrades canaries to production-signed with no change here.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: canary-main
+  # A canary is only ever "latest of the train" — a newer one supersedes an in-flight build.
+  cancel-in-progress: true
+
+jobs:
+  canary:
+    name: build-and-prerelease
+    runs-on: ubuntu-latest
+    # Never cut a canary for a version-sync or release commit — those are bookkeeping, not builds.
+    if: "!startsWith(github.event.head_commit.message, 'chore(release):')"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0 # VERSION → versionName/versionCode
+
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@0b6dd653ba04f4f93bf581ec31e66cbd7dcb644d # v4
+        with:
+          cache-read-only: true # canaries must never mutate the remote build cache
+
+      - name: Hermetic gates (no UP-TO-DATE)
+        # A canary artifact must come from a tree that passes the same gates a merge requires.
+        # probeCi is nightly-only (live API) and lints need the Android SDK, present on the runner.
+        run: ./gradlew ktlintCheck detekt :shared:jvmTest --rerun
+
+      - name: Version stamp
+        id: ver
+        run: |
+          set -euo pipefail
+          echo "ver=$(cat VERSION)" >> "$GITHUB_OUTPUT"
+          echo "run=${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          ./gradlew -q :androidApp:properties 2>/dev/null | grep -E '^dylanVersion(Name|Code):' | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Materialize keystore (production secrets, or an ephemeral one)
+        id: keys
+        env:
+          ANDROID_KEYSTORE_PROPERTIES: ${{ secrets.ANDROID_KEYSTORE_PROPERTIES }}
+          ANDROID_KEYSTORE_FILE: ${{ secrets.ANDROID_KEYSTORE_FILE }}
+        run: |
+          set -euo pipefail
+          if [ -n "$ANDROID_KEYSTORE_PROPERTIES" ] && [ -n "$ANDROID_KEYSTORE_FILE" ]; then
+            printf '%s' "$ANDROID_KEYSTORE_PROPERTIES" | base64 --decode > keystore.properties
+            printf '%s' "$ANDROID_KEYSTORE_FILE"     | base64 --decode > dylan-release.keystore
+            test -s keystore.properties && test -s dylan-release.keystore
+            echo "kind=production" >> "$GITHUB_OUTPUT"
+            echo "Production keystore materialized — canary will be production-signed."
+            exit 0
+          fi
+          if [ -f dylan-release.keystore ]; then
+            echo "kind=production" >> "$GITHUB_OUTPUT"
+            echo "Local keystore present (workflow_dispatch) — using it."
+            exit 0
+          fi
+          # No production secret. An unsigned APK cannot be installed by Android at all, so a
+          # canary that ships one is a canary nobody can run. Generate a disposable key instead
+          # and label the artifact for what it is rather than pretending it is a release build.
+          keytool -genkeypair -v -keystore dylan-release.keystore -alias dylan-canary \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass dylancanary -keypass dylancanary \
+            -dname "CN=Dylan canary (ephemeral CI key, NOT production), O=Dylan, C=US" \
+            >/dev/null 2>&1
+          {
+            echo "storeFile=dylan-release.keystore"
+            echo "storePassword=dylancanary"
+            echo "keyAlias=dylan-canary"
+            echo "keyPassword=dylancanary"
+          } > keystore.properties
+          echo "kind=ephemeral" >> "$GITHUB_OUTPUT"
+          echo "No keystore secret — using an EPHEMERAL development keystore."
+
+      - name: Assemble release (R8 + resource shrinking, INFO-only logging)
+        run: ./gradlew :androidApp:assembleRelease
+
+      - name: Verify signature provenance
+        id: sig
+        run: |
+          set -euo pipefail
+          APK=$(ls androidApp/build/outputs/apk/release/*.apk | head -n1)
+          APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | head -n1)
+          "$APKSIGNER" verify --print-certs "$APK" > sig.txt
+          if grep -qi 'Android Debug' sig.txt; then
+            # Only tolerable when we generated the key ourselves, and then only as a canary.
+            [ "${{ steps.keys.outputs.kind }}" = "ephemeral" ] || {
+              echo "ERROR: release APK fell back to the debug signing config."; exit 1;
+            }
+          fi
+          echo "apk=$APK" >> "$GITHUB_OUTPUT"
+
+      - name: Copy artifact with an honest name
+        run: |
+          set -euo pipefail
+          KIND="${{ steps.keys.outputs.kind }}"
+          [ "$KIND" = "ephemeral" ] && KIND="devsigned" || KIND="signed"
+          cp "${{ steps.sig.outputs.apk }}" "dylan-${{ steps.ver.outputs.ver }}-canary.${{ steps.ver.outputs.run }}-${{ steps.ver.outputs.sha }}-$KIND.apk"
+
+      - name: Publish canary to the Releases tab
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VER: ${{ steps.ver.outputs.ver }}
+          RUN: ${{ steps.ver.outputs.run }}
+          SHA: ${{ steps.ver.outputs.sha }}
+          KIND: ${{ steps.keys.outputs.kind }}
+        run: |
+          set -euo pipefail
+          TAG="v$VER-canary.$RUN"
+          ARTIFACT="dylan-$VER-canary.$RUN-$SHA-$( [ "$KIND" = ephemeral ] && echo devsigned || echo signed ).apk"
+          if [ "$KIND" = ephemeral ]; then
+            SIGN_NOTE="⚠️ **Development-signed.** No production keystore is configured for this repo, so this APK was signed with a throwaway key generated in CI. It installs and updates fine, but it is **not** a build Google Play would accept, and it will not update-install over a production-signed build (uninstall first)."
+          else
+            SIGN_NOTE="✅ **Production-signed** with the repository's release keystore."
+          fi
+          {
+            echo "Canary of \`main\` at \`$SHA\`."
+            echo
+            echo "$SIGN_NOTE"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| version | \`$VER-canary.$RUN\` |"
+            echo "| commit | \`$SHA\` |"
+            echo "| channel | canary (from \`main\`) |"
+            echo
+            echo "Built from the gates in \`ci.yml\` (ktlint, detekt, jvmTest, lint, assemble, iOS klib) plus a re-run of the Kotlin gates in this workflow. Logging is at INFO — DEBUG is reserved for debuggable builds."
+          } > notes.md
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$ARTIFACT" notes.md --clobber
+          else
+            gh release create "$TAG" "$ARTIFACT" notes.md \
+              --prerelease --latest=false \
+              --title "Canary $VER — build $RUN"
+          fi
+          echo "Published $TAG (prerelease, not latest)."
+
+      - name: Prune the canary train
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # Keep the most recent 10 canaries so the Releases tab stays readable; older ones are
+        # superseded by definition. Real releases are never touched — they are not prereleases.
+        run: |
+          set -euo pipefail
+          gh release list --limit 100 --json tagName,isPrerelease \
+            --jq '.[] | select(.isPrerelease and (.tagName | contains("-canary."))) | .tagName' \
+          | head -n -10 | while read -r t; do
+              [ -n "$t" ] && gh release delete "$t" --cleanup-tag --yes || true
+            done

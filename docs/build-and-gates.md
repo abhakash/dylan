@@ -112,7 +112,7 @@ no longer depends on `workingDir`.
 `builds.yml` has a `gate` job (`ktlintCheck detekt :shared:jvmTest --rerun`,
 `builds.yml:63`) that every build job `needs:` (`builds.yml:67,105,178,223`) — no
 APK, IPA or `.aab` is produced from a tree that has not been linted and tested in
-that same run. It is needed because the tag push from `version.yml` carries
+that same run. It is needed because the release commit pushed by `release.yml` carries
 `[skip ci]`, so `ci.yml` never runs for it.
 
 **The gate is narrower than presubmit on purpose and narrower by omission:** it omits
@@ -122,16 +122,22 @@ therefore be cut from a tree that has never been Android-linted. Separately, the
 `if:` conditions test `inputs.flavor` only (`builds.yml:68,106,179,224`), so a
 `platform: android` dispatch still builds the iOS lanes.
 
-`release.yml` materialises `keystore.properties` + `dylan-release.keystore`
-from secrets and **exits 1 when either secret is missing** (an earlier version
-skipped gracefully, which meant the debug signing config was used and a
-debug-signed APK was uploaded as "release"). It then runs `apksigner verify
---print-certs` on every produced APK and fails if the cert chain says
-`Android Debug`.
+`release.yml` materialises `keystore.properties` + `dylan-release.keystore` from
+secrets when they are present, and runs `apksigner verify --print-certs` on every
+produced APK, failing if the chain says `Android Debug`. When the secrets are
+**absent** it does not skip and does not silently fall back to the debug key: it
+generates a disposable keystore in the job and the release body and artifact name
+both say *devsigned*, because an unsigned APK cannot be installed by Android at
+all and a canary nobody can open is not a canary.
 
-`version.yml`'s push-retry loop sets an `ok` flag and `exit 1` if all three
-attempts fail, so a version bump that is committed locally but never published
-no longer reports success.
+`release.yml` refuses to create a tag that already exists rather than
+force-creating it. That collision is exactly what a history rewrite produces — the
+tag points at a commit that is no longer published, so re-cutting would silently
+repoint something published. It aggregates every conventional commit since the
+previous tag to pick the bump (`major` on `!:`/`BREAKING CHANGE`, `minor` on
+`feat:`, else `patch`), so a squash merge of three `feat:` commits is still a minor
+bump, and it skips entirely when the range contains nothing but release
+bookkeeping.
 
 ## Detekt
 

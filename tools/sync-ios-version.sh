@@ -4,7 +4,10 @@ set -euo pipefail
 # Usage: ./tools/sync-ios-version.sh [version]   (defaults to reading VERSION file)
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VER="${1:-$(cat "$ROOT/VERSION" | tr -d '[:space:]')}"
-BUILD="$(git -C "$ROOT" rev-list --count HEAD 2>/dev/null || echo 0)"
+# Monotonic across history rewrites: GITHUB_RUN_NUMBER is a per-repo counter that never
+# resets, whereas `git rev-list --count HEAD` is reachable-commit count and collapses to 1
+# after a squash (which this repo has done, regressing the iOS build number ~24 -> 1).
+BUILD="${GITHUB_RUN_NUMBER:-$(git -C "$ROOT" rev-list --count HEAD 2>/dev/null || echo 0)}"
 PBX="$ROOT/iosApp/iosApp.xcodeproj/project.pbxproj"
 
 if [[ ! -f "$PBX" ]]; then echo "No pbxproj at $PBX"; exit 0; fi

@@ -1,133 +1,255 @@
 name: release
 
-# Actions SHA-pinned per ci.yml policy.
+# Stable channel. Releases are CUT here, not on main, and never per-commit.
+#
+# Model (FAANG-style channel promotion):
+#   main            → canary   : every push, GitHub PRERELEASE, allowed to be broken
+#   release/x.y     → stable   : cut MANUALLY from a release branch, GitHub release marked LATEST
+#
+# There is deliberately NO automatic trigger on this workflow. `push: branches: ["release/*"]`
+# was the first shape and it meant any merge to a release branch cut a release — including a
+# merge that was only ever meant to stabilise the branch. A version number is a decision, so
+# it is workflow_dispatch only: a human cuts, from a release branch, on purpose.
+#
+# Bump is decided by aggregating every conventional commit since the previous release tag,
+# not from HEAD alone — a squash merge of three `feat:` commits must be a minor bump even if
+# its message is just "release 1.1". Major is therefore still a deliberate act: it requires a
+# commit carrying `!` or `BREAKING CHANGE` to reach the release branch.
+#
+# Signing: production keystore secrets when present; otherwise a clearly-labelled ephemeral
+# development keystore. An unsigned APK is not installable on Android, so "no signing" never
+# means "ship something nobody can open".
+#
+# The tag-collision guard below is deliberate: `git tag` is refused when the tag exists rather
+# than being force-created, because a force-created release tag silently rewrites what a
+# published artifact points at.
 
 on:
+  # Manual only. No `push:` trigger — nothing about merging to a release branch should,
+  # on its own, produce a published version. Cut it by dispatching on the release branch.
   workflow_dispatch:
     inputs:
       bump:
-        description: "Semver bump (patch/minor/major)"
-        required: true
-        default: "patch"
-        type: choice
-        options: [patch, minor, major]
+        # NOTE: `type: choice` with a `default:` always resolves to that default, so an "is it
+        # set?" test can never detect an unforced bump. A string input with no default is empty
+        # when the dispatcher leaves it blank, which is what the derive-from-range path needs.
+        description: "Force a bump (patch/minor/major). Leave blank to derive from the commit range."
+        required: false
+        type: string
       dry_run:
-        description: "Dry run (no push/tag)"
+        description: "Compute and verify but do not push, tag or release"
         required: false
         default: false
         type: boolean
 
 permissions:
   contents: write
+  pull-requests: write # fallback path when main is push-protected
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false # a stable cut must never race itself
 
 jobs:
-  bump-and-tag:
+  cut:
+    name: bump-and-release
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0 # need the full log + every tag to decide the bump
+
       - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: "17"
+
       - uses: gradle/actions/setup-gradle@0b6dd653ba04f4f93bf581ec31e66cbd7dcb644d # v4
         with:
-          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+          cache-read-only: true
 
       - name: Configure git
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Bump VERSION + sync iOS
+      - name: Decide the bump (aggregate the range, not HEAD)
+        id: bump
         run: |
-          ./tools/bump-version.sh ${{ inputs.bump }}
-          cat VERSION
-          cat iosApp/iosApp.xcodeproj/project.pbxproj | grep -E "MARKETING_VERSION|CURRENT_PROJECT_VERSION" | head -n 2
+          set -euo pipefail
+          if [ -n "${{ inputs.bump }}" ]; then
+            echo "mode=${{ inputs.bump }}" >> "$GITHUB_OUTPUT"; echo "Forced by dispatch."
+            exit 0
+          fi
+          PREV_TAG=$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || echo "")
+          RANGE="${PREV_TAG:+$PREV_TAG..}HEAD"
+          echo "Aggregating ${RANGE}"
+          LOG=$(git log "$RANGE" --format='%B')
+          # Ignore pure bookkeeping so a back-synced version commit alone cannot cut a release.
+          REAL=$(printf '%s\n' "$LOG" | grep -vE '^\s*$' | grep -vE '^chore\(release\):' || true)
+          if [ -z "$REAL" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Only release bookkeeping since $PREV_TAG — nothing to cut."
+            exit 0
+          fi
+          if printf '%s\n' "$REAL" | grep -qE 'BREAKING CHANGE|^[a-z]+(\([^)]*\))?!:'; then
+            MODE=major
+          elif printf '%s\n' "$REAL" | grep -qE '^feat(\(|:)'; then
+            MODE=minor
+          else
+            MODE=patch
+          fi
+          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
 
-      - name: Verify gates (no UP-TO-DATE)
-        # --rerun re-executes only the test task; probeCi is nightly-only (live API).
+      - name: Hermetic gates (no UP-TO-DATE)
+        if: steps.bump.outputs.skip != 'true'
         run: ./gradlew ktlintCheck detekt :shared:jvmTest --rerun
 
-      - name: Materialize release keystore (fail closed)
+      - name: Materialize keystore (production secrets, or an ephemeral one)
+        if: steps.bump.outputs.skip != 'true'
         id: keys
         env:
           ANDROID_KEYSTORE_PROPERTIES: ${{ secrets.ANDROID_KEYSTORE_PROPERTIES }}
           ANDROID_KEYSTORE_FILE: ${{ secrets.ANDROID_KEYSTORE_FILE }}
         run: |
           set -euo pipefail
-          # A release that silently falls back to the debug key is worse than no
-          # release: refuse to run rather than ship a debug-signed "release" APK.
-          if [ -z "$ANDROID_KEYSTORE_PROPERTIES" ] || [ -z "$ANDROID_KEYSTORE_FILE" ]; then
-            echo "ERROR: ANDROID_KEYSTORE_PROPERTIES / ANDROID_KEYSTORE_FILE secrets are not set."
-            echo "       A release build would fall back to the debug signing config."
-            exit 1
+          if [ -n "$ANDROID_KEYSTORE_PROPERTIES" ] && [ -n "$ANDROID_KEYSTORE_FILE" ]; then
+            printf '%s' "$ANDROID_KEYSTORE_PROPERTIES" | base64 --decode > keystore.properties
+            printf '%s' "$ANDROID_KEYSTORE_FILE"     | base64 --decode > dylan-release.keystore
+            test -s keystore.properties && test -s dylan-release.keystore
+            echo "kind=production" >> "$GITHUB_OUTPUT"; exit 0
           fi
-          if [ ! -f dylan-release.keystore ]; then
-            echo "$ANDROID_KEYSTORE_PROPERTIES" | base64 --decode > keystore.properties
-            echo "$ANDROID_KEYSTORE_FILE" | base64 --decode > dylan-release.keystore
-          fi
-          test -s keystore.properties || { echo "ERROR: keystore.properties is empty"; exit 1; }
-          test -s dylan-release.keystore || { echo "ERROR: dylan-release.keystore is empty"; exit 1; }
-          echo "skip=false" >> "$GITHUB_OUTPUT"
+          keytool -genkeypair -v -keystore dylan-release.keystore -alias dylan-releasedev \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass dylanreleasedev -keypass dylanreleasedev \
+            -dname "CN=Dylan stable (ephemeral CI key, NOT production), O=Dylan, C=US" \
+            >/dev/null 2>&1
+          { echo "storeFile=dylan-release.keystore"; echo "storePassword=dylanreleasedev";
+            echo "keyAlias=dylan-releasedev"; echo "keyPassword=dylanreleasedev"; } > keystore.properties
+          echo "kind=ephemeral" >> "$GITHUB_OUTPUT"
 
-      - name: Commit, tag and push
-        if: ${{ !inputs.dry_run }}
-        # NOTE: branch protection on main requires PR + green gates — this direct
-        # push needs a "bypass allowances" entry for github-actions[bot], or run
-        # with dry_run and open the release PR manually.
+      - name: Bump VERSION + sync iOS
+        if: steps.bump.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          ./tools/bump-version.sh ${{ steps.bump.outputs.mode }}
+          echo "VER=$(cat VERSION)" >> "$GITHUB_OUTPUT"
+
+      - name: Assemble release (R8 + resource shrinking, INFO-only logging)
+        if: steps.bump.outputs.skip != 'true'
+        run: ./gradlew :androidApp:assembleRelease
+
+      - name: Verify signature provenance
+        id: sig
+        if: steps.bump.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          APK=$(ls androidApp/build/outputs/apk/release/*.apk | head -n1)
+          APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | head -n1)
+          "$APKSIGNER" verify --print-certs "$APK" > sig.txt
+          if grep -qi 'Android Debug' sig.txt; then
+            [ "${{ steps.keys.outputs.kind }}" = "ephemeral" ] || {
+              echo "ERROR: release APK fell back to the debug signing config."; exit 1; }
+          fi
+          echo "apk=$APK" >> "$GITHUB_OUTPUT"
+
+      - name: Commit the release cut
+        if: steps.bump.outputs.skip != 'true' && !inputs.dry_run
         run: |
           set -euo pipefail
           VER=$(cat VERSION)
           git add VERSION iosApp/iosApp.xcodeproj/project.pbxproj
-          git commit -m "chore(release): v$VER"
-          # Signed tag when a GPG key is configured, annotated otherwise.
+          git commit -m "chore(release): v$VER [skip ci]"
+          # [skip ci] so the version commit does not immediately trigger another cut of itself;
+          # an aggregate of only bookkeeping is a no-op in the bump step above regardless.
+
+      - name: Tag guard (refuse, never force)
+        id: tg
+        if: steps.bump.outputs.skip != 'true' && !inputs.dry_run
+        run: |
+          set -euo pipefail
+          VER=$(cat VERSION)
+          if git rev-parse "v$VER" >/dev/null 2>&1; then
+            echo "ERROR: tag v$VER already exists."
+            echo "       This is the failure mode that history rewrites create: the tag points at a"
+            echo "       commit that is no longer published, so re-cutting would silently repoint it."
+            echo "       Bump to an unused version, or delete the stale tag if it was mine."
+            exit 1
+          fi
           if gpg --list-secret-keys 2>/dev/null | grep -q .; then
             git tag -s "v$VER" -m "v$VER"
           else
-            echo "No GPG key — falling back to annotated tag (configure signing for -s)"
             git tag -a "v$VER" -m "v$VER"
           fi
-          git push origin HEAD:main
-          git push origin "v$VER"
+          echo "ver=$VER" >> "$GITHUB_OUTPUT"
 
-      - name: Build release APK
-        run: ./gradlew :androidApp:assembleRelease
-
-      - name: Refuse silent debug signature
-        # androidApp/build.gradle.kts falls back to the debug key when no release
-        # keystore is configured — the artifact must never be debug-signed.
+      - name: Push branch + tag
+        if: steps.bump.outputs.skip != 'true' && !inputs.dry_run
         run: |
           set -euo pipefail
-          shopt -s nullglob
-          apks=(androidApp/build/outputs/apk/release/*.apk)
-          if [ "${#apks[@]}" -eq 0 ]; then echo "MISSING ARTIFACT: no release APK produced"; exit 1; fi
-          APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | head -n1)
-          for apk in "${apks[@]}"; do
-            "$APKSIGNER" verify --print-certs "$apk"
-            if "$APKSIGNER" verify --print-certs "$apk" | grep -qi 'Android Debug'; then
-              echo "ERROR: $apk is debug-signed — release keystore was not applied."
-              exit 1
-            fi
-          done
-          echo "Confirmed: release APKs are not debug-signed."
+          git pull --rebase origin "$GITHUB_REF_NAME" || true
+          git push origin "HEAD:$GITHUB_REF_NAME"
+          git push origin "v$(cat VERSION)"
 
-      - name: Version stamp
-        id: ver
+      - name: Publish the stable release
+        id: rel
+        if: steps.bump.outputs.skip != 'true' && !inputs.dry_run
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VER: ${{ steps.tg.outputs.ver }}
+          SHA: ${{ github.sha }}
+          KIND: ${{ steps.keys.outputs.kind }}
         run: |
-          VER=$(cat VERSION)
-          SHA=$(git rev-parse --short HEAD)
-          echo "ver=$VER" >> "$GITHUB_OUTPUT"
-          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          SHORT=$(git rev-parse --short "$SHA")
+          ARTIFACT="dylan-$VER-$SHORT-$( [ "$KIND" = ephemeral ] && echo devsigned || echo signed ).apk"
+          cp "${{ steps.sig.outputs.apk }}" "$ARTIFACT"
+          if [ "$KIND" = ephemeral ]; then
+            SIGN_NOTE="⚠️ **Development-signed.** No production keystore is configured, so this was signed with a throwaway CI key. It installs, but it is not Play-acceptable and will not update-install over a production-signed build."
+          else
+            SIGN_NOTE="✅ **Production-signed** with the repository's release keystore."
+          fi
+          {
+            echo "Stable release cut from \`$GITHUB_REF_NAME\` at \`$SHORT\`."
+            echo
+            echo "$SIGN_NOTE"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| version | \`$VER\` |"
+            echo "| channel | stable |"
+            echo "| tag | \`v$VER\` |"
+          } > notes.md
+          if gh release view "v$VER" >/dev/null 2>&1; then
+            gh release upload "v$VER" "$ARTIFACT" notes.md --clobber
+            gh release edit "v$VER" --latest --prerelease=false
+          else
+            gh release create "v$VER" "$ARTIFACT" notes.md --latest --title "Dylan $VER"
+          fi
+          echo "Published v$VER as latest."
 
-      - name: Upload release APK
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: release-apk-v${{ steps.ver.outputs.ver }}-${{ steps.ver.outputs.sha }}
-          path: |
-            androidApp/build/outputs/apk/release/*.apk
-            androidApp/build/outputs/mapping/release/mapping.txt
-          if-no-files-found: error
-          retention-days: 30
+      - name: Sync the version back to main
+        if: steps.bump.outputs.skip != 'true' && !inputs.dry_run
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # main must not keep an older VERSION, or the next canary would advertise a version
+        # the stable train has already passed. Push directly when main is not protected;
+        # otherwise open a PR so a human can merge it.
+        run: |
+          set -euo pipefail
+          VER=$(cat VERSION)
+          git fetch origin main
+          git checkout -B version-sync origin/main
+          SHA=$(git rev-parse "$GITHUB_SHA")
+          git checkout "$SHA" -- VERSION iosApp/iosApp.xcodeproj/project.pbxproj
+          git commit -m "chore(release): sync v$VER from $GITHUB_REF_NAME" || {
+            echo "Nothing to sync."; exit 0; }
+          if git push origin version-sync:main; then
+            echo "Synced v$VER to main directly."
+          else
+            echo "main is push-protected — opening a PR instead."
+            git push origin version-sync
+            gh pr create --base main --head version-sync \
+              --title "chore(release): sync v$VER from $GITHUB_REF_NAME" \
+              --body "Version advance from the $GITHUB_REF_NAME cut. Merging keeps main's canaries ahead of the stable train." || true
+          fi

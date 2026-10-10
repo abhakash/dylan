@@ -39,8 +39,8 @@ concurrency:
   cancel-in-progress: false # prod artifacts must never cancel each other
 
 jobs:
-  # Nothing gets built or signed until the hermetic gates are green. Tag pushes
-  # from version.yml carry `[skip ci]`, so ci.yml never runs for them — without
+  # Nothing gets built or signed until the hermetic gates are green. The release commit
+  # pushed by release.yml carries `[skip ci]`, so ci.yml never runs for that push — without
   # this job a release artifact could be produced from an unlinted, untested tree.
   gate:
     name: gate
@@ -113,7 +113,7 @@ jobs:
     name: android/prod
     needs: gate
     # See android-debug: tag push => both guards fall through to the `push`
-    # clause, so version.yml's prod Android release is unaffected.
+    # clause, so release.yml's prod Android cut is unaffected.
     if: >-
       (github.event_name == 'push' || inputs.flavor == 'all' || inputs.flavor == 'prod')
       && (github.event_name == 'push' || inputs.platform == 'all' || inputs.platform == 'android')
