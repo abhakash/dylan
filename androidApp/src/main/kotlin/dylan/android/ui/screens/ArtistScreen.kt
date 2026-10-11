@@ -7,10 +7,13 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material3.Button
@@ -78,7 +81,14 @@ fun ArtistScreen(
     val ctx = LocalContext.current
     val isOnline = rememberIsOnline(container)
     val cachedKeys = rememberCachedKeys(container)
-    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 24.dp)) {
+    // Edge-to-edge, so the hero must not start at y=0 under the status bar — that is the overlap
+    // with the clock/battery bar. In `contentPadding` rather than as a `Modifier.padding` so the hero
+    // can still slide *under* the status bar as it scrolls away; a shrinking padding would clip it.
+    val statusBarTop = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+    LazyColumn(
+        Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(top = statusBarTop, bottom = 24.dp),
+    ) {
         item {
             ArtistHero(container, artist, fallbackName, songs, st, onPlaySongs)
         }

@@ -56,6 +56,7 @@ import dylan.model.MiniEntity
 import dylan.model.Paged
 import dylan.model.Song
 import dylan.model.SongKey
+import dylan.provider.CatalogResult
 import dylan.provider.saavn.MiniKind
 import dylan.provider.saavn.kind
 import dylan.provider.saavn.navigable
@@ -301,9 +302,12 @@ private fun SearchResults(
     onPlaySongs: (List<Song>, Int) -> Unit,
 ) {
     val scope = androidx.compose.runtime.rememberCoroutineScope()
+    // Keyed on the row lists only: [mergeHits] is now a pure concatenation, so it must not
+    // recompute when `submitted` changes — a submit that leaves rows alone (tapping the already
+    // submitted query) used to reorder them for no reason.
     val hits =
-        remember(results.songs, results.albums, results.artists, submitted) {
-            mergeHits(submitted, results.songs, results.albums, results.artists)
+        remember(results.songs, results.albums, results.artists) {
+            mergeHits(results.songs, results.albums, results.artists)
         }
 
     // Keyed on the submit **epoch**, not on the query. With `submitted` alone, a repeated submit of
@@ -325,11 +329,15 @@ private fun SearchResults(
     // Driven by scrolling rather than by a button, so this is called from a scroll listener and must
     // be cheap and idempotent when re-entered. The guard is read live rather than captured: this
     // closure belongs to one composition, and a repeated submit re-arms nothing here.
+    //
+    // The epoch is captured *here*, before the requests suspend, because it is this call's identity:
+    // a submit that lands while the fetch is in flight must make the write below a no-op.
     fun loadMore() {
         if (!results.canExtend()) return
+        val epoch = results.submitEpoch
         results.loadingMore = true
         scope.launch {
-            results.extend(container, submitted)
+            results.extend(container, submitted, epoch)
             results.loadingMore = false
         }
     }
@@ -599,22 +607,37 @@ private fun hitKey(hit: Hit): String =
     }
 
 /**
- * One mixed, cross-type ranked list: songs + albums + artists share relevance bands (exact → prefix
- * → contains), so an album never hides below its songs.
+ * Songs, then albums, then artists: three separately-ranked origins, each kept in its own order.
+ *
+ * The previous shape computed a relevance band per row and sorted the whole accumulated list by
+ * `(band, arrival)` on every page. That is not the origin's ranking — it is a *fourth* ranking,
+ * invented locally — and it is unstable across pages: a row that lands on page 2 in a better band is
+ * inserted **above** rows the user is already looking at, so the list re-shuffles under the finger
+ * while scrolling. With `key = hitKey(…)` the `LazyColumn` reorders by key, which is the reported
+ * "weird ordering". It was also recomputed on every `submitted` change, so merely typing could reset
+ * the order of rows that had not changed.
+ *
+ * There is no single mixed ranking to preserve, which is the fact that makes concatenation the right
+ * rule rather than a compromise. The three sections come from three endpoints
+ * (`search.getResults`, `search.getAlbumResults`, `search.getArtistResults`), and
+ * `search.getResults` decodes to **songs only**: `mapCard` requires `moreInfo`, which song cards
+ * carry and album/artist cards do not, so an album card in that envelope is dropped as
+ * `NO_MORE_INFO` drift rather than being ranked alongside songs. The ranking that exists is
+ * therefore one per endpoint, and concatenating by type is the only rule that keeps all three intact.
+ * Within each group the rows are exactly the order the origin sent them, page 1 before page 2 — which
+ * is also the JioSaavn app's own shape, songs first with albums and artists behind.
+ *
+ * The per-row `Album` / `Artist` badges identify which group a row came from, so the type
+ * information survives without the local sort.
  */
 private fun mergeHits(
-    submitted: String,
     songs: List<Song>,
     albums: List<MiniEntity>,
     artists: List<MiniEntity>,
-): List<Hit> {
-    val all = ArrayList<Triple<Int, Int, Hit>>()
-    var order = 0
-    songs.forEach { all += Triple(dylan.search.relevanceBand(submitted, it.title), order++, Hit.SongHit(it)) }
-    albums.forEach { all += Triple(dylan.search.relevanceBand(submitted, it.title), order++, Hit.AlbumHit(it)) }
-    artists.forEach { all += Triple(dylan.search.relevanceBand(submitted, it.title), order++, Hit.ArtistHit(it)) }
-    return all.sortedWith(compareBy({ it.first }, { it.second })).map { it.third }
-}
+): List<Hit> =
+    songs.map { Hit.SongHit(it) } +
+        albums.map { Hit.AlbumHit(it) } +
+        artists.map { Hit.ArtistHit(it) }
 
 /**
  * The submitted list's rows, its running totals and its paging budgets.
@@ -629,6 +652,17 @@ private fun mergeHits(
  */
 private class ResultState {
     var sections by mutableStateOf(dylan.search.SearchSections())
+
+    /**
+     * A submit's identity, moved by [beginSubmit] and read by [extend].
+     *
+     * `fetchFirst` and `extend` both suspend on three requests and nothing orders them, so an extend
+     * that started under submit N can resolve after submit N+1's first page has already landed. It
+     * captured `sections` at entry, so without a guard it folds its own — stale — page N+1 on top of
+     * the new query's page 1 and the user sees the previous query's results after typing a new one.
+     */
+    var submitEpoch by mutableStateOf(0L)
+        private set
 
     var songs: List<Song>
         get() = sections.songs
@@ -693,8 +727,13 @@ private class ResultState {
         sections = sections.reset()
     }
 
-    /** Called synchronously by every submit path, before that path changes anything else. */
+    /**
+     * Called synchronously by every submit path, before that path changes anything else.
+     *
+     * Also moves [submitEpoch], for the reason that field gives.
+     */
     fun beginSubmit() {
+        submitEpoch += 1
         sections = sections.beginSubmit()
     }
 
@@ -716,9 +755,9 @@ private class ResultState {
         query: String,
     ) {
         coroutineScope {
-            val songsDef = async { pageOrNull { container.provider.search(query, 1) } }
-            val albumsDef = async { pageOrNull { container.provider.searchAlbums(query, 1) } }
-            val artistsDef = async { pageOrNull { container.provider.searchArtists(query, 1) } }
+            val songsDef = async { pageOrNull { container.provider.searchPage(query, 1) } }
+            val albumsDef = async { pageOrNull { container.provider.searchAlbumPage(query, 1) } }
+            val artistsDef = async { pageOrNull { container.provider.searchArtistPage(query, 1) } }
             // A first page never exhausts a section, not even an empty one: the origin may simply have
             // nothing for this query — which is what `reset()` before the fold is for, since a fresh
             // budget starts with every section un-exhausted.
@@ -727,16 +766,23 @@ private class ResultState {
     }
 
     /**
-     * Extend every section that still has something to give, then the merged list re-ranks so
-     * newcomers slot into their relevance band.
+     * Extend every section that still has something to give.
      *
-     * Each section is asked for independently, so a section that has nothing left — or that never
-     * mapped anything at all — cannot stop the other two from extending. That is the invariant F-25
-     * reported as broken, and it is now asserted in `dylan.search.SearchPagingTest`.
+     * Each section is asked for independently, so a section that has nothing left — or that failed
+     * — cannot stop the other two from extending. That is the invariant F-25 reported as broken, and
+     * it is now asserted in `dylan.search.SearchPagingTest`.
+     *
+     * The write is guarded by [epoch]. `fetchFirst` and this both suspend on three requests, and
+     * nothing orders them: if a submit's first page lands *after* a superseded extend began, that
+     * extend used to write its (old query's) page N+1 over the new query's page 1, because
+     * `foldMore` folds into whatever `current` it captured at entry. The epoch is the one value that
+     * moves on every submit, so comparing it at the write is what makes the fold land only if the
+     * submit it belongs to is still the live one.
      */
     suspend fun extend(
         container: AppContainer,
         query: String,
+        epoch: Long,
     ) {
         val current = sections
         val budgets = current.budgets
@@ -747,26 +793,47 @@ private class ResultState {
             if (budgets.songsExhausted) {
                 null
             } else {
-                pageOrNull { container.provider.search(query, nextSong) }
+                pageOrNull { container.provider.searchPage(query, nextSong) }
             }
         val albums =
             if (budgets.albumsExhausted) {
                 null
             } else {
-                pageOrNull { container.provider.searchAlbums(query, nextAlbum) }
+                pageOrNull { container.provider.searchAlbumPage(query, nextAlbum) }
             }
         val artists =
             if (budgets.artistsExhausted) {
                 null
             } else {
-                pageOrNull { container.provider.searchArtists(query, nextArtist) }
+                pageOrNull { container.provider.searchArtistPage(query, nextArtist) }
             }
-        sections = current.foldMore(songs, albums, artists)
+        val fold = current.foldMore(songs, albums, artists)
+        if (epoch != submitEpoch) return
+        sections = fold
     }
 }
 
-/** A page, or null when the origin could not answer. */
-private suspend fun <T> pageOrNull(fetch: suspend () -> Paged<T>): Paged<T>? = runCatching { fetch() }.getOrNull()
+/**
+ * A page that arrived, or null when the origin could not answer.
+ *
+ * Deliberately reads the `…Page` seam and **not** the `search` / `searchAlbums` / `searchArtists`
+ * defaults. Those are `MusicProvider` interface defaults, and `SaavnProvider` does not override them:
+ * they resolve to `searchPage(…).orDefault(Paged(emptyList(), 0, page))`, which converts an `Err` —
+ * offline, 429, bot wall, DNS, timeout — into a **successful empty page** before this function ever
+ * sees it. `foldPage` then reads `fresh.isEmpty()` as "this section is finished", so a single
+ * transient failure closes that section for the rest of the submit and `extend` never asks for it
+ * again. That is the whole of "infinite scroll stops working": the scroll listener still fires, the
+ * requests still happen, `canExtend()` just never says yes again.
+ *
+ * An error is therefore null — "nothing is known" — which is exactly the contract
+ * `SearchPaging.foldPage` already documents: "a failed request is not evidence of anything". The
+ * section stays open, the page counter does not move, and the next scroll asks again.
+ */
+private suspend fun <T> pageOrNull(fetch: suspend () -> CatalogResult<Paged<T>>): Paged<T>? =
+    when (val r = fetch()) {
+        is CatalogResult.Ok -> r.value
+        is CatalogResult.Err -> null
+    }
 
 /** Below this the origin has nothing useful to suggest and every keystroke is a wasted request. */
 private const val MIN_SUGGEST_QUERY = 2

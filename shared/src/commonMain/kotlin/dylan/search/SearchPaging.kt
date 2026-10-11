@@ -41,6 +41,24 @@ fun <T, K> foldPage(
 }
 
 /**
+ * The running total, never smaller than the one already reported.
+ *
+ * [dylan.provider.saavn.deliveredTotal] derives a section's total from the page that just landed:
+ * `(start - 1) * rawPageSize + kept + (1 if the page was full else 0)`. A short page — the last one,
+ * or one where every card turned out to be a cross-type duplicate — computes `0 + kept + 0`, which is
+ * **smaller** than the previous page reported. The footer renders that as `Albums N of M`, so the
+ * denominator drifted down as more pages arrived, and a section holding 12 visible rows read
+ * "Albums 12 of 0".
+ *
+ * The total is a property of the query, not of any one page, so the floor is the previous value:
+ * `reset()` clears it for a new submit and within one submit it only ever rises.
+ */
+private fun monotonicTotal(
+    previous: Long,
+    page: Long?,
+): Long = page?.let { maxOf(previous, it) } ?: previous
+
+/**
  * The three submit sections' paging budgets, as one value.
  *
  * These used to live in `androidApp`'s `ResultState` as nine separate `mutableStateOf` fields, which
@@ -197,11 +215,11 @@ data class SearchSections(
         val artistFold = artists?.let { foldPage(it, emptyList()) { a -> a.rowKey } }
         return copy(
             songs = songFold?.items ?: this.songs,
-            songTotal = songFold?.total ?: this.songTotal,
+            songTotal = monotonicTotal(this.songTotal, songFold?.total),
             albums = albumFold?.items ?: this.albums,
-            albumTotal = albumFold?.total ?: this.albumTotal,
+            albumTotal = monotonicTotal(this.albumTotal, albumFold?.total),
             artists = artistFold?.items ?: this.artists,
-            artistTotal = artistFold?.total ?: this.artistTotal,
+            artistTotal = monotonicTotal(this.artistTotal, artistFold?.total),
             budgets = budgets.foldFirst(songFold, albumFold, artistFold),
         )
     }
@@ -222,11 +240,11 @@ data class SearchSections(
         val artistFold = artists?.let { foldPage(it, this.artists) { a -> a.rowKey } }
         return copy(
             songs = songFold?.items ?: this.songs,
-            songTotal = songFold?.total ?: this.songTotal,
+            songTotal = monotonicTotal(this.songTotal, songFold?.total),
             albums = albumFold?.items ?: this.albums,
-            albumTotal = albumFold?.total ?: this.albumTotal,
+            albumTotal = monotonicTotal(this.albumTotal, albumFold?.total),
             artists = artistFold?.items ?: this.artists,
-            artistTotal = artistFold?.total ?: this.artistTotal,
+            artistTotal = monotonicTotal(this.artistTotal, artistFold?.total),
             budgets = budgets.foldMore(songFold, albumFold, artistFold),
         )
     }

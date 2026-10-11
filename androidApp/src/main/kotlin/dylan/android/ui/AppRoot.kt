@@ -378,7 +378,25 @@ fun AppRoot(
             PlayerBarBand(hasTrack = state.current != null)
             DylanNavigationBar(
                 selectedIndex = selectedTabIndex(backStack),
-                onSelectTab = { switchToTab(backStack, it) },
+                // A nav tap is a navigation *and* a dismissal. It used to write only the back stack,
+                // so the tab switched and the selected dot moved behind the full-screen player face
+                // while the user still looked at the same opaque sheet plus its scrim — "I tapped
+                // Library and nothing happened". Nothing anywhere wrote `sheet` from a nav tap, which
+                // is the whole of the bug: `sheet` is the only handle the custom surface has, and
+                // `NpPlayerSurface` animates toward whatever `expanded` says.
+                //
+                // Closing here settles the player back to its mini bar rather than unmounting it,
+                // which is right for this surface: the mini bar is the app's persistent player
+                // affordance, and the surface stays mounted so there is no remount flash. It also
+                // collapses the queue, since `Sheet.Queue` maps to `Closed` and not `Sheet.Np`.
+                //
+                // Fires even when the tapped tab is already selected, which used to be a true no-op:
+                // re-tapping the tab you are on is the "get me out of here" gesture, and it now
+                // closes the player too.
+                onSelectTab = {
+                    switchToTab(backStack, it)
+                    sheet = Sheet.Closed
+                },
                 // The player surface rests its collapsed bar directly on top of this, so it needs
                 // to know exactly how tall the navigation bar is — including the navigation-bar
                 // inset the component applies itself, which is not the inset on its own.

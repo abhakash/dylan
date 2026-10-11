@@ -142,9 +142,9 @@ private fun NpFace(
             minOf(maxWidth - CONTENT_H_PAD * 2, contentHeight * ART_HEIGHT_FRACTION)
                 .coerceIn(MIN_ART_SIDE, MAX_ART_SIDE)
         Box(Modifier.fillMaxSize().verticalScroll(scroll)) {
+            // Content above stays anchored under the artwork, so a large font scale or a landscape
+            // window needs no second layout.
             Column(
-                // `heightIn(min =)` is what lets the gap below be a weight: a scrolling column is
-                // measured with unbounded height, so without a floor there is no leftover to share.
                 Modifier
                     .fillMaxWidth()
                     .heightIn(min = viewport)
@@ -156,20 +156,32 @@ private fun NpFace(
                     ),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
+                // Two balanced flex spacers, not one in the middle. The single mid-stack weight
+                // pinned the artwork to the top of the sheet and the controls to the bottom, leaving
+                // the entire leftover viewport as dead air between the seek bar and the transport row
+                // — several hundred dp on an ordinary phone. Splitting it top and bottom centres the
+                // whole face in the space that is left over.
+                //
+                // This is the contract the iOS sheet already documents
+                // (iosApp/iosApp/Views/NowPlayingView.swift:46-48 — "Anchor top while it scrolls;
+                // center it in the leftover space when it fits — no dead gap below"), implemented
+                // there as a `Spacer(minLength: 0)` pair. Matching it here keeps the two platforms
+                // describing the same layout. When the content is taller than the viewport both
+                // spacers collapse to [MIN_FLEX_GAP] and the stack scrolls from the top, exactly as
+                // the iOS pair does.
+                Spacer(Modifier.weight(1f).heightIn(min = MIN_FLEX_GAP))
                 ArtworkPanel(container, song, state, artSide, downloadPct, swipeEnabled)
                 Spacer(Modifier.height(16.dp))
                 TrackHeading(song, onOpenArtist)
+                // Was missing, so the seek bar abutted the subtitle with no breathing room.
+                Spacer(Modifier.height(8.dp))
                 SeekSlot(container, song, state, durMs, downloadPct)
-                // Everything above stays under the artwork; everything below is pinned to the
-                // bottom of the surface. The weight takes whatever height is left over, so a short
-                // window — or a large font scale, where the content overflows and this collapses to
-                // [MIN_FLEX_GAP] — needs no second layout.
-                Spacer(Modifier.weight(1f).heightIn(min = MIN_FLEX_GAP))
                 TransportRow(container, state, onEnsureService)
                 AudioRouteChip(state)
                 Spacer(Modifier.height(8.dp))
                 BottomRow(container, song, state, bitsLabel, onQueue)
                 Spacer(Modifier.height(8.dp))
+                Spacer(Modifier.weight(1f).heightIn(min = MIN_FLEX_GAP))
             }
         }
     }

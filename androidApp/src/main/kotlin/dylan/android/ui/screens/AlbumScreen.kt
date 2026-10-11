@@ -96,8 +96,14 @@ fun AlbumScreen(
     val listState = rememberLazyListState()
     val pinnedReveal = rememberHeroReveal(listState)
     val pinnedVisible by remember { derivedStateOf { pinnedReveal.value > 0f } }
+    // The screen is edge-to-edge, so the hero must not start at y=0 under the status bar — that is
+    // the overlap with the clock/battery bar. In the LazyColumn's `contentPadding` rather than as a
+    // `Modifier.padding` on purpose: a shrinking padding would clip the hero as it scrolls up,
+    // whereas padding lets it slide *under* the status bar and under the [PinnedAlbumBar] that
+    // replaces it, which is what that bar's own status-bar inset already assumes.
+    val statusBarTop = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
     Box(Modifier.fillMaxSize()) {
-        LazyColumn(state = listState, contentPadding = PaddingValues(bottom = 24.dp)) {
+        LazyColumn(state = listState, contentPadding = PaddingValues(top = statusBarTop, bottom = 24.dp)) {
             item {
                 AlbumHero(container, album, songs, st, onPlaySongs)
             }
