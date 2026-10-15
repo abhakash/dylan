@@ -136,6 +136,7 @@ internal fun NpPlayerSurface(
     onOpenQueue: () -> Unit,
     onCloseQueue: () -> Unit,
     onOpenArtist: (String, String) -> Unit,
+    onOpenAlbum: (String) -> Unit,
     onEnsureService: () -> Unit,
 ) {
     val density = LocalDensity.current
@@ -176,6 +177,7 @@ internal fun NpPlayerSurface(
                 onOpenQueue = onOpenQueue,
                 onCloseQueue = onCloseQueue,
                 onOpenArtist = onOpenArtist,
+                onOpenAlbum = onOpenAlbum,
                 onEnsureService = onEnsureService,
             )
         }
@@ -201,6 +203,7 @@ private fun NpSurface(
     onOpenQueue: () -> Unit,
     onCloseQueue: () -> Unit,
     onOpenArtist: (String, String) -> Unit,
+    onOpenAlbum: (String) -> Unit,
     onEnsureService: () -> Unit,
 ) {
     val t = LocalDylanTokens.current
@@ -300,6 +303,7 @@ private fun NpSurface(
                     container,
                     onQueue = onOpenQueue,
                     onOpenArtist = onOpenArtist,
+                    onOpenAlbum = onOpenAlbum,
                     onEnsureService = onEnsureService,
                     // The face is laid out behind the collapsed bar even while it is shut, so the
                     // artwork's swipe-to-skip is only live once the player is actually open.

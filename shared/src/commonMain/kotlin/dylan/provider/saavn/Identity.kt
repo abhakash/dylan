@@ -284,12 +284,18 @@ val MiniEntity.rowKey: String
  *
  * They used to be required together (`if (!name.isNullOrBlank() && !token.isNullOrBlank()) …`),
  * so a card whose `artistMap` entry carries no `perma_url` lost the artist *name* too and rendered
- * with a blank artist line and a disabled "go to artist". The numeric `id` in the same object is a
- * usable fallback identity, which is why it is read here.
+ * with a blank artist line and a disabled "go to artist". The numeric `id` in the same object is
+ * *not* a usable fallback identity: there is no numeric-artist route on this API, so
+ * [dylan.provider.saavn.artistRoute] refuses it outright and the artist screen renders an error.
+ * Minting one produced a token that looked valid, so the Now Playing face, the search list and the
+ * home screen all enabled "go to artist" — and every tap landed on a dead screen. This is the one
+ * place a *song* can produce an artist token, which is why it is the one place the invariant
+ * [dylan.provider.saavn.mapMini] already upholds had to be restored. See
+ * `ArtistRoute.UnsupportedNumericId`, which names the three endpoints that were tried live.
  */
 internal data class PrimaryArtist(
     val name: String?,
-    /** perma token when present, else the numeric artist id — both are valid `artist(id)` inputs. */
+    /** The perma token only. Never a numeric id — see the type's KDoc. */
     val token: String?,
 )
 
@@ -299,9 +305,7 @@ internal fun primaryArtist(map: JsonElement?): PrimaryArtist? {
             ?.firstOrNull() as? JsonObject
             ?: return null
     val name = (first["name"] as? JsonPrimitive)?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() }
-    val token =
-        permaArtistToken((first["perma_url"] as? JsonPrimitive)?.contentOrNull)
-            ?: (first["id"] as? JsonPrimitive)?.contentOrNull?.trim()?.takeIf { it.isNotBlank() }
+    val token = permaArtistToken((first["perma_url"] as? JsonPrimitive)?.contentOrNull)
     return if (name == null && token == null) null else PrimaryArtist(name, token)
 }
 

@@ -73,6 +73,7 @@ fun NowPlayingSheet(
     container: AppContainer,
     onQueue: () -> Unit,
     onOpenArtist: (String, String) -> Unit = { _, _ -> },
+    onOpenAlbum: (String) -> Unit = {},
     onEnsureService: () -> Unit = {},
     swipeEnabled: Boolean = true,
 ) {
@@ -106,6 +107,7 @@ fun NowPlayingSheet(
         swipeEnabled = swipeEnabled,
         onQueue = onQueue,
         onOpenArtist = onOpenArtist,
+        onOpenAlbum = onOpenAlbum,
         onEnsureService = onEnsureService,
     )
 }
@@ -127,6 +129,7 @@ private fun NpFace(
     swipeEnabled: Boolean,
     onQueue: () -> Unit,
     onOpenArtist: (String, String) -> Unit,
+    onOpenAlbum: (String) -> Unit,
     onEnsureService: () -> Unit,
 ) {
     val durMs = (song.durationS * MS_PER_SECOND).coerceAtLeast(1)
@@ -172,7 +175,7 @@ private fun NpFace(
                 Spacer(Modifier.weight(1f).heightIn(min = MIN_FLEX_GAP))
                 ArtworkPanel(container, song, state, artSide, downloadPct, swipeEnabled)
                 Spacer(Modifier.height(16.dp))
-                TrackHeading(song, onOpenArtist)
+                TrackHeading(song, onOpenArtist, onOpenAlbum)
                 // Was missing, so the seek bar abutted the subtitle with no breathing room.
                 Spacer(Modifier.height(8.dp))
                 SeekSlot(container, song, state, durMs, downloadPct)
@@ -326,11 +329,25 @@ private suspend fun AwaitPointerEventScope.awaitSkipDrag(
     }
 }
 
-/** Title and subtitle. The subtitle line is also the way to the track's artist. */
+/**
+ * Title, artist, album — each link named for what it opens.
+ *
+ * This is Spotify's Now Playing shape: the artist name sits directly under the title and is a
+ * single tap to the artist page. The album is added here as its own line because the JioSaavn
+ * origin supports it for albums and *not* for artists: `albumRequest` resolves a numeric
+ * `album_id` and a perma token alike, while `artistRoute` refuses a numeric id outright because no
+ * such route exists. So the album link always works, and the artist link is only offered when a
+ * perma token was actually parsed.
+ *
+ * The single blended line this replaces showed `subtitle` — falling back to the album name when
+ * the subtitle was blank — and bound it to the *artist*, so the text frequently named the album
+ * while the tap went to the artist. Two lines, each carrying its own destination.
+ */
 @Composable
 private fun TrackHeading(
     song: dylan.model.Song,
     onOpenArtist: (String, String) -> Unit,
+    onOpenAlbum: (String) -> Unit,
 ) {
     val t = LocalDylanTokens.current
     Text(
@@ -341,20 +358,35 @@ private fun TrackHeading(
         overflow = TextOverflow.Ellipsis,
         modifier = Modifier.basicMarquee(),
     )
-    Text(
-        (song.subtitle.ifBlank { song.albumName.orEmpty() }).uppercase(),
-        style = MaterialTheme.typography.bodyLarge,
-        color = t.textSecondary,
-        maxLines = 1,
-        modifier =
-            when (val artistToken = song.artistToken) {
-                null -> Modifier
-                else -> Modifier.clickable { onOpenArtist(song.artistName ?: song.subtitle, artistToken) }
-            },
-    )
-    // Jump to the album this track belongs to (D8): provider resolves numeric
-    // album_id and perma tokens alike, so Song.albumId works directly.
-    // (Album jump removed: the subtitle line already carries the album info.)
+    // The artist line is omitted entirely when there is no perma token, rather than rendered
+    // un-clickable. A link that resolves to an error screen is worse than no link, which is what
+    // `primaryArtist` now guarantees by refusing to mint a numeric-id token.
+    val artistToken = song.artistToken
+    val artistLabel =
+        song.artistName?.takeIf { it.isNotBlank() }
+            ?: song.subtitle.takeIf { it.isNotBlank() }
+    if (artistToken != null && artistLabel != null) {
+        Text(
+            artistLabel.uppercase(),
+            style = MaterialTheme.typography.bodyLarge,
+            color = t.textSecondary,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.clickable { onOpenArtist(artistLabel, artistToken) },
+        )
+    }
+    val albumId = song.albumId
+    val albumLabel = song.albumName?.takeIf { it.isNotBlank() }
+    if (albumId != null && albumLabel != null) {
+        Text(
+            albumLabel.uppercase(),
+            style = MaterialTheme.typography.bodyLarge,
+            color = t.textSecondary,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.clickable { onOpenAlbum(albumId) },
+        )
+    }
 }
 
 /**

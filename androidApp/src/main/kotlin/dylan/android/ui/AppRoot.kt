@@ -286,6 +286,7 @@ private fun AppOverlays(
     navBarHeightPx: Float,
     onSheet: (Sheet) -> Unit,
     onOpenArtist: (String, String) -> Unit,
+    onOpenAlbum: (String) -> Unit,
     onEnsureService: () -> Unit,
 ) {
     if (hasTrack && navBarHeightPx > 0f) {
@@ -299,6 +300,7 @@ private fun AppOverlays(
             onOpenQueue = { onSheet(Sheet.Queue) },
             onCloseQueue = { onSheet(Sheet.Np) },
             onOpenArtist = onOpenArtist,
+            onOpenAlbum = onOpenAlbum,
             onEnsureService = onEnsureService,
         )
     }
@@ -411,7 +413,17 @@ fun AppRoot(
             navBarHeightPx = navBarHeightPx,
             onSheet = { sheet = it },
             onOpenArtist = { name, token ->
-                if (token.isNotBlank()) backStack.add(Screen.Artist(name, token))
+                if (token.isNotBlank()) {
+                    // Collapse the player as well as navigate: without it the full-screen face
+                    // stays over the artist screen, which is the same "I tapped and nothing
+                    // happened" the nav bar had.
+                    sheet = Sheet.Closed
+                    backStack.add(Screen.Artist(name, token))
+                }
+            },
+            onOpenAlbum = {
+                sheet = Sheet.Closed
+                backStack.add(Screen.Album(it))
             },
             onEnsureService = onFirstPlay,
         )
